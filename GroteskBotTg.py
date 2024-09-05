@@ -15,6 +15,8 @@ from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
 from config import TELEGRAM_BOT_TOKEN, EXCHANGERATE_API_KEY, BASE_URLS
+from colorama import Fore, Back, Style
+
 
 class CompactGroupedMessageHandler(logging.Handler):
     def __init__(self, timeout=5):
@@ -43,26 +45,30 @@ class CompactGroupedMessageHandler(logging.Handler):
 
         self.message_counts[content_msg] = {'count': 0, 'last_time': current_time}
 
+class ColoredFormatter(logging.Formatter):
+    COLORS = {
+        'DEBUG': Fore.CYAN,
+        'INFO': Fore.WHITE,
+        'WARNING': Fore.YELLOW,
+        'ERROR': Fore.RED,
+        'CRITICAL': Fore.RED + Back.WHITE,
+        'STAT': Fore.MAGENTA,
+        'GOOD': Fore.GREEN,
+        'LIGHTBLUE_INFO': Fore.LIGHTBLUE_EX
+    }
+
+    def format(self, record):
+        color = self.COLORS.get(record.levelname, Fore.WHITE)
+        record.msg = f"{color}{record.msg}{Style.RESET_ALL}"
+        return super().format(record)
+
 def setup_logger():
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    formatter = colorlog.ColoredFormatter(
-        '%(log_color)s%(asctime)s - %(message)s',
-        log_colors={
-            'DEBUG': 'cyan',
-            'INFO': 'white',
-            'WARNING': 'yellow',
-            'ERROR': 'red',
-            'CRITICAL': 'red,bg_white',
-            'STAT': 'magenta',
-            'GOOD': 'green',
-            'LIGHTBLUE_INFO': 'light_blue',
-        },
-        datefmt='%d.%m %H:%M:%S'
-    )
+    formatter = ColoredFormatter('%(asctime)s - %(message)s', datefmt='%d.%m %H:%M:%S')
 
-    handler = CompactGroupedMessageHandler()
+    handler = logging.StreamHandler()
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
@@ -90,15 +96,17 @@ logger = setup_logger()
 class SpecialLogger:
     @staticmethod
     def stat(message):
-        logger.log(35, f"\033[95m{message}\033[0m")  # 35 is a custom log level
+        logger.log(35, message)
 
     @staticmethod
     def good(message):
-        logger.log(25, f"\033[92m{message}\033[0m")  # 25 is another custom log level between INFO and WARNING
+        logger.log(25, message)
         
     @staticmethod
     def info(message):
-        logger.log(22, f"\033[94m{message}\033[0m") # 22 is a new custom log level for light blue
+        logger.log(22, message)
+
+special_logger = SpecialLogger()
 
 processed_shoes = set()
 TelegramMessage = namedtuple('TelegramMessage', ['chat_id', 'message', 'image_url'])
@@ -108,8 +116,6 @@ logging.addLevelName(35, "STAT")
 logging.addLevelName(25, "GOOD")
 logging.addLevelName(22, "LIGHTBLUE_INFO")
 
-
-special_logger = SpecialLogger()
 
 LIVE_MODE = False  # Set to True to enable live mode by default
 ASK_FOR_LIVE_MODE = False  # Set to False to skip asking for live mode at startup
