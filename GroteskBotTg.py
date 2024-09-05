@@ -2,7 +2,8 @@ import json
 import time
 import asyncio
 import logging
-import colorlog
+import colorama
+import shutil
 import traceback
 import urllib.parse
 import re
@@ -17,6 +18,10 @@ from telegram.error import RetryAfter, TimedOut
 from config import TELEGRAM_BOT_TOKEN, EXCHANGERATE_API_KEY, BASE_URLS
 from colorama import Fore, Back, Style
 
+
+colorama.init(autoreset=True)
+
+BOT_VERSION = "3.5.1"
 
 class CompactGroupedMessageHandler(logging.Handler):
     def __init__(self, timeout=5):
@@ -58,15 +63,16 @@ class ColoredFormatter(logging.Formatter):
     }
 
     def format(self, record):
-        color = self.COLORS.get(record.levelname, Fore.WHITE)
-        record.msg = f"{color}{record.msg}{Style.RESET_ALL}"
-        return super().format(record)
+        log_color = self.COLORS.get(record.levelname, Fore.WHITE)
+        timestamp = Fore.LIGHTBLACK_EX + self.formatTime(record, self.datefmt) + Style.RESET_ALL
+        message = log_color + record.getMessage() + Style.RESET_ALL
+        return f"{timestamp}     {message}"
 
 def setup_logger():
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    formatter = ColoredFormatter('%(asctime)s - %(message)s', datefmt='%d.%m %H:%M:%S')
+    formatter = ColoredFormatter('%(asctime)s', datefmt='%d.%m %H:%M:%S')
 
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
@@ -820,14 +826,29 @@ def print_link_statistics():
                 special_logger.stat(f"  Failed links for other failures (showing up to 10):")
                 for link in stats['links'][:10]:
                     special_logger.stat(f"    {link}")
+                    
+def center_text(text, width, fill_char=' '):
+    padding = (width - len(text)) // 2
+    return fill_char * padding + text + fill_char * (width - padding - len(text))
 
 async def main():
     global processed_shoes, LIVE_MODE
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
     asyncio.create_task(message_queue.process_queue())
     
-    special_logger.good("Grotesk bot v.3.5.1")
-
+    # Get terminal width
+    terminal_width = shutil.get_terminal_size().columns
+    
+    # Print decorative line
+    print(Fore.GREEN + '-' * terminal_width + Style.RESET_ALL)
+    
+    # Print centered bot version with no timestamp
+    bot_version = f"Grotesk bot v.{BOT_VERSION}"
+    centered_version = center_text(bot_version, terminal_width)
+    print(Fore.CYAN + Style.BRIGHT + centered_version + Style.RESET_ALL)
+    
+    # Print decorative line again
+    print(Fore.GREEN + '-' * terminal_width + Style.RESET_ALL)
 
     if ASK_FOR_LIVE_MODE:
         live_mode_input = input("Enter 'live' to enable live mode, or press Enter to continue in headless mode: ").strip().lower()
@@ -835,8 +856,7 @@ async def main():
 
     if LIVE_MODE:
         special_logger.good("Live mode enabled")
-    else:
-        special_logger.good("Running in headless mode.")
+
 
     while True:
         try:
@@ -868,8 +888,8 @@ async def main():
         except Exception as e:
             logger.error(f"An unexpected error occurred in main loop: {e}")
             logger.error(traceback.format_exc())
-            logger.info("Waiting for 60 seconds before retrying")
-            await asyncio.sleep(60)
+            logger.info("Waiting for 60 minutes before retrying")
+            await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
