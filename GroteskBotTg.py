@@ -825,6 +825,9 @@ async def main():
     global processed_shoes, LIVE_MODE
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
     asyncio.create_task(message_queue.process_queue())
+    
+    special_logger.good("Grotesk bot v.3.5.1")
+
 
     if ASK_FOR_LIVE_MODE:
         live_mode_input = input("Enter 'live' to enable live mode, or press Enter to continue in headless mode: ").strip().lower()
