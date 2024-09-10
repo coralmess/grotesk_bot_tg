@@ -21,7 +21,7 @@ from colorama import Fore, Back, Style
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.5.1"
+BOT_VERSION = "3.5.2"
 
 class CompactGroupedMessageHandler(logging.Handler):
     def __init__(self, timeout=5):
