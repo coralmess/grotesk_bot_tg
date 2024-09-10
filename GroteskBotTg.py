@@ -351,7 +351,6 @@ def extract_shoe_data(card, country):
         full_name = ' '.join([elem.text.strip() for elem in name_elements if elem and elem.text])
         
         if 'Giuseppe Zanotti' in full_name:
-            logger.warning("Giuseppe Zanotti blyat")
             return None
         
         # Price extraction
@@ -442,8 +441,6 @@ async def scrape_page(url, country):
         data = extract_shoe_data(card, country)
         if data:
             shoes.append(data)
-        else:
-            logger.info(f"Failed or skipped item in {country}")
     return shoes
 
 async def scrape_all_pages(base_url, country):
