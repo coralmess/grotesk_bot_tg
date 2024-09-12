@@ -21,7 +21,7 @@ from colorama import Fore, Back, Style
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.5.2"
+BOT_VERSION = "3.5.3"
 
 class CompactGroupedMessageHandler(logging.Handler):
     def __init__(self, timeout=5):
@@ -496,7 +496,6 @@ async def send_telegram_message(bot_token, chat_id, message, image_url=None, max
             else:
                 result = await bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
             
-            logger.info(f"Message sent successfully on attempt {attempt + 1}")
             return True
 
         except RetryAfter as e:
@@ -606,7 +605,7 @@ def convert_to_uah(price, country, exchange_rates, name):
         
         uah_amount = amount / rate
         
-        return round(uah_amount, 2)
+        return round(uah_amount / 10) * 10
     
     except ValueError as e:
         logger.error(f"Error converting price '{price}' for '{name}' country '{country}': {e}")
@@ -617,7 +616,7 @@ def convert_to_uah(price, country, exchange_rates, name):
 
 def get_sale_emoji(sale_percentage, uah_sale):
     if sale_percentage >= 75 :
-        return "💊💊💊 " 
+        return "🚀🚀🚀" 
     if uah_sale < 2600: 
         return "🐚🐚🐚"
 
@@ -656,8 +655,9 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         processed_shoes.add(key)  # Mark as processed
     elif old_data[key]['sale_price'] != shoe['sale_price'] or not old_data[key].get('active', True):
         old_sale_price = old_data[key]['sale_price']
-        old_sale_percentage = calculate_sale_percentage(shoe['original_price'], old_sale_price, country)
-        old_uah_sale = convert_to_uah(old_sale_price, country, exchange_rates, shoe['name'])
+        old_sale_country = old_data[key]['country']
+        old_sale_percentage = calculate_sale_percentage(shoe['original_price'], old_sale_price, old_sale_country)
+        old_uah_sale = old_data[key]['uah_price']
         
         old_price = convert_to_uah(old_sale_price, country, exchange_rates, shoe['name'])
         new_price = convert_to_uah(shoe['sale_price'], country, exchange_rates, shoe['name'])
@@ -869,7 +869,7 @@ async def main():
                 all_shoes.extend(result)
             unfiltered_len = len(all_shoes)
             all_shoes = filter_duplicates(all_shoes, exchange_rates)
-            special_logger.stat(f"Were removed {unfiltered_len - len(all_shoes)} duplicates")
+            special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
             
             await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
 
