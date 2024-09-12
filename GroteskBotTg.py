@@ -21,7 +21,7 @@ from colorama import Fore, Back, Style
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.5.3"
+BOT_VERSION = "3.5.4"
 
 class CompactGroupedMessageHandler(logging.Handler):
     def __init__(self, timeout=5):
@@ -116,6 +116,7 @@ special_logger = SpecialLogger()
 
 processed_shoes = set()
 TelegramMessage = namedtuple('TelegramMessage', ['chat_id', 'message', 'image_url'])
+ConversionResult = namedtuple('ConversionResult', ['uah_amount', 'exchange_rate', 'currency_symbol'])
 
 # Add these custom log levels
 logging.addLevelName(35, "STAT")
@@ -547,7 +548,8 @@ def filter_duplicates(shoes, exchange_rates):
             group.sort(key=lambda x: priority.index(x['country']))
             
             for shoe in group:
-                shoe['uah_price'] = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name'])
+                convertion_data = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name'])
+                shoe['uah_price'] = convertion_data.uah_amount
 
             base_shoe = group[0]
             filtered_shoes.append(base_shoe)
@@ -581,38 +583,45 @@ def update_exchange_rates():
         logger.error(f"Error updating exchange rates: {e}")
         return {'EUR': 1, 'USD': 1, 'GBP': 1}
 
+
 def convert_to_uah(price, country, exchange_rates, name):
     try:
         # Detect currency symbol and remove it
         if '€' in price:
             currency = 'EUR'
+            currency_symbol = '€'
             amount = float(price.replace('€', '').replace(',', '.').strip())
         elif '£' in price:
             currency = 'GBP'
+            currency_symbol = '£'
             amount = float(price.replace('£', '').replace(',', '').strip())
         elif '$' in price:
             currency = 'USD'
+            currency_symbol = '$'
             amount = float(price.replace('$', '').replace(',', '').strip())
         else:
             logger.error(f"Unrecognized currency symbol in price '{price}' for '{name}' country '{country}'")
-            return 0
+            return ConversionResult(0, 0, '')
 
         if currency in exchange_rates:
             rate = exchange_rates[currency]
         else:
             logger.error(f"Exchange rate not found for currency '{currency}' (country: {country})")
-            return 0
+            return ConversionResult(0, 0, '')
         
         uah_amount = amount / rate
+        rounded_uah_amount = round(uah_amount / 10) * 10
+        exchange_rate = round(1 / rate, 2)
         
-        return round(uah_amount / 10) * 10
+        return ConversionResult(rounded_uah_amount, exchange_rate, currency_symbol)
     
     except ValueError as e:
         logger.error(f"Error converting price '{price}' for '{name}' country '{country}': {e}")
-        return 0
+        return ConversionResult(0, 0, '')
     except KeyError as e:
         logger.error(f"Missing exchange rate for currency '{currency}': {e}")
-        return 0
+        return ConversionResult(0, 0, '')
+    
 
 def get_sale_emoji(sale_percentage, uah_sale):
     if sale_percentage >= 75 :
@@ -634,8 +643,10 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         return
     
     sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
-    uah_original = convert_to_uah(shoe['original_price'], country, exchange_rates, shoe['name'])
-    uah_sale = convert_to_uah(shoe['sale_price'], country, exchange_rates, shoe['name'])
+    original_exchange_data = convert_to_uah(shoe['sale_price'], country, exchange_rates, shoe['name'])
+    kurs = original_exchange_data.exchange_rate
+    uah_sale = original_exchange_data.uah_amount
+    kurs_symbol = original_exchange_data.currency_symbol
 
     if key not in old_data:
         # New item
@@ -644,10 +655,10 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         shoe['active'] = True
         sale_emoji = get_sale_emoji(sale_percentage, uah_sale)
         message = (f"{sale_emoji}  New item  {sale_emoji}\n{shoe['name']}\n\n"
-                   f"💀 Original price: {shoe['original_price']} ({uah_original} UAH)\n"
-                   f"💰 Sale price: {shoe['sale_price']} ({uah_sale} UAH)\n"
-                   f"🤑 Sale percentage: {sale_percentage}%\n"
-                   f"🔗 Store: <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
+                   f"💀 Prices : <s>{shoe['original_price']}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
+                   f"🤑 Grivniki : {uah_sale} UAH\n"
+                   f"🧊 Kurs : {kurs_symbol} {kurs} \n"
+                   f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
                    f"🌍 Country : {country}")
         await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'])
         old_data[key] = shoe
@@ -659,9 +670,9 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         old_sale_percentage = calculate_sale_percentage(shoe['original_price'], old_sale_price, old_sale_country)
         old_uah_sale = old_data[key]['uah_price']
         
-        old_price = convert_to_uah(old_sale_price, country, exchange_rates, shoe['name'])
-        new_price = convert_to_uah(shoe['sale_price'], country, exchange_rates, shoe['name'])
-        price_difference = old_price - new_price
+        old_price_data = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name'])
+        old_price = old_price_data.uah_amount
+        price_difference = old_price - uah_sale
         
         lowest_price_uah = old_data[key].get('lowest_price_uah', old_uah_sale)
         if uah_sale < lowest_price_uah:
@@ -675,12 +686,13 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         if price_difference >= 400 or (not old_data[key].get('active', True) and price_difference >= 400):
             status = "Update" if old_data[key].get('active', True) else "Back in stock"
             message = (f"💎💎💎 {status} 💎💎💎 \n{shoe['name']}:\n\n"
-                       f"💀 Original price: {shoe['original_price']} ({uah_original} UAH)\n"
-                       f"👨‍🦳 Old price: {old_sale_price} ({old_uah_sale} UAH) (Sale: {old_sale_percentage}%)\n"
-                       f"👶 New price: {shoe['sale_price']} ({uah_sale} UAH) (Sale: {sale_percentage}%)\n"
-                       f"📉 Lowest price: {shoe['lowest_price']} ({shoe['lowest_price_uah']} UAH)\n"
-                       f"🔗 Store: <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
-                       f"🌍 Country: {country}")
+                       f"💀 Prices : <s>{shoe['original_price']}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i> \n"
+                       f"🤑 Grivniki : {uah_sale} UAH\n"
+                       f"👨‍🦳 Old price : {old_sale_price} ({old_uah_sale} UAH) (Sale: {old_sale_percentage}%)\n"
+                       f"📉 Lowest price : {shoe['lowest_price']} ({shoe['lowest_price_uah']} UAH)\n"
+                       f"🧊 Kurs : {kurs_symbol} {kurs} \n"
+                       f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
+                       f"🌍 Country : {country}")
             await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'])
             processed_shoes.add(key)  # Mark as processed
 
