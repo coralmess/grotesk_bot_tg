@@ -656,7 +656,7 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         processed_shoes.add(key)  # Mark as processed
     elif old_data[key]['sale_price'] != shoe['sale_price'] or not old_data[key].get('active', True):
         old_sale_price = old_data[key]['sale_price']
-        old_sale_percentage = calculate_sale_percentage(old_data[key]['original_price'], old_sale_price, country)
+        old_sale_percentage = calculate_sale_percentage(shoe['original_price'], old_sale_price, country)
         old_uah_sale = convert_to_uah(old_sale_price, country, exchange_rates, shoe['name'])
         
         old_price = convert_to_uah(old_sale_price, country, exchange_rates, shoe['name'])
