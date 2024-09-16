@@ -21,7 +21,7 @@ from colorama import Fore, Back, Style
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.5.4"
+BOT_VERSION = "3.6.1"
 
 class CompactGroupedMessageHandler(logging.Handler):
     def __init__(self, timeout=5):
@@ -652,11 +652,12 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         # New item
         shoe['lowest_price'] = shoe['sale_price']
         shoe['lowest_price_uah'] = uah_sale
+        shoe['uah_price'] = uah_sale
         shoe['active'] = True
         sale_emoji = get_sale_emoji(sale_percentage, uah_sale)
         message = (f"{sale_emoji}  New item  {sale_emoji}\n{shoe['name']}\n\n"
                    f"💀 Prices : <s>{shoe['original_price']}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
-                   f"🤑 Grivniki : {uah_sale} UAH\n"
+                   f"🤑 Grivniki : <b>{uah_sale} UAH </b>\n"
                    f"🧊 Kurs : {kurs_symbol} {kurs} \n"
                    f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
                    f"🌍 Country : {country}")
@@ -668,8 +669,12 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         old_sale_price = old_data[key]['sale_price']
         old_sale_country = old_data[key]['country']
         old_sale_percentage = calculate_sale_percentage(shoe['original_price'], old_sale_price, old_sale_country)
-        old_uah_sale = old_data[key]['uah_price']
-        
+        if 'uah_price' not in old_data[key]:
+            old_price_data = convert_to_uah(old_sale_price, old_sale_country, exchange_rates, shoe['name'])
+            old_uah_sale = old_price_data.uah_amount
+        else:
+            old_uah_sale = old_data[key]['uah_price']
+        shoe['uah_price'] = uah_sale        
         old_price_data = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name'])
         old_price = old_price_data.uah_amount
         price_difference = old_price - uah_sale
@@ -686,9 +691,8 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         if price_difference >= 400 or (not old_data[key].get('active', True) and price_difference >= 400):
             status = "Update" if old_data[key].get('active', True) else "Back in stock"
             message = (f"💎💎💎 {status} 💎💎💎 \n{shoe['name']}:\n\n"
-                       f"💀 Prices : <s>{shoe['original_price']}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i> \n"
+                       f"💀 Prices : <s>{shoe['original_price']}</s>  <s>{old_sale_price}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i> \n"
                        f"🤑 Grivniki : {uah_sale} UAH\n"
-                       f"👨‍🦳 Old price : {old_sale_price} ({old_uah_sale} UAH) (Sale: {old_sale_percentage}%)\n"
                        f"📉 Lowest price : {shoe['lowest_price']} ({shoe['lowest_price_uah']} UAH)\n"
                        f"🧊 Kurs : {kurs_symbol} {kurs} \n"
                        f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
