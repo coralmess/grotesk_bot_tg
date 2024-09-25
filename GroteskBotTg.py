@@ -3,10 +3,14 @@ import time
 import asyncio
 import logging
 import colorama
+import subprocess
 import shutil
 import traceback
 import urllib.parse
 import re
+import html
+from telegram.ext import CommandHandler, Application
+from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple
 from datetime import datetime
 from selenium import webdriver
@@ -21,7 +25,9 @@ from colorama import Fore, Back, Style
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.6.1"
+BOT_VERSION = "3.6.2"
+last_git_pull_time = None
+
 
 class CompactGroupedMessageHandler(logging.Handler):
     def __init__(self, timeout=5):
@@ -67,19 +73,7 @@ class ColoredFormatter(logging.Formatter):
         timestamp = Fore.LIGHTBLACK_EX + self.formatTime(record, self.datefmt) + Style.RESET_ALL
         message = log_color + record.getMessage() + Style.RESET_ALL
         return f"{timestamp}     {message}"
-
-def setup_logger():
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-
-    formatter = ColoredFormatter('%(asctime)s', datefmt='%d.%m %H:%M:%S')
-
-    handler = logging.StreamHandler()
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
-
-    return logger
-
+    
 class TelegramMessageQueue:
     def __init__(self, bot_token):
         self.queue = asyncio.Queue()
@@ -96,6 +90,20 @@ class TelegramMessageQueue:
                 # If sending fails, put the message back in the queue
                 await self.queue.put(message)
             await asyncio.sleep(1)  # Delay to prevent hitting rate limi
+
+def setup_logger():
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    formatter = ColoredFormatter('%(asctime)s', datefmt='%d.%m %H:%M:%S')
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    return logger
+
+
 
 logger = setup_logger()
 
@@ -137,11 +145,72 @@ COUNTRIES = ['IT', 'PL', 'US', 'GB']
 max_wait_times = {'url_changes': 0, 'final_url_changes': 0}
 store_statistics = defaultdict(lambda: {'success': 0, 'total': 0})
 link_statistics = {
-    'tradedoubler_linksynergy_prf': {'success': 0, 'fail': 0, 'fail_links': []},
     'lyst_track_lead': {'success': 0, 'fail': 0, 'fail_links': []},
     'click_here': {'success': 0, 'fail': 0, 'fail_links': []},
     'other_failures': {'count': 0, 'links': []}
 }
+
+def get_git_info():
+    global last_git_pull_time
+    if last_git_pull_time is None:
+        try:
+            git_log = subprocess.check_output(['git', 'log', '-1', '--format=%cd'], universal_newlines=True).strip()
+            last_git_pull_time = datetime.strptime(git_log, '%a %b %d %H:%M:%S %Y %z')
+        except subprocess.CalledProcessError:
+            last_git_pull_time = "Unknown"
+    return last_git_pull_time
+
+async def ver_command(update, context):
+    git_pull_time = get_git_info()
+    response = f"Bot version: {BOT_VERSION}\nLast git pull: {git_pull_time}"
+    await update.message.reply_text(response)
+
+def clean_link_for_display(link):
+    # Remove 'http://', 'https://', and 'www.' from the beginning of the link
+    cleaned_link = re.sub(r'^(https?://)?(www\.)?', '', link)
+    # Truncate to 22 characters and add '...' if longer
+    return (cleaned_link[:22] + '...') if len(cleaned_link) > 25 else cleaned_link
+
+async def linkstat_command(update, context):
+    stats_message = "Link Processing Statistics:\n\n"
+    
+    for step, stats in link_statistics.items():
+        if step != 'other_failures':
+            success_rate = (stats['success'] / (stats['success'] + stats['fail'])) * 100 if (stats['success'] + stats['fail']) > 0 else 0
+            stats_message += f"{step}:\n"
+            stats_message += f"  Success rate: {success_rate:.2f}%\n"
+            stats_message += f"  Successful: {stats['success']}\n"
+            stats_message += f"  Failed: {stats['fail']}\n"
+            if stats['fail'] > 0:
+                stats_message += "  Failed links (up to 5):\n"
+                for link in stats['fail_links'][:5]:
+                    display_link = clean_link_for_display(link)
+                    stats_message += f"    <a href='{html.escape(link)}'>{html.escape(display_link)}</a>\n"
+        else:
+            stats_message += f"Other failures: {stats['count']}\n"
+            if stats['count'] > 0:
+                stats_message += "  Failed links (up to 5):\n"
+                for link in stats['links'][:5]:
+                    display_link = clean_link_for_display(link)
+                    stats_message += f"    <a href='{html.escape(link)}'>{html.escape(display_link)}</a>\n"
+        stats_message += "\n"
+    
+    # If the message is too long, split it into multiple messages
+    max_message_length = 4096  # Telegram's max message length
+    messages = []
+    while len(stats_message) > 0:
+        if len(stats_message) <= max_message_length:
+            messages.append(stats_message)
+            break
+        else:
+            split_index = stats_message.rfind('\n', 0, max_message_length)
+            if split_index == -1:
+                split_index = max_message_length
+            messages.append(stats_message[:split_index])
+            stats_message = stats_message[split_index:].lstrip()
+
+    for message in messages:
+        await update.message.reply_text(message, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 def get_driver():
@@ -314,7 +383,7 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
                         embedded_url = extract_embedded_url(current_url)
                         if embedded_url != current_url:
                             current_url = embedded_url
-                            link_statistics['tradedoubler_linksynergy_prf']['success'] += 1
+                            link_statistics['lyst_track_lead']['success'] += 1
                 
                 final_url = current_url
                 
@@ -668,7 +737,6 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
     elif old_data[key]['sale_price'] != shoe['sale_price'] or not old_data[key].get('active', True):
         old_sale_price = old_data[key]['sale_price']
         old_sale_country = old_data[key]['country']
-        old_sale_percentage = calculate_sale_percentage(shoe['original_price'], old_sale_price, old_sale_country)
         if 'uah_price' not in old_data[key]:
             old_price_data = convert_to_uah(old_sale_price, old_sale_country, exchange_rates, shoe['name'])
             old_uah_sale = old_price_data.uah_amount
@@ -849,6 +917,16 @@ async def main():
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
     asyncio.create_task(message_queue.process_queue())
     
+    # Initialize the bot with command handlers
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application.add_handler(CommandHandler("ver", ver_command))
+    application.add_handler(CommandHandler("linkstat", linkstat_command))
+
+    # Start the bot
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
     # Get terminal width
     terminal_width = shutil.get_terminal_size().columns
     
@@ -870,39 +948,42 @@ async def main():
     if LIVE_MODE:
         special_logger.good("Live mode enabled")
 
+    try:
+        while True:
+            try:
+                processed_shoes = set()  # Reset at the start of each run
+                old_data = load_shoe_data()
+                exchange_rates = load_exchange_rates()
 
-    while True:
-        try:
-            processed_shoes = set()  # Reset at the start of each run
-            old_data = load_shoe_data()
-            exchange_rates = load_exchange_rates()
+                all_shoes = []
+                url_tasks = [process_url(base_url, COUNTRIES, exchange_rates) for base_url in BASE_URLS]
+                url_results = await asyncio.gather(*url_tasks)
+                
+                for result in url_results:
+                    all_shoes.extend(result)
+                unfiltered_len = len(all_shoes)
+                all_shoes = filter_duplicates(all_shoes, exchange_rates)
+                special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
+                
+                await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
 
-            all_shoes = []
-            url_tasks = [process_url(base_url, COUNTRIES, exchange_rates) for base_url in BASE_URLS]
-            url_results = await asyncio.gather(*url_tasks)
-            
-            for result in url_results:
-                all_shoes.extend(result)
-            unfiltered_len = len(all_shoes)
-            all_shoes = filter_duplicates(all_shoes, exchange_rates)
-            special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
-            
-            await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
+                # Print statistics
+                print_statistics()
+                print_link_statistics()
 
-            # Print statistics
-            print_statistics()
-            print_link_statistics()
-
-            logger.info("Sleeping for 1 hour before next check")
-            await asyncio.sleep(3600) 
-        except KeyboardInterrupt:
-            logger.info("Script terminated by user")
-            break
-        except Exception as e:
-            logger.error(f"An unexpected error occurred in main loop: {e}")
-            logger.error(traceback.format_exc())
-            logger.info("Waiting for 60 minutes before retrying")
-            await asyncio.sleep(3600)
+                logger.info("Sleeping for 1 hour before next check")
+                await asyncio.sleep(3600) 
+            except KeyboardInterrupt:
+                logger.info("Script terminated by user")
+                break
+            except Exception as e:
+                logger.error(f"An unexpected error occurred in main loop: {e}")
+                logger.error(traceback.format_exc())
+                logger.info("Waiting for 60 minutes before retrying")
+                await asyncio.sleep(3600)
+    finally:
+        # Stop the application when the main loop exits
+        await application.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())
