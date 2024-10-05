@@ -22,10 +22,9 @@ from telegram.error import RetryAfter, TimedOut
 from config import TELEGRAM_BOT_TOKEN, EXCHANGERATE_API_KEY, BASE_URLS
 from colorama import Fore, Back, Style
 
-
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.6.2"
+BOT_VERSION = "3.6.3"
 last_git_pull_time = None
 
 
