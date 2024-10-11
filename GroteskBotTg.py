@@ -9,6 +9,9 @@ import traceback
 import urllib.parse
 import re
 import html
+import io
+import requests
+import os
 from telegram.ext import CommandHandler, Application
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple
@@ -21,10 +24,11 @@ from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
 from config import TELEGRAM_BOT_TOKEN, EXCHANGERATE_API_KEY, BASE_URLS
 from colorama import Fore, Back, Style
+from PIL import Image, ImageDraw, ImageFont
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.6.3"
+BOT_VERSION = "3.6.3.1"
 last_git_pull_time = None
 
 
@@ -78,17 +82,17 @@ class TelegramMessageQueue:
         self.queue = asyncio.Queue()
         self.bot_token = bot_token
 
-    async def add_message(self, chat_id, message, image_url=None):
-        await self.queue.put(TelegramMessage(chat_id, message, image_url))
+    async def add_message(self, chat_id, message, image_url=None, uah_price=None, sale_percentage=None):
+        await self.queue.put((chat_id, message, image_url, uah_price, sale_percentage))
 
     async def process_queue(self):
         while True:
-            message = await self.queue.get()
-            success = await send_telegram_message(self.bot_token, message.chat_id, message.message, message.image_url)
+            chat_id, message, image_url, uah_price, sale_percentage = await self.queue.get()
+            success = await send_telegram_message(self.bot_token, chat_id, message, image_url, uah_price, sale_percentage)
             if not success:
                 # If sending fails, put the message back in the queue
-                await self.queue.put(message)
-            await asyncio.sleep(1)  # Delay to prevent hitting rate limi
+                await self.queue.put((chat_id, message, image_url, uah_price, sale_percentage))
+            await asyncio.sleep(1)  # Delay to prevent hitting rate limit
 
 def setup_logger():
     logger = logging.getLogger()
@@ -210,7 +214,73 @@ async def linkstat_command(update, context):
 
     for message in messages:
         await update.message.reply_text(message, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        
+def process_image(image_url, uah_price, sale_percentage):
+    # Download the image
+    response = requests.get(image_url)
+    try:
+        img = Image.open(io.BytesIO(response.content))
 
+        # Calculate font size based on image dimensions
+        width, height = img.size
+        font_size = int(min(width, height) * 0.055)
+
+        # Create draw object
+        draw = ImageDraw.Draw(img)
+
+        # Load fonts (using a sans-serif font for Apple-like design)
+        try:
+            regular_font = ImageFont.truetype("SFPro-Bold.ttf", font_size)
+        except IOError:
+            # Fallback to default font if SF Pro is not available
+            regular_font = ImageFont.load_default()
+
+        # Calculate text sizes
+        price_text = f"{uah_price} UAH"
+        sale_text = f"-{sale_percentage}%"
+        price_bbox = draw.textbbox((0, 0), price_text, font=regular_font)
+        sale_bbox = draw.textbbox((0, 0), sale_text, font=regular_font)
+
+        # Calculate text heights
+        price_height = price_bbox[3] - price_bbox[1]
+        sale_height = sale_bbox[3] - sale_bbox[1]
+        max_text_height = max(price_height, sale_height)
+
+        # Calculate additional space needed
+        padding = 10
+        additional_height = max_text_height + (padding * 2)
+
+        # Create a new image with additional space at the bottom
+        new_img = Image.new('RGBA', (width, height + additional_height), (0, 0, 0, 0))
+        new_img.paste(img, (0, 0))
+
+        # Create a gradient overlay for the bottom area
+        overlay = Image.new('RGBA', (width, additional_height), (0, 0, 0, 0))
+        new_img.paste(overlay, (0, height), overlay)
+
+        # Update draw object for the new image
+        draw = ImageDraw.Draw(new_img)
+
+        # Calculate vertical center for text in the bottom area
+        text_y = height + (additional_height - max_text_height) // 2
+
+        # Add price text (left-aligned)
+        price_x = 30
+        draw.text((price_x, text_y), price_text, font=regular_font, fill=(22,22,24), anchor="lm")
+
+        # Add sale percentage (right-aligned)
+        sale_x = width - 30
+        draw.text((sale_x, text_y), sale_text, font=regular_font, fill=(255,59,48), anchor="rm")  # Apple's red color
+
+        # Save the image to a bytes buffer
+        img_byte_arr = io.BytesIO()
+        new_img.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+
+        return img_byte_arr
+    finally:
+        # Ensure the response is closed to free up resources
+        response.close()
 
 def get_driver():
     options = Options()
@@ -556,12 +626,17 @@ def calculate_sale_percentage(original_price, sale_price, country):
     except ValueError:
         return 0
 
-async def send_telegram_message(bot_token, chat_id, message, image_url=None, max_retries=3):
+async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah_price=None, sale_percentage=None, max_retries=3):
     bot = Bot(token=bot_token)
     for attempt in range(max_retries):
         try:
             if image_url and image_url.startswith(('http://', 'https://')):
-                result = await bot.send_photo(chat_id=chat_id, photo=image_url, caption=message, parse_mode='HTML')
+                if uah_price is not None and sale_percentage is not None:
+                    # Process the image
+                    img_byte_arr = process_image(image_url, uah_price, sale_percentage)
+                    result = await bot.send_photo(chat_id=chat_id, photo=img_byte_arr, caption=message, parse_mode='HTML')
+                else:
+                    result = await bot.send_photo(chat_id=chat_id, photo=image_url, caption=message, parse_mode='HTML')
             else:
                 result = await bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
             
@@ -588,6 +663,7 @@ async def send_telegram_message(bot_token, chat_id, message, image_url=None, max
             await asyncio.sleep(2 * (attempt + 1))  # Exponential backoff
 
     return False
+
 
 def load_exchange_rates():
     try:
@@ -729,7 +805,7 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
                    f"🧊 Kurs : {kurs_symbol} {kurs} \n"
                    f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
                    f"🌍 Country : {country}")
-        await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'])
+        await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
         old_data[key] = shoe
         save_shoe_data(old_data)
         processed_shoes.add(key)  # Mark as processed
@@ -764,7 +840,7 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
                        f"🧊 Kurs : {kurs_symbol} {kurs} \n"
                        f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
                        f"🌍 Country : {country}")
-            await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'])
+            await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
             processed_shoes.add(key)  # Mark as processed
 
         shoe['active'] = True
