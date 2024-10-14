@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.6.3.1"
+BOT_VERSION = "3.6.4"
 last_git_pull_time = None
 
 
@@ -135,8 +135,8 @@ logging.addLevelName(25, "GOOD")
 logging.addLevelName(22, "LIGHTBLUE_INFO")
 
 
-LIVE_MODE = False  # Set to True to enable live mode by default
-ASK_FOR_LIVE_MODE = False  # Set to False to skip asking for live mode at startup
+LIVE_MODE = False  # True to enable live mode by default
+ASK_FOR_LIVE_MODE = False  # False to skip asking for live mode at startup
 
 # Files to store data
 SHOE_DATA_FILE = 'shoe_data.json'
@@ -228,7 +228,7 @@ def process_image(image_url, uah_price, sale_percentage):
         # Create draw object
         draw = ImageDraw.Draw(img)
 
-        # Load fonts (using a sans-serif font for Apple-like design)
+        # Load fonts
         try:
             regular_font = ImageFont.truetype("SFPro-Bold.ttf", font_size)
         except IOError:
@@ -279,7 +279,7 @@ def process_image(image_url, uah_price, sale_percentage):
 
         return img_byte_arr
     finally:
-        # Ensure the response is closed to free up resources
+        # Ensure the response is closed
         response.close()
 
 def get_driver():
@@ -514,7 +514,6 @@ def extract_shoe_data(card, country):
         
         original_price_value = extract_price(original_price)
 
-        # Skip items with original price less than 100
         if original_price_value < 115:
             logger.info(f"Skipping item '{full_name}' with original price {original_price}")
             return None
@@ -594,7 +593,7 @@ async def scrape_all_pages(base_url, country):
             break
         all_shoes.extend(shoes)
         page += 1
-        await asyncio.sleep(1)  # Add a delay between requests
+        await asyncio.sleep(1) 
     return all_shoes
 
 def load_shoe_data():
@@ -1005,7 +1004,7 @@ async def main():
     # Get terminal width
     terminal_width = shutil.get_terminal_size().columns
     
-    # Print decorative line
+    # Print green line
     print(Fore.GREEN + '-' * terminal_width + Style.RESET_ALL)
     
     # Print centered bot version with no timestamp
@@ -1013,7 +1012,7 @@ async def main():
     centered_version = center_text(bot_version, terminal_width)
     print(Fore.CYAN + Style.BRIGHT + centered_version + Style.RESET_ALL)
     
-    # Print decorative line again
+    # Print green line
     print(Fore.GREEN + '-' * terminal_width + Style.RESET_ALL)
 
     if ASK_FOR_LIVE_MODE:
