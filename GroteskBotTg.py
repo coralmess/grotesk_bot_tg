@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.6.4"
+BOT_VERSION = "3.6.4.1"
 last_git_pull_time = None
 
 
@@ -163,7 +163,7 @@ def get_git_info():
             last_git_pull_time = "Unknown"
     return last_git_pull_time
 
-async def ver_command(update, context):
+async def ver_command(update):
     git_pull_time = get_git_info()
     response = f"Bot version: {BOT_VERSION}\nLast git pull: {git_pull_time}"
     await update.message.reply_text(response)
@@ -174,7 +174,7 @@ def clean_link_for_display(link):
     # Truncate to 22 characters and add '...' if longer
     return (cleaned_link[:22] + '...') if len(cleaned_link) > 25 else cleaned_link
 
-async def linkstat_command(update, context):
+async def linkstat_command(update):
     stats_message = "Link Processing Statistics:\n\n"
     
     for step, stats in link_statistics.items():
