@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.6.4.1"
+BOT_VERSION = "3.6.5"
 last_git_pull_time = None
 
 
@@ -232,8 +232,10 @@ def process_image(image_url, uah_price, sale_percentage):
         try:
             regular_font = ImageFont.truetype("SFPro-Bold.ttf", font_size)
         except IOError:
-            # Fallback to default font if SF Pro is not available
-            regular_font = ImageFont.load_default()
+            try:
+                regular_font = ImageFont.truetype("arialbd.ttf", font_size)
+            except IOError:
+                regular_font = ImageFont.load_default()
 
         # Calculate text sizes
         price_text = f"{uah_price} UAH"
@@ -247,7 +249,7 @@ def process_image(image_url, uah_price, sale_percentage):
         max_text_height = max(price_height, sale_height)
 
         # Calculate additional space needed
-        padding = 10
+        padding = 5
         additional_height = max_text_height + (padding * 2)
 
         # Create a new image with additional space at the bottom
@@ -262,7 +264,7 @@ def process_image(image_url, uah_price, sale_percentage):
         draw = ImageDraw.Draw(new_img)
 
         # Calculate vertical center for text in the bottom area
-        text_y = height + (additional_height - max_text_height) // 2
+        text_y = height + padding + ( max_text_height // 2 )
 
         # Add price text (left-aligned)
         price_x = 30
