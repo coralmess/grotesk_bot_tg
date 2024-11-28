@@ -794,7 +794,6 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
     kurs_symbol = original_exchange_data.currency_symbol
 
     if key not in old_data:
-        # New item
         shoe['lowest_price'] = shoe['sale_price']
         shoe['lowest_price_uah'] = uah_sale
         shoe['uah_price'] = uah_sale
