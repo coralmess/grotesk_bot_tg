@@ -11,7 +11,6 @@ import re
 import html
 import io
 import requests
-import os
 from telegram.ext import CommandHandler, Application
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple
@@ -81,18 +80,29 @@ class TelegramMessageQueue:
     def __init__(self, bot_token):
         self.queue = asyncio.Queue()
         self.bot_token = bot_token
+        self.pending_messages = {}  # Track messages waiting to be sent
 
     async def add_message(self, chat_id, message, image_url=None, uah_price=None, sale_percentage=None):
-        await self.queue.put((chat_id, message, image_url, uah_price, sale_percentage))
+        message_id = str(uuid.uuid4())
+        self.pending_messages[message_id] = False  # False means not sent yet
+        await self.queue.put((message_id, chat_id, message, image_url, uah_price, sale_percentage))
+        return message_id
 
     async def process_queue(self):
         while True:
-            chat_id, message, image_url, uah_price, sale_percentage = await self.queue.get()
+            message_id, chat_id, message, image_url, uah_price, sale_percentage = await self.queue.get()
             success = await send_telegram_message(self.bot_token, chat_id, message, image_url, uah_price, sale_percentage)
-            if not success:
+            
+            if success:
+                self.pending_messages[message_id] = True
+            else:
                 # If sending fails, put the message back in the queue
-                await self.queue.put((chat_id, message, image_url, uah_price, sale_percentage))
+                await self.queue.put((message_id, chat_id, message, image_url, uah_price, sale_percentage))
+            
             await asyncio.sleep(1)  # Delay to prevent hitting rate limit
+    
+    def is_message_sent(self, message_id):
+        return self.pending_messages.get(message_id, False)
 
 def setup_logger():
     logger = logging.getLogger()
@@ -805,10 +815,15 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
                    f"🧊 Kurs : {kurs_symbol} {kurs} \n"
                    f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
                    f"🌍 Country : {country}")
-        await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
+        message_id = await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
+        
+        # Wait for the message to be sent successfully before marking as processed
+        while not message_queue.is_message_sent(message_id):
+            await asyncio.sleep(1)
+            
+        processed_shoes.add(key)  # Only mark as processed after successful send
         old_data[key] = shoe
         save_shoe_data(old_data)
-        processed_shoes.add(key)  # Mark as processed
     elif old_data[key]['sale_price'] != shoe['sale_price'] or not old_data[key].get('active', True):
         old_sale_price = old_data[key]['sale_price']
         old_sale_country = old_data[key]['country']
@@ -840,8 +855,13 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
                        f"🧊 Kurs : {kurs_symbol} {kurs} \n"
                        f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
                        f"🌍 Country : {country}")
-            await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
-            processed_shoes.add(key)  # Mark as processed
+            message_id = await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
+            
+            # Wait for the message to be sent successfully before marking as processed
+            while not message_queue.is_message_sent(message_id):
+                await asyncio.sleep(1)
+                
+            processed_shoes.add(key)  # Only mark as processed after successful send
 
         shoe['active'] = True
         old_data[key] = shoe
