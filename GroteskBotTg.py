@@ -10,6 +10,7 @@ import urllib.parse
 import re
 import html
 import io
+import uuid
 import requests
 from telegram.ext import CommandHandler, Application
 from telegram.constants import ParseMode
