@@ -858,11 +858,10 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
                        f"🌍 Country : {country}")
             message_id = await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
             
-            # Wait for the message to be sent successfully before marking as processed
             while not message_queue.is_message_sent(message_id):
                 await asyncio.sleep(1)
                 
-            processed_shoes.add(key)  # Only mark as processed after successful send
+            processed_shoes.add(key)
 
         shoe['active'] = True
         old_data[key] = shoe
@@ -946,7 +945,7 @@ async def process_url(base_url, countries, exchange_rates):
     
     for country, result in zip(countries, country_results):
         for shoe in result:
-            if isinstance(shoe, dict):  # Ensure shoe is a dictionary before modifying
+            if isinstance(shoe, dict):
                 shoe['base_url'] = base_url
                 all_shoes.append(shoe)
             else:
