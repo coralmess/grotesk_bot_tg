@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.6.5"
+BOT_VERSION = "3.6.5.1"
 last_git_pull_time = None
 
 
@@ -799,10 +799,12 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         return
     
     sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
-    original_exchange_data = convert_to_uah(shoe['sale_price'], country, exchange_rates, shoe['name'])
-    kurs = original_exchange_data.exchange_rate
-    uah_sale = original_exchange_data.uah_amount
-    kurs_symbol = original_exchange_data.currency_symbol
+    sale_exchange_data = convert_to_uah(shoe['sale_price'], country, exchange_rates, shoe['name'])
+    original_exchange_data = convert_to_uah(shoe['original_price'], country, exchange_rates, shoe['name'])
+    uah_orig = original_exchange_data.uah_amount
+    kurs = sale_exchange_data.exchange_rate
+    uah_sale = sale_exchange_data.uah_amount
+    kurs_symbol = sale_exchange_data.currency_symbol
 
     if key not in old_data:
         shoe['lowest_price'] = shoe['sale_price']
@@ -813,6 +815,7 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         message = (f"{sale_emoji}  New item  {sale_emoji}\n{shoe['name']}\n\n"
                    f"💀 Prices : <s>{shoe['original_price']}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
                    f"🤑 Grivniki : <b>{uah_sale} UAH </b>\n"
+                   f"🧠 UAH Diff : <b>{uah_orig}</b>\n"
                    f"🧊 Kurs : {kurs_symbol} {kurs} \n"
                    f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
                    f"🌍 Country : {country}")
