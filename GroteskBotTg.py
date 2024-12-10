@@ -815,7 +815,7 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         message = (f"{sale_emoji}  New item  {sale_emoji}\n{shoe['name']}\n\n"
                    f"💀 Prices : <s>{shoe['original_price']}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
                    f"🤑 Grivniki : <b>{uah_sale} UAH </b>\n"
-                   f"🧠 UAH Diff : <b>{uah_orig}</b>\n"
+                #    f"🧠 UAH Diff : <b>{uah_orig}</b>\n"
                    f"🧊 Kurs : {kurs_symbol} {kurs} \n"
                    f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
                    f"🌍 Country : {country}")
