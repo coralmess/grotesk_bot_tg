@@ -602,7 +602,9 @@ async def scrape_all_pages(base_url, country):
         logger.info(f"Scraping page {page} for country {country} - {base_url['url_name']}")
         shoes = await scrape_page(url, country)
         if not shoes:
-            logger.info(f"Total items for {country}  {base_url['url_name']}: {len(all_shoes)}.  Stopping")
+            if page < 3:
+                logger.error(f"{base_url['url_name']} for  {country} Stopped too early. Please check for errors")
+            logger.info(f"Total for {country}  {base_url['url_name']}: {len(all_shoes)}.  Stopped on page {page}")
             break
         all_shoes.extend(shoes)
         page += 1
