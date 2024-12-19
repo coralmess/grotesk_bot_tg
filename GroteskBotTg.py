@@ -944,7 +944,7 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
                 return
 
             if key not in old_data:
-                shoe['shoe_link'] = await get_final_clear_link(shoe['shoe_link'], semaphore, name, country, i, total_items, store)
+                shoe['shoe_link'] = await get_final_clear_link(shoe['shoe_link'], semaphore, name, country, i, total_items)
                 new_shoe_count += 1
             else:
                 shoe['shoe_link'] = old_data[key]['shoe_link']
