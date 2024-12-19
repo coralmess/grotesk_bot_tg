@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.6.5.1"
+BOT_VERSION = "3.6.6"
 last_git_pull_time = None
 
 
@@ -157,11 +157,17 @@ EXCHANGE_RATES_FILE = 'exchange_rates.json'
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
 
 max_wait_times = {'url_changes': 0, 'final_url_changes': 0}
-store_statistics = defaultdict(lambda: {'success': 0, 'total': 0})
 link_statistics = {
     'lyst_track_lead': {'success': 0, 'fail': 0, 'fail_links': []},
     'click_here': {'success': 0, 'fail': 0, 'fail_links': []},
-    'other_failures': {'count': 0, 'links': []}
+    'other_failures': {'count': 0, 'links': []},
+    'steps': {
+        'Initial URL change': {'count': 0, 'final_url_obtained': 0},
+        'After Buy from click': {'count': 0, 'final_url_obtained': 0},
+        'After Click here': {'count': 0, 'final_url_obtained': 0},
+        'After embedded URL extraction': {'count': 0, 'final_url_obtained': 0},
+        'Unknown': {'count': 0, 'final_url_obtained': 0}
+    },
 }
 
 def get_git_info():
@@ -390,7 +396,8 @@ def save_shoe_data(data):
     
 def is_lyst_domain(url):
     parsed_url = urllib.parse.urlparse(url)
-    return parsed_url.netloc.endswith('lyst.com')
+    domain = parsed_url.netloc
+    return 'lyst.com' in domain
     
 def extract_price(price_str):
     # Remove all non-digit characters except for the decimal point
@@ -400,24 +407,30 @@ def extract_price(price_str):
     except ValueError:
         return 0
 
-async def get_final_clear_link(initial_url, semaphore, item_name, country, current_item, total_items, store):
+async def get_final_clear_link(initial_url, semaphore, item_name, country, current_item, total_items):
     async with semaphore:
         logger.info(f"Processing final link for {item_name} | Country: {country} | Progress: {current_item}/{total_items}")
         async with async_playwright() as p:
             browser = await p.firefox.launch(headless=True)
             context = await browser.new_context()
             page = await context.new_page()
-            
+
+            steps_info = {'steps_taken': [], 'final_step': None, 'initial_url': initial_url, 'final_url': None}
+
             try:
                 await page.goto(initial_url)
-                
+
+                # Step 1: Initial URL change
                 start_time = time.time()
                 await page.wait_for_url(lambda url: url != initial_url, timeout=20000)
                 wait_time = time.time() - start_time
                 max_wait_times['url_changes'] = max(max_wait_times['url_changes'], wait_time)
-                
+                current_step = 'Initial URL change'
+                steps_info['steps_taken'].append(current_step)
+                link_statistics['steps'][current_step]['count'] += 1
+
                 await asyncio.sleep(5)
-                
+
                 current_url = page.url
 
                 def extract_embedded_url(url):
@@ -431,60 +444,90 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
                 # Check for embedded URL at each step
                 current_url = extract_embedded_url(current_url)
 
-                if "lyst.com" in current_url and "return" in current_url:
-                    await page.goto(current_url)
-                    await page.wait_for_load_state('networkidle')
-                    buy_button = await page.wait_for_selector("//a[contains(text(), 'Buy from')]", timeout=10000)
-                    if buy_button:
-                        await buy_button.click()
-                        await page.wait_for_url(lambda url: "lyst.com" not in url, timeout=20000)
-                        current_url = page.url
-                        current_url = extract_embedded_url(current_url)
-                
-                if "lyst.com/track/lead" in current_url:
-                    link_statistics['lyst_track_lead']['success'] += 1
-                    try:
-                        click_here_button = await page.wait_for_selector("//a[contains(text(), 'Click here')]", timeout=10000)
-                        await click_here_button.click()
-                        link_statistics['click_here']['success'] += 1
-                        
-                        start_time = time.time()
-                        await page.wait_for_url(lambda url: url != current_url, timeout=20000)
-                        wait_time = time.time() - start_time
-                        max_wait_times['final_url_changes'] = max(max_wait_times['final_url_changes'], wait_time)
-                        current_url = page.url
-                        current_url = extract_embedded_url(current_url)
-                    except:
-                        link_statistics['click_here']['fail'] += 1
-                        link_statistics['click_here']['fail_links'].append(current_url)
+                # Check if current_url is final
+                if not is_lyst_domain(current_url):
+                    steps_info['final_step'] = current_step
+                    steps_info['final_url'] = current_url
+                    link_statistics['steps'][current_step]['final_url_obtained'] += 1
                 else:
-                    if is_lyst_domain(current_url):
-                        link_statistics['lyst_track_lead']['fail'] += 1
-                        link_statistics['lyst_track_lead']['fail_links'].append(current_url)
+                    # Step 2: After Buy from click
+                    if "lyst.com" in current_url and "return" in current_url:
+                        await page.goto(current_url)
+                        await page.wait_for_load_state('networkidle')
+                        buy_button = await page.wait_for_selector("//a[contains(text(), 'Buy from')]", timeout=10000)
+                        if buy_button:
+                            await buy_button.click()
+                            await page.wait_for_url(lambda url: "lyst.com" not in url, timeout=20000)
+                            current_url = page.url
+                            current_url = extract_embedded_url(current_url)
+                            current_step = 'After Buy from click'
+                            steps_info['steps_taken'].append(current_step)
+                            link_statistics['steps'][current_step]['count'] += 1
+
+                            if not is_lyst_domain(current_url):
+                                steps_info['final_step'] = current_step
+                                steps_info['final_url'] = current_url
+                                link_statistics['steps'][current_step]['final_url_obtained'] += 1
+                    # Step 3: After Click here
+                    if "lyst.com/track/lead" in current_url:
+                        link_statistics['lyst_track_lead']['success'] += 1
+                        try:
+                            click_here_button = await page.wait_for_selector("//a[contains(text(), 'Click here')]", timeout=10000)
+                            await click_here_button.click()
+                            await page.wait_for_url(lambda url: url != current_url, timeout=20000)
+                            current_url = page.url
+                            current_url = extract_embedded_url(current_url)
+                            current_step = 'After Click here'
+                            steps_info['steps_taken'].append(current_step)
+                            link_statistics['steps'][current_step]['count'] += 1
+
+                            if not is_lyst_domain(current_url):
+                                steps_info['final_step'] = current_step
+                                steps_info['final_url'] = current_url
+                                link_statistics['steps'][current_step]['final_url_obtained'] += 1
+                        except:
+                            link_statistics['click_here']['fail'] += 1
+                            link_statistics['click_here']['fail_links'].append(current_url)
                     else:
-                        embedded_url = extract_embedded_url(current_url)
-                        if embedded_url != current_url:
-                            current_url = embedded_url
-                            link_statistics['lyst_track_lead']['success'] += 1
-                
-                final_url = current_url
-                
+                        if is_lyst_domain(current_url):
+                            link_statistics['lyst_track_lead']['fail'] += 1
+                            link_statistics['lyst_track_lead']['fail_links'].append(current_url)
+                        else:
+                            embedded_url = extract_embedded_url(current_url)
+                            if embedded_url != current_url:
+                                current_url = embedded_url
+                                current_step = 'After embedded URL extraction'
+                                steps_info['steps_taken'].append(current_step)
+                                link_statistics['steps'][current_step]['count'] += 1
+
+                                if not is_lyst_domain(current_url):
+                                    steps_info['final_step'] = current_step
+                                    steps_info['final_url'] = current_url
+                                    link_statistics['steps'][current_step]['final_url_obtained'] += 1
+
+                # If final URL was not obtained, mark as Unknown
+                if steps_info['final_url'] is None:
+                    steps_info['final_url'] = current_url
+                    steps_info['final_step'] = 'Unknown'
+                    current_step = 'Unknown'
+                    link_statistics['steps'][current_step]['count'] += 1
+                    link_statistics['steps'][current_step]['final_url_obtained'] += 0
+
+                final_url = steps_info['final_url']
+
                 # Ensure the final_url is properly unquoted
                 final_url = urllib.parse.unquote(final_url)
-                
+
                 logger.info(f"Final link obtained for: {item_name}")
-                
-                store_statistics[store]['total'] += 1
-                store_statistics[store]['success'] += 1
-                
+
+                # Optionally store steps_info for further analysis
+                # link_statistics.setdefault('steps_info', []).append(steps_info)
+
                 return final_url
-            
+
             except Exception as e:
                 link_statistics['other_failures']['count'] += 1
                 link_statistics['other_failures']['links'].append(initial_url)
-                
-                store_statistics[store]['total'] += 1
-                
                 return initial_url
             finally:
                 await browser.close()
@@ -527,7 +570,7 @@ def extract_shoe_data(card, country):
         
         original_price_value = extract_price(original_price)
 
-        if original_price_value < 115:
+        if original_price_value < 80:
             logger.info(f"Skipping item '{full_name}' with original price {original_price}")
             return None
         
@@ -802,8 +845,8 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
     
     sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
     sale_exchange_data = convert_to_uah(shoe['sale_price'], country, exchange_rates, shoe['name'])
-    original_exchange_data = convert_to_uah(shoe['original_price'], country, exchange_rates, shoe['name'])
-    uah_orig = original_exchange_data.uah_amount
+    # original_exchange_data = convert_to_uah(shoe['original_price'], country, exchange_rates, shoe['name'])
+    # uah_orig = original_exchange_data.uah_amount
     kurs = sale_exchange_data.exchange_rate
     uah_sale = sale_exchange_data.uah_amount
     kurs_symbol = sale_exchange_data.currency_symbol
@@ -985,28 +1028,37 @@ def url_worker(base_url, countries, old_data, bot_token, exchange_rates):
 def print_statistics():
     special_logger.stat(f"Max wait time for initial URL change: {max_wait_times['url_changes']:.2f} seconds")
     special_logger.stat(f"Max wait time for final URL change: {max_wait_times['final_url_changes']:.2f} seconds")
-    
-    special_logger.stat("Store Statistics:")
-    for store, stats in store_statistics.items():
-        success_rate = (stats['success'] / stats['total']) * 100 if stats['total'] > 0 else 0
-        special_logger.stat(f"{store}: {success_rate:.2f}% success rate ({stats['success']}/{stats['total']})")
         
 def print_link_statistics():
     special_logger.stat("Link Processing Statistics:")
+
+    # Existing statistics
     for step, stats in link_statistics.items():
-        if step != 'other_failures':
+        if step in ['lyst_track_lead', 'click_here']:
             success_rate = (stats['success'] / (stats['success'] + stats['fail'])) * 100 if (stats['success'] + stats['fail']) > 0 else 0
             special_logger.stat(f"{step}: {success_rate:.2f}% success rate ({stats['success']}/{stats['success'] + stats['fail']})")
             if stats['fail'] > 0:
-                special_logger.stat(f"  Failed links for {step} (showing up to 10):")
+                special_logger.stat(f"  Failed links for {step} (up to 10):")
                 for link in stats['fail_links'][:10]:
                     special_logger.stat(f"    {link}")
-        else:
+        elif step == 'other_failures':
             special_logger.stat(f"Other failures: {stats['count']}")
             if stats['count'] > 0:
-                special_logger.stat(f"  Failed links for other failures (showing up to 10):")
+                special_logger.stat("  Failed links for other failures (up to 10):")
                 for link in stats['links'][:10]:
                     special_logger.stat(f"    {link}")
+
+    # Step analytics
+    if 'steps' in link_statistics:
+        special_logger.stat("Final URL obtained at the following steps:")
+        total_final_urls = sum(info['final_url_obtained'] for info in link_statistics['steps'].values())
+
+        for step_name, info in link_statistics['steps'].items():
+            count = info['count']
+            final_url_count = info['final_url_obtained']
+            success_rate = (final_url_count / count) * 100 if count > 0 else 0
+            percentage_of_total = (final_url_count / total_final_urls) * 100 if total_final_urls > 0 else 0
+            special_logger.stat(f"{step_name}: {final_url_count}/{count} final URLs obtained ({success_rate:.2f}% success rate), {percentage_of_total:.2f}% of total final URLs")
                     
 def center_text(text, width, fill_char=' '):
     padding = (width - len(text)) // 2
