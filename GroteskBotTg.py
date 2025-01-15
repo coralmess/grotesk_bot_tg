@@ -28,7 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.6.6"
+BOT_VERSION = "3.7.2"
 last_git_pull_time = None
 
 
@@ -163,9 +163,9 @@ link_statistics = {
     'other_failures': {'count': 0, 'links': []},
     'steps': {
         'Initial URL change': {'count': 0, 'final_url_obtained': 0},
-        'After Buy from click': {'count': 0, 'final_url_obtained': 0},
+        'After some waiting': {'count': 0, 'final_url_obtained': 0},
         'After Click here': {'count': 0, 'final_url_obtained': 0},
-        'After embedded URL extraction': {'count': 0, 'final_url_obtained': 0},
+        'Track Lead': {'count': 0, 'final_url_obtained': 0},
         'Unknown': {'count': 0, 'final_url_obtained': 0}
     },
 }
@@ -215,7 +215,6 @@ async def linkstat_command(update):
                     stats_message += f"    <a href='{html.escape(link)}'>{html.escape(display_link)}</a>\n"
         stats_message += "\n"
     
-    # If the message is too long, split it into multiple messages
     max_message_length = 4096  # Telegram's max message length
     messages = []
     while len(stats_message) > 0:
@@ -237,10 +236,19 @@ def process_image(image_url, uah_price, sale_percentage):
     response = requests.get(image_url)
     try:
         img = Image.open(io.BytesIO(response.content))
+        
+        # Get original dimensions
+        original_width, original_height = img.size
+        
+        # Calculate new dimensions (2x upscale)
+        new_width = original_width * 2
+        new_height = original_height * 2
+        
+        # Upscale image using Hanning filter
+        img = img.resize((new_width, new_height), Image.LANCZOS)
 
-        # Calculate font size based on image dimensions
-        width, height = img.size
-        font_size = int(min(width, height) * 0.055)
+        # Calculate font size based on new dimensions
+        font_size = int(min(new_width, new_height) * 0.055)
 
         # Create draw object
         draw = ImageDraw.Draw(img)
@@ -266,34 +274,34 @@ def process_image(image_url, uah_price, sale_percentage):
         max_text_height = max(price_height, sale_height)
 
         # Calculate additional space needed
-        padding = 5
+        padding = 10  # Increased padding for larger image
         additional_height = max_text_height + (padding * 2)
 
         # Create a new image with additional space at the bottom
-        new_img = Image.new('RGBA', (width, height + additional_height), (0, 0, 0, 0))
+        new_img = Image.new('RGBA', (new_width, new_height + additional_height), (0, 0, 0, 0))
         new_img.paste(img, (0, 0))
 
         # Create a gradient overlay for the bottom area
-        overlay = Image.new('RGBA', (width, additional_height), (0, 0, 0, 0))
-        new_img.paste(overlay, (0, height), overlay)
+        overlay = Image.new('RGBA', (new_width, additional_height), (0, 0, 0, 0))
+        new_img.paste(overlay, (0, new_height), overlay)
 
         # Update draw object for the new image
         draw = ImageDraw.Draw(new_img)
 
         # Calculate vertical center for text in the bottom area
-        text_y = height + padding + ( max_text_height // 2 )
+        text_y = new_height + padding + (max_text_height // 2)
 
         # Add price text (left-aligned)
-        price_x = 30
+        price_x = 60  # Increased margin for larger image
         draw.text((price_x, text_y), price_text, font=regular_font, fill=(22,22,24), anchor="lm")
 
         # Add sale percentage (right-aligned)
-        sale_x = width - 30
-        draw.text((sale_x, text_y), sale_text, font=regular_font, fill=(255,59,48), anchor="rm")  # Apple's red color
+        sale_x = new_width - 60  # Increased margin for larger image
+        draw.text((sale_x, text_y), sale_text, font=regular_font, fill=(255,59,48), anchor="rm")
 
         # Save the image to a bytes buffer
         img_byte_arr = io.BytesIO()
-        new_img.save(img_byte_arr, format='PNG')
+        new_img.save(img_byte_arr, format='PNG', quality=95)  # Increased quality for better results
         img_byte_arr.seek(0)
 
         return img_byte_arr
@@ -454,17 +462,9 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
                     if "lyst.com" in current_url and "return" in current_url:
                         await page.goto(current_url)
                         await page.wait_for_load_state('networkidle')
-                        buy_button = await page.wait_for_selector("//a[contains(text(), 'Buy from')]", timeout=10000)
-                        if buy_button:
-                            await buy_button.click()
-                            await page.wait_for_url(lambda url: "lyst.com" not in url, timeout=20000)
-                            current_url = page.url
-                            current_url = extract_embedded_url(current_url)
-                            current_step = 'After Buy from click'
-                            steps_info['steps_taken'].append(current_step)
-                            link_statistics['steps'][current_step]['count'] += 1
-
-                            if not is_lyst_domain(current_url):
+                        current_step = 'After some waiting'
+                        
+                        if not is_lyst_domain(current_url):
                                 steps_info['final_step'] = current_step
                                 steps_info['final_url'] = current_url
                                 link_statistics['steps'][current_step]['final_url_obtained'] += 1
@@ -472,12 +472,10 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
                     if "lyst.com/track/lead" in current_url:
                         link_statistics['lyst_track_lead']['success'] += 1
                         try:
-                            click_here_button = await page.wait_for_selector("//a[contains(text(), 'Click here')]", timeout=10000)
-                            await click_here_button.click()
-                            await page.wait_for_url(lambda url: url != current_url, timeout=20000)
+                            await page.wait_for_url(lambda url: url != current_url, timeout=30000)
                             current_url = page.url
                             current_url = extract_embedded_url(current_url)
-                            current_step = 'After Click here'
+                            current_step = 'Track Lead'
                             steps_info['steps_taken'].append(current_step)
                             link_statistics['steps'][current_step]['count'] += 1
 
@@ -514,14 +512,9 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
                     link_statistics['steps'][current_step]['final_url_obtained'] += 0
 
                 final_url = steps_info['final_url']
-
-                # Ensure the final_url is properly unquoted
                 final_url = urllib.parse.unquote(final_url)
 
                 logger.info(f"Final link obtained for: {item_name}")
-
-                # Optionally store steps_info for further analysis
-                # link_statistics.setdefault('steps_info', []).append(steps_info)
 
                 return final_url
 
@@ -1030,25 +1023,7 @@ def print_statistics():
     special_logger.stat(f"Max wait time for final URL change: {max_wait_times['final_url_changes']:.2f} seconds")
         
 def print_link_statistics():
-    special_logger.stat("Link Processing Statistics:")
-
-    # Existing statistics
-    for step, stats in link_statistics.items():
-        if step in ['lyst_track_lead', 'click_here']:
-            success_rate = (stats['success'] / (stats['success'] + stats['fail'])) * 100 if (stats['success'] + stats['fail']) > 0 else 0
-            special_logger.stat(f"{step}: {success_rate:.2f}% success rate ({stats['success']}/{stats['success'] + stats['fail']})")
-            if stats['fail'] > 0:
-                special_logger.stat(f"  Failed links for {step} (up to 10):")
-                for link in stats['fail_links'][:10]:
-                    special_logger.stat(f"    {link}")
-        elif step == 'other_failures':
-            special_logger.stat(f"Other failures: {stats['count']}")
-            if stats['count'] > 0:
-                special_logger.stat("  Failed links for other failures (up to 10):")
-                for link in stats['links'][:10]:
-                    special_logger.stat(f"    {link}")
-
-    # Step analytics
+    
     if 'steps' in link_statistics:
         special_logger.stat("Final URL obtained at the following steps:")
         total_final_urls = sum(info['final_url_obtained'] for info in link_statistics['steps'].values())
