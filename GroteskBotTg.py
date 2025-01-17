@@ -28,9 +28,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.7.2"
+BOT_VERSION = "3.8.0"
 last_git_pull_time = None
-
 
 class CompactGroupedMessageHandler(logging.Handler):
     def __init__(self, timeout=5):
@@ -186,9 +185,7 @@ async def ver_command(update):
     await update.message.reply_text(response)
 
 def clean_link_for_display(link):
-    # Remove 'http://', 'https://', and 'www.' from the beginning of the link
     cleaned_link = re.sub(r'^(https?://)?(www\.)?', '', link)
-    # Truncate to 22 characters and add '...' if longer
     return (cleaned_link[:22] + '...') if len(cleaned_link) > 25 else cleaned_link
 
 async def linkstat_command(update):
@@ -231,82 +228,47 @@ async def linkstat_command(update):
     for message in messages:
         await update.message.reply_text(message, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         
+def load_font(font_size):
+    try:
+        return ImageFont.truetype("SFPro-Bold.ttf", font_size)
+    except IOError:
+        try:
+            return ImageFont.truetype("arialbd.ttf", font_size)
+        except IOError:
+            return ImageFont.load_default()
+
 def process_image(image_url, uah_price, sale_percentage):
-    # Download the image
     response = requests.get(image_url)
     try:
         img = Image.open(io.BytesIO(response.content))
-        
-        # Get original dimensions
-        original_width, original_height = img.size
-        
-        # Calculate new dimensions (2x upscale)
-        new_width = original_width * 2
-        new_height = original_height * 2
-        
-        # Upscale image using Hanning filter
-        img = img.resize((new_width, new_height), Image.LANCZOS)
+        width, height = [dim * 2 for dim in img.size]
+        img = img.resize((width, height), Image.LANCZOS)
 
-        # Calculate font size based on new dimensions
-        font_size = int(min(new_width, new_height) * 0.055)
-
-        # Create draw object
+        font_size = int(min(width, height) * 0.055)
+        font = load_font(font_size)
         draw = ImageDraw.Draw(img)
 
-        # Load fonts
-        try:
-            regular_font = ImageFont.truetype("SFPro-Bold.ttf", font_size)
-        except IOError:
-            try:
-                regular_font = ImageFont.truetype("arialbd.ttf", font_size)
-            except IOError:
-                regular_font = ImageFont.load_default()
+        price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
+        price_bbox = draw.textbbox((0, 0), price_text, font=font)
+        sale_bbox = draw.textbbox((0, 0), sale_text, font=font)
+        text_height = max(price_bbox[3] - price_bbox[1], sale_bbox[3] - sale_bbox[1])
 
-        # Calculate text sizes
-        price_text = f"{uah_price} UAH"
-        sale_text = f"-{sale_percentage}%"
-        price_bbox = draw.textbbox((0, 0), price_text, font=regular_font)
-        sale_bbox = draw.textbbox((0, 0), sale_text, font=regular_font)
-
-        # Calculate text heights
-        price_height = price_bbox[3] - price_bbox[1]
-        sale_height = sale_bbox[3] - sale_bbox[1]
-        max_text_height = max(price_height, sale_height)
-
-        # Calculate additional space needed
-        padding = 10  # Increased padding for larger image
-        additional_height = max_text_height + (padding * 2)
-
-        # Create a new image with additional space at the bottom
-        new_img = Image.new('RGBA', (new_width, new_height + additional_height), (0, 0, 0, 0))
+        padding = 10
+        bottom_area = text_height + (padding * 2)
+        new_img = Image.new('RGBA', (width, height + bottom_area), (0, 0, 0, 0))
         new_img.paste(img, (0, 0))
+        new_img.paste(Image.new('RGBA', (width, bottom_area), (0, 0, 0, 0)), (0, height))
 
-        # Create a gradient overlay for the bottom area
-        overlay = Image.new('RGBA', (new_width, additional_height), (0, 0, 0, 0))
-        new_img.paste(overlay, (0, new_height), overlay)
-
-        # Update draw object for the new image
         draw = ImageDraw.Draw(new_img)
+        text_y = height + padding + (text_height // 2)
+        draw.text((60, text_y), price_text, font=font, fill=(22,22,24), anchor="lm")
+        draw.text((width - 60, text_y), sale_text, font=font, fill=(255,59,48), anchor="rm")
 
-        # Calculate vertical center for text in the bottom area
-        text_y = new_height + padding + (max_text_height // 2)
-
-        # Add price text (left-aligned)
-        price_x = 60  # Increased margin for larger image
-        draw.text((price_x, text_y), price_text, font=regular_font, fill=(22,22,24), anchor="lm")
-
-        # Add sale percentage (right-aligned)
-        sale_x = new_width - 60  # Increased margin for larger image
-        draw.text((sale_x, text_y), sale_text, font=regular_font, fill=(255,59,48), anchor="rm")
-
-        # Save the image to a bytes buffer
         img_byte_arr = io.BytesIO()
-        new_img.save(img_byte_arr, format='PNG', quality=95)  # Increased quality for better results
+        new_img.save(img_byte_arr, format='PNG', quality=95)
         img_byte_arr.seek(0)
-
         return img_byte_arr
     finally:
-        # Ensure the response is closed
         response.close()
 
 def get_driver():
@@ -400,7 +362,6 @@ def load_shoe_data():
 def save_shoe_data(data):
     with open(SHOE_DATA_FILE, 'w') as f:
         json.dump(data, f)
-    special_logger.good("Shoe data saved successfully")
     
 def is_lyst_domain(url):
     parsed_url = urllib.parse.urlparse(url)
@@ -469,39 +430,39 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
                                 steps_info['final_url'] = current_url
                                 link_statistics['steps'][current_step]['final_url_obtained'] += 1
                     # Step 3: After Click here
-                    if "lyst.com/track/lead" in current_url:
-                        link_statistics['lyst_track_lead']['success'] += 1
-                        try:
-                            await page.wait_for_url(lambda url: url != current_url, timeout=30000)
-                            current_url = page.url
-                            current_url = extract_embedded_url(current_url)
-                            current_step = 'Track Lead'
-                            steps_info['steps_taken'].append(current_step)
-                            link_statistics['steps'][current_step]['count'] += 1
+                    # if "lyst.com/track/lead" in current_url:
+                    #     link_statistics['lyst_track_lead']['success'] += 1
+                    #     try:
+                    #         await page.wait_for_url(lambda url: url != current_url, timeout=30000)
+                    #         current_url = page.url
+                    #         current_url = extract_embedded_url(current_url)
+                    #         current_step = 'Track Lead'
+                    #         steps_info['steps_taken'].append(current_step)
+                    #         link_statistics['steps'][current_step]['count'] += 1
 
-                            if not is_lyst_domain(current_url):
-                                steps_info['final_step'] = current_step
-                                steps_info['final_url'] = current_url
-                                link_statistics['steps'][current_step]['final_url_obtained'] += 1
-                        except:
-                            link_statistics['click_here']['fail'] += 1
-                            link_statistics['click_here']['fail_links'].append(current_url)
-                    else:
-                        if is_lyst_domain(current_url):
-                            link_statistics['lyst_track_lead']['fail'] += 1
-                            link_statistics['lyst_track_lead']['fail_links'].append(current_url)
-                        else:
-                            embedded_url = extract_embedded_url(current_url)
-                            if embedded_url != current_url:
-                                current_url = embedded_url
-                                current_step = 'After embedded URL extraction'
-                                steps_info['steps_taken'].append(current_step)
-                                link_statistics['steps'][current_step]['count'] += 1
+                    #         if not is_lyst_domain(current_url):
+                    #             steps_info['final_step'] = current_step
+                    #             steps_info['final_url'] = current_url
+                    #             link_statistics['steps'][current_step]['final_url_obtained'] += 1
+                    #     except:
+                    #         link_statistics['click_here']['fail'] += 1
+                    #         link_statistics['click_here']['fail_links'].append(current_url)
+                    # else:
+                    #     if is_lyst_domain(current_url):
+                    #         link_statistics['lyst_track_lead']['fail'] += 1
+                    #         link_statistics['lyst_track_lead']['fail_links'].append(current_url)
+                    #     else:
+                    #         embedded_url = extract_embedded_url(current_url)
+                    #         if embedded_url != current_url:
+                    #             current_url = embedded_url
+                    #             current_step = 'After embedded URL extraction'
+                    #             steps_info['steps_taken'].append(current_step)
+                    #             link_statistics['steps'][current_step]['count'] += 1
 
-                                if not is_lyst_domain(current_url):
-                                    steps_info['final_step'] = current_step
-                                    steps_info['final_url'] = current_url
-                                    link_statistics['steps'][current_step]['final_url_obtained'] += 1
+                    #             if not is_lyst_domain(current_url):
+                    #                 steps_info['final_step'] = current_step
+                    #                 steps_info['final_url'] = current_url
+                    #                 link_statistics['steps'][current_step]['final_url_obtained'] += 1
 
                 # If final URL was not obtained, mark as Unknown
                 if steps_info['final_url'] is None:
@@ -526,92 +487,60 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
                 await browser.close()
 
 def extract_shoe_data(card, country):
+    if not card: 
+        logger.warning("Received None card in extract_shoe_data")
+        return None
     try:
-        if card is None:
-            logger.warning("Received None card in extract_shoe_data")
-            return None
-
-        # Name extraction
         name_elements = card.find_all('span', class_=lambda x: x and 'vjlibs5' in x)
-        if not name_elements:
+        if not name_elements: 
             logger.warning("No name elements found")
             return None
-        full_name = ' '.join([elem.text.strip() for elem in name_elements if elem and elem.text])
+        full_name = ' '.join(e.text.strip() for e in name_elements if e and e.text)
+        if 'Giuseppe Zanotti' in full_name: return None
         
-        if 'Giuseppe Zanotti' in full_name:
-            return None
-        
-        # Price extraction
         price_div = card.find('div', class_='ducdwf0')
         if not price_div:
             logger.warning("Price div not found")
             return None
-        
-        # Updated selectors for price elements
-        original_price_elem = price_div.find('div', class_=lambda x: x and '_1b08vvhor' in x and 'vjlibs1' in x)
-        sale_price_elem = price_div.find('div', class_=lambda x: x and '_1b08vvh1w' in x and 'vjlibs2' in x)
-        
-        if original_price_elem == sale_price_elem:
-            return None
-        
+        original_price_elem = price_div.find('div', class_=lambda x: '_1b08vvhor' in x and 'vjlibs1' in x)
+        sale_price_elem = price_div.find('div', class_=lambda x: '_1b08vvh1w' in x and 'vjlibs2' in x)
+        if original_price_elem == sale_price_elem: return None
         if not original_price_elem or not sale_price_elem:
             logger.warning("Price elements not found")
             return None
         
-        original_price = original_price_elem.text.strip() if original_price_elem.text else "N/A"
-        sale_price = sale_price_elem.text.strip() if sale_price_elem.text else "N/A"
-        
-        original_price_value = extract_price(original_price)
-
-        if original_price_value < 80:
+        original_price = (original_price_elem.text.strip() if original_price_elem.text else "N/A")
+        sale_price = (sale_price_elem.text.strip() if sale_price_elem.text else "N/A")
+        if extract_price(original_price) < 80:
             logger.info(f"Skipping item '{full_name}' with original price {original_price}")
             return None
         
-        # Image URL extraction
         img_elem = card.find('img', class_='zmhz363')
         image_url = img_elem['src'] if img_elem and 'src' in img_elem.attrs else None
         
-        # Store extraction
-        store_element = card.find('span', class_='_1fcx6l24')
-        store = store_element.text.strip() if store_element and store_element.text else "Unknown Store"
+        store_elem = card.find('span', class_='_1fcx6l24')
+        store = store_elem.text.strip() if store_elem and store_elem.text else "Unknown Store"
         
-        # Link extraction
-        link_element = card.find('a', href=True)
-        if link_element and 'href' in link_element.attrs:
-            href = link_element['href']
-            full_url = f"https://www.lyst.com{href}" if href.startswith('/') else href if href.startswith('http') else None
-        else:
-            full_url = None
+        link_elem = card.find('a', href=True)
+        href = link_elem['href'] if link_elem and 'href' in link_elem.attrs else None
+        full_url = f"https://www.lyst.com{href}" if href and href.startswith('/') else href if href and href.startswith('http') else None
         
-        # Unique ID extraction
-        product_card_div = card.find('div', class_=lambda x: x and 'kah5ce0' in x and 'kah5ce2' in x)
+        product_card_div = card.find('div', class_=lambda x: 'kah5ce0' in x and 'kah5ce2' in x)
         unique_id = product_card_div['id'] if product_card_div and 'id' in product_card_div.attrs else None
         
         required_fields = {
-            'name': full_name,
-            'original_price': original_price,
-            'sale_price': sale_price,
-            'image_url': image_url,
-            'store': store,
-            'shoe_link': full_url,
-            'unique_id': unique_id
+            'name': full_name, 'original_price': original_price, 'sale_price': sale_price,
+            'image_url': image_url, 'store': store, 'shoe_link': full_url, 'unique_id': unique_id
         }
-        
-        missing_fields = [field for field, value in required_fields.items() if not value]
-        
+        missing_fields = [f for f, v in required_fields.items() if not v]
         if missing_fields:
             logger.warning(f"Missing required fields: {', '.join(missing_fields)}")
             return None
-
+        
         return {
-            'name': full_name,
-            'original_price': original_price,
-            'sale_price': sale_price,
-            'image_url': image_url,
-            'store': store,
-            'country': country,
-            'shoe_link': full_url,
-            'unique_id': unique_id
+            'name': full_name, 'original_price': original_price, 'sale_price': sale_price,
+            'image_url': image_url, 'store': store, 'country': country,
+            'shoe_link': full_url, 'unique_id': unique_id
         }
     except Exception as e:
         logger.error(f"Error extracting shoe data: {e}")
@@ -647,17 +576,6 @@ async def scrape_all_pages(base_url, country):
         await asyncio.sleep(1) 
     return all_shoes
 
-def load_shoe_data():
-    try:
-        with open(SHOE_DATA_FILE, 'r') as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-
-def save_shoe_data(data):
-    with open(SHOE_DATA_FILE, 'w') as f:
-        json.dump(data, f)
-
 def calculate_sale_percentage(original_price, sale_price, country):
     try:
         if country in ['PL', 'IT']:
@@ -682,36 +600,26 @@ async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah
         try:
             if image_url and image_url.startswith(('http://', 'https://')):
                 if uah_price is not None and sale_percentage is not None:
-                    # Process the image
                     img_byte_arr = process_image(image_url, uah_price, sale_percentage)
-                    result = await bot.send_photo(chat_id=chat_id, photo=img_byte_arr, caption=message, parse_mode='HTML')
+                    await bot.send_photo(chat_id=chat_id, photo=img_byte_arr, caption=message, parse_mode='HTML')
                 else:
-                    result = await bot.send_photo(chat_id=chat_id, photo=image_url, caption=message, parse_mode='HTML')
+                    await bot.send_photo(chat_id=chat_id, photo=image_url, caption=message, parse_mode='HTML')
             else:
-                result = await bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
-            
+                await bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
             return True
-
         except RetryAfter as e:
-            # Handle rate limiting
             sleep_time = e.retry_after
             logger.warning(f"Rate limited. Sleeping for {sleep_time} seconds")
             await asyncio.sleep(sleep_time)
-            continue
-
         except TimedOut:
-            # Handle timeouts
             logger.warning(f"Request timed out on attempt {attempt + 1}")
-            await asyncio.sleep(3 * (attempt + 1))  # Exponential backoff
-            continue
-
+            await asyncio.sleep(3 * (attempt + 1))
         except Exception as e:
             logger.error(f"Error sending Telegram message (attempt {attempt + 1}): {e}")
             if attempt == max_retries - 1:
                 logger.error(f"Failed to send Telegram message after {max_retries} attempts")
                 return False
-            await asyncio.sleep(2 * (attempt + 1))  # Exponential backoff
-
+            await asyncio.sleep(2 * (attempt + 1))
     return False
 
 
@@ -780,40 +688,30 @@ def update_exchange_rates():
 
 def convert_to_uah(price, country, exchange_rates, name):
     try:
-        # Detect currency symbol and remove it
-        if '€' in price:
-            currency = 'EUR'
-            currency_symbol = '€'
-            amount = float(price.replace('€', '').replace(',', '.').strip())
-        elif '£' in price:
-            currency = 'GBP'
-            currency_symbol = '£'
-            amount = float(price.replace('£', '').replace(',', '').strip())
-        elif '$' in price:
-            currency = 'USD'
-            currency_symbol = '$'
-            amount = float(price.replace('$', '').replace(',', '').strip())
+        currency_map = {
+            '€': ('EUR', lambda p: float(p.replace('€','').replace(',', '.').strip())),
+            '£': ('GBP', lambda p: float(p.replace('£','').replace(',', '').strip())),
+            '$': ('USD', lambda p: float(p.replace('$','').replace(',', '').strip()))
+        }
+        for symbol, (code, parse_fn) in currency_map.items():
+            if symbol in price:
+                currency = code
+                currency_symbol = symbol
+                amount = parse_fn(price)
+                break
         else:
             logger.error(f"Unrecognized currency symbol in price '{price}' for '{name}' country '{country}'")
             return ConversionResult(0, 0, '')
 
-        if currency in exchange_rates:
-            rate = exchange_rates[currency]
-        else:
+        rate = exchange_rates.get(currency)
+        if not rate:
             logger.error(f"Exchange rate not found for currency '{currency}' (country: {country})")
             return ConversionResult(0, 0, '')
-        
+
         uah_amount = amount / rate
-        rounded_uah_amount = round(uah_amount / 10) * 10
-        exchange_rate = round(1 / rate, 2)
-        
-        return ConversionResult(rounded_uah_amount, exchange_rate, currency_symbol)
-    
-    except ValueError as e:
+        return ConversionResult(round(uah_amount / 10) * 10, round(1 / rate, 2), currency_symbol)
+    except (ValueError, KeyError) as e:
         logger.error(f"Error converting price '{price}' for '{name}' country '{country}': {e}")
-        return ConversionResult(0, 0, '')
-    except KeyError as e:
-        logger.error(f"Missing exchange rate for currency '{currency}': {e}")
         return ConversionResult(0, 0, '')
     
 
@@ -825,86 +723,74 @@ def get_sale_emoji(sale_percentage, uah_sale):
 
     return "🍄🍄🍄"
 
+def build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol, old_sale_price=None, status=None):
+    if status is None:  # New item
+        sale_emoji = get_sale_emoji(sale_percentage, uah_sale)
+        return (
+            f"{sale_emoji}  New item  {sale_emoji}\n{shoe['name']}\n\n"
+            f"💀 Prices : <s>{shoe['original_price']}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
+            f"🤑 Grivniki : <b>{uah_sale} UAH </b>\n"
+            f"🧊 Kurs : {kurs_symbol} {kurs} \n"
+            f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
+            f"🌍 Country : {shoe['country']}"
+        )
+    return (
+        f"💎💎💎 {status} 💎💎💎 \n{shoe['name']}:\n\n"
+        f"💀 Prices : <s>{shoe['original_price']}</s>  <s>{old_sale_price}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i> \n"
+        f"🤑 Grivniki : {uah_sale} UAH\n"
+        f"📉 Lowest price : {shoe['lowest_price']} ({shoe['lowest_price_uah']} UAH)\n"
+        f"🧊 Kurs : {kurs_symbol} {kurs} \n"
+        f"🔗 Store : <a href='{shoe['shoe_link ']}'>{shoe['store']}</a>\n"
+        f"🌍 Country : {shoe['country']}"
+    )
+
 async def process_shoe(shoe, old_data, message_queue, exchange_rates):
     global processed_shoes
-    country = shoe['country']
-    name = shoe['name']
-    unique_id = shoe['unique_id']
-    key = f"{name}_{unique_id}"
-    
-    # Check if this shoe has already been processed in this run
+    key = f"{shoe['name']}_{shoe['unique_id']}"
     if key in processed_shoes:
         return
-    
-    sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
-    sale_exchange_data = convert_to_uah(shoe['sale_price'], country, exchange_rates, shoe['name'])
-    # original_exchange_data = convert_to_uah(shoe['original_price'], country, exchange_rates, shoe['name'])
-    # uah_orig = original_exchange_data.uah_amount
-    kurs = sale_exchange_data.exchange_rate
-    uah_sale = sale_exchange_data.uah_amount
-    kurs_symbol = sale_exchange_data.currency_symbol
+
+    sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], shoe['country'])
+    sale_exchange_data = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name'])
+    kurs, uah_sale, kurs_symbol = sale_exchange_data.exchange_rate, sale_exchange_data.uah_amount, sale_exchange_data.currency_symbol
 
     if key not in old_data:
-        shoe['lowest_price'] = shoe['sale_price']
-        shoe['lowest_price_uah'] = uah_sale
-        shoe['uah_price'] = uah_sale
-        shoe['active'] = True
-        sale_emoji = get_sale_emoji(sale_percentage, uah_sale)
-        message = (f"{sale_emoji}  New item  {sale_emoji}\n{shoe['name']}\n\n"
-                   f"💀 Prices : <s>{shoe['original_price']}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
-                   f"🤑 Grivniki : <b>{uah_sale} UAH </b>\n"
-                #    f"🧠 UAH Diff : <b>{uah_orig}</b>\n"
-                   f"🧊 Kurs : {kurs_symbol} {kurs} \n"
-                   f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
-                   f"🌍 Country : {country}")
+        shoe.update({
+            'lowest_price': shoe['sale_price'],
+            'lowest_price_uah': uah_sale,
+            'uah_price': uah_sale,
+            'active': True
+        })
+        message = build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol)
         message_id = await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
-        
-        # Wait for the message to be sent successfully before marking as processed
         while not message_queue.is_message_sent(message_id):
             await asyncio.sleep(1)
-            
-        processed_shoes.add(key)  # Only mark as processed after successful send
+        processed_shoes.add(key)
         old_data[key] = shoe
         save_shoe_data(old_data)
-    elif old_data[key]['sale_price'] != shoe['sale_price'] or not old_data[key].get('active', True):
+    else:
         old_sale_price = old_data[key]['sale_price']
         old_sale_country = old_data[key]['country']
-        if 'uah_price' not in old_data[key]:
-            old_price_data = convert_to_uah(old_sale_price, old_sale_country, exchange_rates, shoe['name'])
-            old_uah_sale = old_price_data.uah_amount
-        else:
-            old_uah_sale = old_data[key]['uah_price']
-        shoe['uah_price'] = uah_sale        
-        old_price_data = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name'])
-        old_price = old_price_data.uah_amount
-        price_difference = old_price - uah_sale
-        
-        lowest_price_uah = old_data[key].get('lowest_price_uah', old_uah_sale)
+        old_uah = old_data[key].get('uah_price') or convert_to_uah(old_sale_price, old_sale_country, exchange_rates, shoe['name']).uah_amount
+        shoe['uah_price'] = uah_sale
+
+        price_difference = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name']).uah_amount - uah_sale
+        lowest_price_uah = old_data[key].get('lowest_price_uah') or old_uah
         if uah_sale < lowest_price_uah:
-            shoe['lowest_price'] = shoe['sale_price']
-            shoe['lowest_price_uah'] = uah_sale
+            shoe['lowest_price'], shoe['lowest_price_uah'] = shoe['sale_price'], uah_sale
         else:
             shoe['lowest_price'] = old_data[key].get('lowest_price', old_sale_price)
             shoe['lowest_price_uah'] = lowest_price_uah
 
         shoe['active'] = True
-        if price_difference >= 400 or (not old_data[key].get('active', True) and price_difference >= 400):
+        if price_difference >= 400:
             status = "Update" if old_data[key].get('active', True) else "Back in stock"
-            message = (f"💎💎💎 {status} 💎💎💎 \n{shoe['name']}:\n\n"
-                       f"💀 Prices : <s>{shoe['original_price']}</s>  <s>{old_sale_price}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i> \n"
-                       f"🤑 Grivniki : {uah_sale} UAH\n"
-                       f"📉 Lowest price : {shoe['lowest_price']} ({shoe['lowest_price_uah']} UAH)\n"
-                       f"🧊 Kurs : {kurs_symbol} {kurs} \n"
-                       f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
-                       f"🌍 Country : {country}")
+            message = build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol, old_sale_price, status)
             message_id = await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
-            
             while not message_queue.is_message_sent(message_id):
                 await asyncio.sleep(1)
-                
             processed_shoes.add(key)
 
-        shoe['active'] = True
         old_data[key] = shoe
         save_shoe_data(old_data)
 
@@ -920,7 +806,7 @@ async def process_country(base_url, country):
     
 async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     new_shoe_count = 0
-    semaphore = asyncio.Semaphore(25)
+    semaphore = asyncio.Semaphore(10)
     total_items = len(all_shoes)
 
     async def process_single_shoe(i, shoe):
@@ -929,7 +815,6 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
             country = shoe['country']
             name = shoe['name']
             unique_id = shoe['unique_id']
-            store = shoe['store']
             key = f"{name}_{unique_id}"
             sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
             
