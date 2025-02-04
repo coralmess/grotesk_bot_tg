@@ -12,12 +12,11 @@ import html
 import io
 import uuid
 import requests
+import sqlite3
 from telegram.ext import CommandHandler, Application
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple
 from datetime import datetime
-from selenium import webdriver
-from selenium.webdriver.firefox.options import Options
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from telegram import Bot
@@ -28,8 +27,9 @@ from PIL import Image, ImageDraw, ImageFont
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.8.0"
+BOT_VERSION = "3.9.0"
 last_git_pull_time = None
+DB_NAME = "shoes.db"
 
 class CompactGroupedMessageHandler(logging.Handler):
     def __init__(self, timeout=5):
@@ -271,16 +271,6 @@ def process_image(image_url, uah_price, sale_percentage):
     finally:
         response.close()
 
-def get_driver():
-    options = Options()
-    options.headless = True
-    # options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    return webdriver.Firefox(options=options)
-
 async def get_page_content(url, country):
     async with async_playwright() as p:
         browser = await p.firefox.launch(headless=not LIVE_MODE)
@@ -352,16 +342,115 @@ async def get_soup(url, country, max_retries=3):
                 logger.error(f"Failed to get soup for {url}")
                 raise
 
-def load_shoe_data():
+def connect_db():
+    conn = sqlite3.connect(DB_NAME)
+    conn.execute('PRAGMA foreign_keys = ON')
+    return conn
+
+def create_shoe_table():
+    conn = connect_db()
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS shoes (
+            key TEXT PRIMARY KEY,
+            name TEXT,
+            unique_id TEXT,
+            original_price TEXT,
+            sale_price TEXT,
+            image_url TEXT,
+            store TEXT,
+            country TEXT,
+            shoe_link TEXT,
+            lowest_price TEXT,
+            lowest_price_uah REAL,
+            uah_price REAL,
+            active INTEGER
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def load_shoe_data_from_db():
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM shoes')
+    rows = cursor.fetchall()
+    conn.close()
+    data = {}
+    for row in rows:
+        key = row[0]
+        data[key] = {
+            'name': row[1],
+            'unique_id': row[2],
+            'original_price': row[3],
+            'sale_price': row[4],
+            'image_url': row[5],
+            'store': row[6],
+            'country': row[7],
+            'shoe_link': row[8],
+            'lowest_price': row[9],
+            'lowest_price_uah': row[10],
+            'uah_price': row[11],
+            'active': bool(row[12])
+        }
+    return data
+
+def save_shoe_data_to_db(shoe_data):
+    conn = connect_db()
+    cursor = conn.cursor()
+    for key, shoe in shoe_data.items():
+        cursor.execute('''
+            INSERT OR REPLACE INTO shoes (
+                key, name, unique_id, original_price, sale_price, 
+                image_url, store, country, shoe_link, lowest_price,
+                lowest_price_uah, uah_price, active
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ''', (
+            key,
+            shoe['name'],
+            shoe['unique_id'],
+            shoe['original_price'],
+            shoe['sale_price'],
+            shoe['image_url'],
+            shoe['store'],
+            shoe['country'],
+            shoe.get('shoe_link',''),
+            shoe.get('lowest_price',''),
+            shoe.get('lowest_price_uah',0),
+            shoe.get('uah_price',0),
+            1 if shoe.get('active', True) else 0
+        ))
+    conn.commit()
+    conn.close()
+
+def load_shoe_data_from_json():
+    """Load shoe data from the old JSON file."""
     try:
         with open(SHOE_DATA_FILE, 'r') as f:
             return json.load(f)
-    except FileNotFoundError:
+    except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
+def migrate_json_to_sqlite():
+    # Only do this if DB is empty
+    conn = connect_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM shoes')
+    row_count = cursor.fetchone()[0]
+    conn.close()
+
+    # If empty, read JSON and insert into DB
+    if row_count == 0:
+        json_data = load_shoe_data_from_json()
+        if json_data:
+            save_shoe_data_to_db(json_data)
+
+def load_shoe_data():
+    create_shoe_table()
+    migrate_json_to_sqlite()
+    return load_shoe_data_from_db()
+
 def save_shoe_data(data):
-    with open(SHOE_DATA_FILE, 'w') as f:
-        json.dump(data, f)
+    save_shoe_data_to_db(data)
     
 def is_lyst_domain(url):
     parsed_url = urllib.parse.urlparse(url)
