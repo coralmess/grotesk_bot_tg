@@ -28,7 +28,7 @@ from asyncio import Semaphore
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "3.9.0"
+BOT_VERSION = "4.0.0"
 last_git_pull_time = None
 DB_NAME = "shoes.db"
 
@@ -393,14 +393,9 @@ def load_shoe_data_from_db():
 def save_shoe_data_to_db(shoe_data):
     conn = connect_db()
     cursor = conn.cursor()
+    data = []
     for key, shoe in shoe_data.items():
-        cursor.execute('''
-            INSERT OR REPLACE INTO shoes (
-                key, name, unique_id, original_price, sale_price, 
-                image_url, store, country, shoe_link, lowest_price,
-                lowest_price_uah, uah_price, active
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ''', (
+        data.append((
             key,
             shoe['name'],
             shoe['unique_id'],
@@ -409,14 +404,35 @@ def save_shoe_data_to_db(shoe_data):
             shoe['image_url'],
             shoe['store'],
             shoe['country'],
-            shoe.get('shoe_link',''),
-            shoe.get('lowest_price',''),
-            shoe.get('lowest_price_uah',0),
-            shoe.get('uah_price',0),
+            shoe.get('shoe_link', ''),
+            shoe.get('lowest_price', ''),
+            shoe.get('lowest_price_uah', 0.0),
+            shoe.get('uah_price', 0.0),
             1 if shoe.get('active', True) else 0
         ))
-    conn.commit()
-    conn.close()
+    try:
+        cursor.executemany('''
+            INSERT OR REPLACE INTO shoes (
+                key,
+                name,
+                unique_id,
+                original_price,
+                sale_price,
+                image_url,
+                store,
+                country,
+                shoe_link,
+                lowest_price,
+                lowest_price_uah,
+                uah_price,
+                active
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ''', data)
+        conn.commit()
+    except sqlite3.Error as e:
+        logger.error(f"Database error: {e}")
+    finally:
+        conn.close()
 
 def load_shoe_data_from_json():
     """Load shoe data from the old JSON file."""
