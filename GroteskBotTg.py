@@ -24,6 +24,7 @@ from telegram.error import RetryAfter, TimedOut
 from config import TELEGRAM_BOT_TOKEN, EXCHANGERATE_API_KEY, BASE_URLS
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
+from asyncio import Semaphore
 
 colorama.init(autoreset=True)
 
@@ -272,32 +273,27 @@ def process_image(image_url, uah_price, sale_percentage):
         response.close()
 
 async def get_page_content(url, country):
-    async with async_playwright() as p:
-        browser = await p.firefox.launch(headless=not LIVE_MODE)
+    async with (await browser_pool.get_browser()) as browser:
         context = await browser.new_context()
-        
         await context.add_cookies([{
             'name': 'country',
             'value': country,
             'domain': '.lyst.com',
             'path': '/'
         }])
-        
         page = await context.new_page()
         
         await page.goto(url)
-        
         await scroll_page(page)
         
         try:
             await page.wait_for_selector('._693owt3', timeout=10000)
         except:
-            await browser.close()
+            await context.close()
             return None
         
         content = await page.content()
-        
-        await browser.close()
+        await context.close()
         return content
 
 async def scroll_page(page):
@@ -466,114 +462,110 @@ def extract_price(price_str):
         return 0
 
 async def get_final_clear_link(initial_url, semaphore, item_name, country, current_item, total_items):
-    async with semaphore:
-        logger.info(f"Processing final link for {item_name} | Country: {country} | Progress: {current_item}/{total_items}")
-        async with async_playwright() as p:
-            browser = await p.firefox.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
+    logger.info(f"Processing final link for {item_name} | Country: {country} | Progress: {current_item}/{total_items}")
+    async with (await browser_pool.get_browser()) as browser:
+        context = await browser.new_context()
+        page = await context.new_page()
 
-            steps_info = {'steps_taken': [], 'final_step': None, 'initial_url': initial_url, 'final_url': None}
+        steps_info = {'steps_taken': [], 'final_step': None, 'initial_url': initial_url, 'final_url': None}
+        try:
+            await page.goto(initial_url)
+            # Step 1: Initial URL change
+            start_time = time.time()
+            await page.wait_for_url(lambda url: url != initial_url, timeout=20000)
+            wait_time = time.time() - start_time
+            max_wait_times['url_changes'] = max(max_wait_times['url_changes'], wait_time)
+            current_step = 'Initial URL change'
+            steps_info['steps_taken'].append(current_step)
+            link_statistics['steps'][current_step]['count'] += 1
 
-            try:
-                await page.goto(initial_url)
+            await asyncio.sleep(5)
 
-                # Step 1: Initial URL change
-                start_time = time.time()
-                await page.wait_for_url(lambda url: url != initial_url, timeout=20000)
-                wait_time = time.time() - start_time
-                max_wait_times['url_changes'] = max(max_wait_times['url_changes'], wait_time)
-                current_step = 'Initial URL change'
-                steps_info['steps_taken'].append(current_step)
+            current_url = page.url
+
+            def extract_embedded_url(url):
+                parsed = urllib.parse.urlparse(url)
+                query_params = urllib.parse.parse_qs(parsed.query)
+                for param in ['URL', 'murl', 'destination', 'url']:
+                    if param in query_params:
+                        return urllib.parse.unquote(query_params[param][0])
+                return url
+
+            # Check for embedded URL at each step
+            current_url = extract_embedded_url(current_url)
+
+            # Check if current_url is final
+            if not is_lyst_domain(current_url):
+                steps_info['final_step'] = current_step
+                steps_info['final_url'] = current_url
+                link_statistics['steps'][current_step]['final_url_obtained'] += 1
+            else:
+                # Step 2: After Buy from click
+                if "lyst.com" in current_url and "return" in current_url:
+                    await page.goto(current_url)
+                    await page.wait_for_load_state('networkidle')
+                    current_step = 'After some waiting'
+                    
+                    if not is_lyst_domain(current_url):
+                            steps_info['final_step'] = current_step
+                            steps_info['final_url'] = current_url
+                            link_statistics['steps'][current_step]['final_url_obtained'] += 1
+                # Step 3: After Click here
+                # if "lyst.com/track/lead" in current_url:
+                #     link_statistics['lyst_track_lead']['success'] += 1
+                #     try:
+                #         await page.wait_for_url(lambda url: url != current_url, timeout=30000)
+                #         current_url = page.url
+                #         current_url = extract_embedded_url(current_url)
+                #         current_step = 'Track Lead'
+                #         steps_info['steps_taken'].append(current_step)
+                #         link_statistics['steps'][current_step]['count'] += 1
+
+                #         if not is_lyst_domain(current_url):
+                #             steps_info['final_step'] = current_step
+                #             steps_info['final_url'] = current_url
+                #             link_statistics['steps'][current_step]['final_url_obtained'] += 1
+                #     except:
+                #         link_statistics['click_here']['fail'] += 1
+                #         link_statistics['click_here']['fail_links'].append(current_url)
+                # else:
+                #     if is_lyst_domain(current_url):
+                #         link_statistics['lyst_track_lead']['fail'] += 1
+                #         link_statistics['lyst_track_lead']['fail_links'].append(current_url)
+                #     else:
+                #         embedded_url = extract_embedded_url(current_url)
+                #         if embedded_url != current_url:
+                #             current_url = embedded_url
+                #             current_step = 'After embedded URL extraction'
+                #             steps_info['steps_taken'].append(current_step)
+                #             link_statistics['steps'][current_step]['count'] += 1
+
+                #             if not is_lyst_domain(current_url):
+                #                 steps_info['final_step'] = current_step
+                #                 steps_info['final_url'] = current_url
+                #                 link_statistics['steps'][current_step]['final_url_obtained'] += 1
+
+            # If final URL was not obtained, mark as Unknown
+            if steps_info['final_url'] is None:
+                steps_info['final_url'] = current_url
+                steps_info['final_step'] = 'Unknown'
+                current_step = 'Unknown'
                 link_statistics['steps'][current_step]['count'] += 1
+                link_statistics['steps'][current_step]['final_url_obtained'] += 0
 
-                await asyncio.sleep(5)
+            final_url = steps_info['final_url']
+            final_url = urllib.parse.unquote(final_url)
 
-                current_url = page.url
+            logger.info(f"Final link obtained for: {item_name}")
 
-                def extract_embedded_url(url):
-                    parsed = urllib.parse.urlparse(url)
-                    query_params = urllib.parse.parse_qs(parsed.query)
-                    for param in ['URL', 'murl', 'destination', 'url']:
-                        if param in query_params:
-                            return urllib.parse.unquote(query_params[param][0])
-                    return url
+            return final_url
 
-                # Check for embedded URL at each step
-                current_url = extract_embedded_url(current_url)
-
-                # Check if current_url is final
-                if not is_lyst_domain(current_url):
-                    steps_info['final_step'] = current_step
-                    steps_info['final_url'] = current_url
-                    link_statistics['steps'][current_step]['final_url_obtained'] += 1
-                else:
-                    # Step 2: After Buy from click
-                    if "lyst.com" in current_url and "return" in current_url:
-                        await page.goto(current_url)
-                        await page.wait_for_load_state('networkidle')
-                        current_step = 'After some waiting'
-                        
-                        if not is_lyst_domain(current_url):
-                                steps_info['final_step'] = current_step
-                                steps_info['final_url'] = current_url
-                                link_statistics['steps'][current_step]['final_url_obtained'] += 1
-                    # Step 3: After Click here
-                    # if "lyst.com/track/lead" in current_url:
-                    #     link_statistics['lyst_track_lead']['success'] += 1
-                    #     try:
-                    #         await page.wait_for_url(lambda url: url != current_url, timeout=30000)
-                    #         current_url = page.url
-                    #         current_url = extract_embedded_url(current_url)
-                    #         current_step = 'Track Lead'
-                    #         steps_info['steps_taken'].append(current_step)
-                    #         link_statistics['steps'][current_step]['count'] += 1
-
-                    #         if not is_lyst_domain(current_url):
-                    #             steps_info['final_step'] = current_step
-                    #             steps_info['final_url'] = current_url
-                    #             link_statistics['steps'][current_step]['final_url_obtained'] += 1
-                    #     except:
-                    #         link_statistics['click_here']['fail'] += 1
-                    #         link_statistics['click_here']['fail_links'].append(current_url)
-                    # else:
-                    #     if is_lyst_domain(current_url):
-                    #         link_statistics['lyst_track_lead']['fail'] += 1
-                    #         link_statistics['lyst_track_lead']['fail_links'].append(current_url)
-                    #     else:
-                    #         embedded_url = extract_embedded_url(current_url)
-                    #         if embedded_url != current_url:
-                    #             current_url = embedded_url
-                    #             current_step = 'After embedded URL extraction'
-                    #             steps_info['steps_taken'].append(current_step)
-                    #             link_statistics['steps'][current_step]['count'] += 1
-
-                    #             if not is_lyst_domain(current_url):
-                    #                 steps_info['final_step'] = current_step
-                    #                 steps_info['final_url'] = current_url
-                    #                 link_statistics['steps'][current_step]['final_url_obtained'] += 1
-
-                # If final URL was not obtained, mark as Unknown
-                if steps_info['final_url'] is None:
-                    steps_info['final_url'] = current_url
-                    steps_info['final_step'] = 'Unknown'
-                    current_step = 'Unknown'
-                    link_statistics['steps'][current_step]['count'] += 1
-                    link_statistics['steps'][current_step]['final_url_obtained'] += 0
-
-                final_url = steps_info['final_url']
-                final_url = urllib.parse.unquote(final_url)
-
-                logger.info(f"Final link obtained for: {item_name}")
-
-                return final_url
-
-            except Exception as e:
-                link_statistics['other_failures']['count'] += 1
-                link_statistics['other_failures']['links'].append(initial_url)
-                return initial_url
-            finally:
-                await browser.close()
+        except Exception as e:
+            link_statistics['other_failures']['count'] += 1
+            link_statistics['other_failures']['links'].append(initial_url)
+            return initial_url
+        finally:
+            await context.close()
 
 def extract_shoe_data(card, country):
     if not card: 
@@ -1012,6 +1004,44 @@ def print_link_statistics():
 def center_text(text, width, fill_char=' '):
     padding = (width - len(text)) // 2
     return fill_char * padding + text + fill_char * (width - padding - len(text))
+
+class BrowserPool:
+    def __init__(self, max_browsers=6):
+        self.max_browsers = max_browsers
+        self._semaphore = Semaphore(self.max_browsers)
+        self._playwright = None
+        self._browser_type = None
+
+    async def init(self):
+        if not self._playwright:
+            self._playwright = await async_playwright().start()
+            self._browser_type = self._playwright.firefox
+
+    async def close(self):
+        # Not strictly needed in long-running processes, but useful on shutdown
+        await self._playwright.stop()
+        self._playwright = None
+
+    async def get_browser(self):
+        await self.init()
+        await self._semaphore.acquire()
+        browser = await self._browser_type.launch(headless=not LIVE_MODE)
+        return BrowserWrapper(browser, self._semaphore)
+
+class BrowserWrapper:
+    def __init__(self, browser, semaphore):
+        self.browser = browser
+        self._semaphore = semaphore
+
+    async def __aenter__(self):
+        return self.browser
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        await self.browser.close()
+        self._semaphore.release()
+
+# Create a global BrowserPool
+browser_pool = BrowserPool(max_browsers=6)
 
 async def main():
     global processed_shoes, LIVE_MODE
