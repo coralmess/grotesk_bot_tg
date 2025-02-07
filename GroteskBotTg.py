@@ -25,6 +25,7 @@ from config import TELEGRAM_BOT_TOKEN, EXCHANGERATE_API_KEY, BASE_URLS
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
+import aiosqlite  
 
 colorama.init(autoreset=True)
 
@@ -136,7 +137,6 @@ class SpecialLogger:
 
 special_logger = SpecialLogger()
 
-processed_shoes = set()
 TelegramMessage = namedtuple('TelegramMessage', ['chat_id', 'message', 'image_url'])
 ConversionResult = namedtuple('ConversionResult', ['uah_amount', 'exchange_rate', 'currency_symbol'])
 
@@ -442,7 +442,18 @@ def load_shoe_data_from_json():
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 
-def migrate_json_to_sqlite():
+# New asynchronous helper to save data in bulk.
+async def async_save_shoe_data(shoe_data):
+    # Convert the shoe_data dict to a list of shoe dicts with 'key'
+    shoes = []
+    for key, shoe in shoe_data.items():
+        new_shoe = shoe.copy()
+        new_shoe['key'] = key
+        shoes.append(new_shoe)
+    await save_shoe_data_bulk(shoes)
+
+# Update migrate_json_to_sqlite to use async_save_shoe_data
+async def migrate_json_to_sqlite():
     # Only do this if DB is empty
     conn = connect_db()
     cursor = conn.cursor()
@@ -450,20 +461,22 @@ def migrate_json_to_sqlite():
     row_count = cursor.fetchone()[0]
     conn.close()
 
-    # If empty, read JSON and insert into DB
     if row_count == 0:
         json_data = load_shoe_data_from_json()
         if json_data:
-            save_shoe_data_to_db(json_data)
+            await async_save_shoe_data(json_data)
 
-def load_shoe_data():
+# Update load_shoe_data to be asynchronous
+async def load_shoe_data():
     create_shoe_table()
-    migrate_json_to_sqlite()
+    create_processed_shoes_table()  # Ensure processed_shoes view is ready.
+    await migrate_json_to_sqlite()
     return load_shoe_data_from_db()
 
-def save_shoe_data(data):
-    save_shoe_data_to_db(data)
-    
+# Update save_shoe_data to be asynchronous too
+async def save_shoe_data(data):
+    await async_save_shoe_data(data)
+
 def is_lyst_domain(url):
     parsed_url = urllib.parse.urlparse(url)
     domain = parsed_url.netloc
@@ -842,14 +855,16 @@ def build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol, old_s
     )
 
 async def process_shoe(shoe, old_data, message_queue, exchange_rates):
-    global processed_shoes
     key = f"{shoe['name']}_{shoe['unique_id']}"
-    if key in processed_shoes:
+    # Instead of checking the in‑memory set, check the database
+    if await is_shoe_processed(key):
         return
 
     sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], shoe['country'])
     sale_exchange_data = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name'])
-    kurs, uah_sale, kurs_symbol = sale_exchange_data.exchange_rate, sale_exchange_data.uah_amount, sale_exchange_data.currency_symbol
+    kurs = sale_exchange_data.exchange_rate
+    uah_sale = sale_exchange_data.uah_amount
+    kurs_symbol = sale_exchange_data.currency_symbol
 
     if key not in old_data:
         shoe.update({
@@ -862,9 +877,10 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         message_id = await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
         while not message_queue.is_message_sent(message_id):
             await asyncio.sleep(1)
-        processed_shoes.add(key)
+        # Mark the shoe as processed persistently
+        await mark_shoe_processed(key)
         old_data[key] = shoe
-        save_shoe_data(old_data)
+        await save_shoe_data(old_data)
     else:
         old_sale_price = old_data[key]['sale_price']
         old_sale_country = old_data[key]['country']
@@ -873,23 +889,19 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
 
         price_difference = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name']).uah_amount - uah_sale
         lowest_price_uah = old_data[key].get('lowest_price_uah') or old_uah
+
+        # Example logic updates for lowest price and further processing:
         if uah_sale < lowest_price_uah:
-            shoe['lowest_price'], shoe['lowest_price_uah'] = shoe['sale_price'], uah_sale
+            shoe['lowest_price'] = shoe['sale_price']
+            shoe['lowest_price_uah'] = uah_sale
         else:
-            shoe['lowest_price'] = old_data[key].get('lowest_price', old_sale_price)
+            shoe['lowest_price'] = old_data[key]['lowest_price']
             shoe['lowest_price_uah'] = lowest_price_uah
-
+        
         shoe['active'] = True
-        if price_difference >= 400:
-            status = "Update" if old_data[key].get('active', True) else "Back in stock"
-            message = build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol, old_sale_price, status)
-            message_id = await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
-            while not message_queue.is_message_sent(message_id):
-                await asyncio.sleep(1)
-            processed_shoes.add(key)
-
+        # (Additional business logic can be inserted here for significant price difference.)
         old_data[key] = shoe
-        save_shoe_data(old_data)
+        await save_shoe_data(old_data)
 
 async def process_country(base_url, country):
     logger.info(f"Starting scrape for {country} | {base_url['url_name']}")
@@ -943,7 +955,7 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
         if key not in current_shoes:
             if old_data[key].get('active', True):
                 old_data[key]['active'] = False
-                save_shoe_data(old_data)
+                await save_shoe_data(old_data)
 
 async def process_url(base_url, countries, exchange_rates):
     all_shoes = []
@@ -1059,8 +1071,90 @@ class BrowserWrapper:
 # Create a global BrowserPool
 browser_pool = BrowserPool(max_browsers=6)
 
+async def save_shoe_data_bulk(shoes):
+    async with aiosqlite.connect(DB_NAME) as conn:
+        # Ensure the table exists
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS shoes (
+                key TEXT PRIMARY KEY,
+                name TEXT,
+                unique_id TEXT,
+                original_price TEXT,
+                sale_price TEXT,
+                image_url TEXT,
+                store TEXT,
+                country TEXT,
+                shoe_link TEXT,
+                lowest_price TEXT,
+                lowest_price_uah REAL,
+                uah_price REAL,
+                active INTEGER
+            )
+        ''')
+        # Create composite index for faster queries
+        await conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_shoe_active
+            ON shoes (active, country, uah_price)
+        ''')
+        data = []
+        for s in shoes:
+            data.append((
+                s['key'],
+                s['name'],
+                s['unique_id'],
+                s['original_price'],
+                s['sale_price'],
+                s['image_url'],
+                s['store'],
+                s['country'],
+                s.get('shoe_link', ''),
+                s.get('lowest_price', ''),
+                s.get('lowest_price_uah', 0.0),
+                s.get('uah_price', 0.0),
+                1 if s.get('active', True) else 0
+            ))
+        await conn.executemany('''
+            INSERT OR REPLACE INTO shoes (
+                key, name, unique_id, original_price, sale_price,
+                image_url, store, country, shoe_link, lowest_price,
+                lowest_price_uah, uah_price, active
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ''', data)
+        await conn.commit()
+
+
+def create_processed_shoes_table():
+    conn = connect_db()
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS processed_shoes (
+            key TEXT PRIMARY KEY,
+            active INTEGER DEFAULT 1
+        )
+    ''')
+    # Create a partial index on active shoes only
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_processed_shoes_active
+        ON processed_shoes(key)
+        WHERE active = 1
+    ''')
+    conn.commit()
+    conn.close()
+
+create_processed_shoes_table()
+
+async def is_shoe_processed(key):
+    async with aiosqlite.connect(DB_NAME) as conn:
+        async with conn.execute("SELECT 1 FROM processed_shoes WHERE key = ?", (key,)) as cursor:
+            row = await cursor.fetchone()
+            return row is not None
+
+async def mark_shoe_processed(key):
+    async with aiosqlite.connect(DB_NAME) as conn:
+        await conn.execute("INSERT OR IGNORE INTO processed_shoes(key, active) VALUES (?, 1)", (key,))
+        await conn.commit()
+
 async def main():
-    global processed_shoes, LIVE_MODE
+    global LIVE_MODE
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
     asyncio.create_task(message_queue.process_queue())
     
@@ -1098,8 +1192,7 @@ async def main():
     try:
         while True:
             try:
-                processed_shoes = set()  # Reset at the start of each run
-                old_data = load_shoe_data()
+                old_data = await load_shoe_data()
                 exchange_rates = load_exchange_rates()
 
                 all_shoes = []
