@@ -29,7 +29,7 @@ import aiosqlite
 
 colorama.init(autoreset=True)
 
-BOT_VERSION = "4.0.0"
+BOT_VERSION = "4.1.0"
 last_git_pull_time = None
 DB_NAME = "shoes.db"
 
@@ -298,7 +298,7 @@ async def get_page_content(url, country):
 
 async def scroll_page(page):
     SCROLL_PAUSE_TIME = 1 if not LIVE_MODE else 10
-    SCROLL_STEP = 600
+    SCROLL_STEP = 700
     MAX_SCROLL_ATTEMPTS = 100
 
     last_height = await page.evaluate("document.body.scrollHeight")
@@ -915,7 +915,7 @@ async def process_country(base_url, country):
     
 async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     new_shoe_count = 0
-    semaphore = asyncio.Semaphore(10)
+    semaphore = asyncio.Semaphore(16)
     total_items = len(all_shoes)
 
     async def process_single_shoe(i, shoe):
