@@ -478,7 +478,7 @@ def extract_shoe_data(card, country):
             logger.warning("Price div not found")
             return None
             
-        original_price_elem = price_div.find('div', class_=lambda x: '_1b08vvhor' in x and 'vjlibs1' in x)
+        original_price_elem = price_div.find('div', class_=lambda x: '_1b08vvhos' in x and 'vjlibs1' in x)
         sale_price_elem = price_div.find('div', class_=lambda x: '_1b08vvh1w' in x and 'vjlibs2' in x)
         if original_price_elem == sale_price_elem: return None
         if not original_price_elem or not sale_price_elem:
