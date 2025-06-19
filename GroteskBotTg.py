@@ -21,6 +21,9 @@ LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
 
+# Database semaphore to prevent concurrent access issues
+DB_SEMAPHORE = Semaphore(1)
+
 # Define namedtuples and container classes
 TelegramMessage = namedtuple('TelegramMessage', ['chat_id', 'message', 'image_url'])
 ConversionResult = namedtuple('ConversionResult', ['uah_amount', 'exchange_rate', 'currency_symbol'])
@@ -241,8 +244,11 @@ def process_image(image_url, uah_price, sale_percentage):
 
 # Database functions
 def connect_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = sqlite3.connect(DB_NAME, timeout=30.0)
     conn.execute('PRAGMA foreign_keys = ON')
+    conn.execute('PRAGMA journal_mode = WAL')
+    conn.execute('PRAGMA synchronous = NORMAL')
+    conn.execute('PRAGMA busy_timeout = 30000')
     return conn
 
 def create_tables():
@@ -260,20 +266,34 @@ def create_tables():
     conn.commit()
     conn.close()
 
-async def db_operation(operation_func):
-    """Helper function to handle database operations with proper connection management"""
-    async with aiosqlite.connect(DB_NAME) as conn:
-        await operation_func(conn)
+async def db_operation_with_retry(operation_func, max_retries=3):
+    """Helper function to handle database operations with retry logic"""
+    async with DB_SEMAPHORE:
+        for attempt in range(max_retries):
+            try:
+                async with aiosqlite.connect(DB_NAME, timeout=30.0) as conn:
+                    await conn.execute('PRAGMA journal_mode = WAL')
+                    await conn.execute('PRAGMA synchronous = NORMAL')
+                    await conn.execute('PRAGMA busy_timeout = 30000')
+                    return await operation_func(conn)
+            except Exception as e:
+                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
+                    logger.warning(f"Database locked, retrying in {2 ** attempt} seconds (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                raise
 
 async def is_shoe_processed(key):
-    async with aiosqlite.connect(DB_NAME) as conn:
+    async def _operation(conn):
         async with conn.execute("SELECT 1 FROM processed_shoes WHERE key = ?", (key,)) as cursor:
             return await cursor.fetchone() is not None
+    return await db_operation_with_retry(_operation)
 
 async def mark_shoe_processed(key):
-    await db_operation(lambda conn: conn.execute(
-        "INSERT OR IGNORE INTO processed_shoes(key, active) VALUES (?, 1)", (key,)))
-    await db_operation(lambda conn: conn.commit())
+    async def _operation(conn):
+        await conn.execute("INSERT OR IGNORE INTO processed_shoes(key, active) VALUES (?, 1)", (key,))
+        await conn.commit()
+    await db_operation_with_retry(_operation)
 
 def load_shoe_data_from_db():
     conn = connect_db()
@@ -297,7 +317,7 @@ def load_shoe_data_from_json():
 
 async def save_shoe_data_bulk(shoes):
     """Save multiple shoes to database in a single transaction."""
-    async with aiosqlite.connect(DB_NAME) as conn:
+    async def _operation(conn):
         # Ensure tables exist
         await conn.execute('''CREATE TABLE IF NOT EXISTS shoes (
             key TEXT PRIMARY KEY, name TEXT, unique_id TEXT,
@@ -322,15 +342,20 @@ async def save_shoe_data_bulk(shoes):
             lowest_price_uah, uah_price, active
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''', data)
         await conn.commit()
+    
+    await db_operation_with_retry(_operation)
 
 async def async_save_shoe_data(shoe_data):
     shoes = [dict(shoe, key=key) for key, shoe in shoe_data.items()]
     await save_shoe_data_bulk(shoes)
 
 async def migrate_json_to_sqlite():
-    async with aiosqlite.connect(DB_NAME) as conn:
+    async def _operation(conn):
         async with conn.execute('SELECT COUNT(*) FROM shoes') as cursor:
             row_count = (await cursor.fetchone())[0]
+        return row_count
+    
+    row_count = await db_operation_with_retry(_operation)
     
     if row_count == 0:
         json_data = load_shoe_data_from_json()
@@ -744,7 +769,8 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
             await asyncio.sleep(1)
         await mark_shoe_processed(key)
         old_data[key] = shoe
-        await save_shoe_data(old_data)
+        # Save individual shoe instead of entire dataset
+        await save_shoe_data_bulk([dict(shoe, key=key)])
     else:
         # Update existing shoe
         old_shoe = old_data[key]
@@ -762,44 +788,58 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
         
         shoe['active'] = True
         old_data[key] = shoe
-        await save_shoe_data(old_data)
+        # Save individual shoe instead of entire dataset
+        await save_shoe_data_bulk([dict(shoe, key=key)])
 
 async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     new_shoe_count = 0
-    semaphore = asyncio.Semaphore(16)
+    semaphore = asyncio.Semaphore(8)  # Reduce concurrency to prevent database locks
     total_items = len(all_shoes)
 
     async def process_single_shoe(i, shoe):
         nonlocal new_shoe_count
-        try:
-            country, name, unique_id = shoe['country'], shoe['name'], shoe['unique_id']
-            key = f"{name}_{unique_id}"
-            sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
-            
-            if sale_percentage < shoe['base_url']['min_sale']: return
+        async with semaphore:  # Limit concurrency
+            try:
+                country, name, unique_id = shoe['country'], shoe['name'], shoe['unique_id']
+                key = f"{name}_{unique_id}"
+                sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
+                
+                if sale_percentage < shoe['base_url']['min_sale']: return
 
-            # Get final link or use existing one
-            if key not in old_data:
-                shoe['shoe_link'] = await get_final_clear_link(shoe['shoe_link'], semaphore, name, country, i, total_items)
-                new_shoe_count += 1
-            else:
-                shoe['shoe_link'] = old_data[key]['shoe_link']
-            
-            await process_shoe(shoe, old_data, message_queue, exchange_rates)
-        except Exception as e:
-            logger.error(f"Error processing shoe {shoe.get('name', 'unknown')}: {e}")
-            logger.error(traceback.format_exc())
+                # Get final link or use existing one
+                if key not in old_data:
+                    shoe['shoe_link'] = await get_final_clear_link(shoe['shoe_link'], semaphore, name, country, i, total_items)
+                    new_shoe_count += 1
+                else:
+                    shoe['shoe_link'] = old_data[key]['shoe_link']
+                
+                await process_shoe(shoe, old_data, message_queue, exchange_rates)
+            except Exception as e:
+                logger.error(f"Error processing shoe {shoe.get('name', 'unknown')}: {e}")
+                logger.error(traceback.format_exc())
 
-    # Process all shoes concurrently
-    await asyncio.gather(*[process_single_shoe(i, shoe) for i, shoe in enumerate(all_shoes, 1)])
+    # Process shoes in smaller batches to reduce database contention
+    batch_size = 10
+    for i in range(0, len(all_shoes), batch_size):
+        batch = all_shoes[i:i + batch_size]
+        await asyncio.gather(*[process_single_shoe(i + j, shoe) for j, shoe in enumerate(batch)])
+        # Small delay between batches to prevent overwhelming the database
+        await asyncio.sleep(0.1)
+    
     logger.info(f"Processed {new_shoe_count} new shoes in total")
 
-    # Handle removed shoes
+    # Handle removed shoes in batches
     current_shoes = {f"{shoe['name']}_{shoe['unique_id']}" for shoe in all_shoes}
+    removed_shoes = []
     for key, shoe in old_data.items():
         if key not in current_shoes and shoe.get('active', True):
+            shoe_copy = dict(shoe, key=key, active=False)
+            removed_shoes.append(shoe_copy)
             old_data[key]['active'] = False
-            await save_shoe_data(old_data)
+    
+    # Save removed shoes in bulk
+    if removed_shoes:
+        await save_shoe_data_bulk(removed_shoes)
 
 async def process_url(base_url, countries, exchange_rates):
     all_shoes = []
