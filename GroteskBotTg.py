@@ -17,7 +17,7 @@ import aiosqlite
 colorama.init(autoreset=True)
 BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
 last_git_pull_time = None
-LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
+LIVE_MODE, ASK_FOR_LIVE_MODE = True, True
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
 
@@ -488,10 +488,30 @@ def extract_shoe_data(card, country):
         return None
         
     try:
-        # Extract name
+        # Extract name - try multiple approaches for compatibility
         name_elements = card.find_all('span', class_=lambda x: x and 'vjlibs5' in x)
+        
+        # If no name elements found with vjlibs5, try alternative approach
         if not name_elements:
-            logger.warning("No name elements found")
+            # Look for spans that contain both vjlibs5 and vjlibs2 (new structure)
+            name_elements = card.find_all('span', class_=lambda x: x and 'vjlibs5' in x and 'vjlibs2' in x)
+        
+        # If still no name elements, try broader search
+        if not name_elements:
+            # Look for any span with vjlibs5 regardless of other classes
+            name_elements = card.find_all('span', class_=re.compile(r'.*vjlibs5.*'))
+          # Final fallback - look for spans with specific styling pattern
+        if not name_elements:
+            name_elements = card.find_all('span', class_=lambda x: x and ('_1b08vvh31' in x and 'vjlibs' in x))
+        
+        if not name_elements:
+            # Log the HTML structure for debugging
+            logger.warning(f"No name elements found. Card HTML structure:")
+            if card:
+                # Find all spans with any vjlibs class for debugging
+                debug_spans = card.find_all('span', class_=re.compile(r'.*vjlibs.*'))
+                for i, span in enumerate(debug_spans[:5]):  # Limit to first 5 to avoid spam
+                    logger.warning(f"  Debug span {i}: class='{span.get('class')}', text='{span.text.strip()[:50]}'")
             return None
             
         full_name = ' '.join(e.text.strip() for e in name_elements if e and e.text)
@@ -503,10 +523,22 @@ def extract_shoe_data(card, country):
             logger.warning("Price div not found")
             return None
                 
+        # Try multiple patterns for price extraction to handle different layouts
+        original_price_elem = None
+        sale_price_elem = None
+        
+        # Pattern 1: Old structure
         original_price_elem = price_div.find('div', class_=lambda x: x and ('_1b08vvhos' in x and 'vjlibs1' in x))
         sale_price_elem = price_div.find('div', class_=lambda x: x and ('_1b08vvh1w' in x and 'vjlibs2' in x))
         
-        # If not found, try the new pattern
+        # Pattern 2: New structure with _1b08vvhq2
+        if not original_price_elem or not sale_price_elem:
+            # Original price: has vjlibs1 and vjlibs2 but not _1b08vvh36
+            original_price_elem = price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and 'vjlibs2' in x and '_1b08vvhq2' in x and '_1b08vvh36' not in x)
+            # Sale price: has vjlibs2 and _1b08vvh36
+            sale_price_elem = price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh36' in x)
+        
+        # Pattern 3: Alternative structure
         if not original_price_elem or not sale_price_elem:
             # Look for the original price (doesn't have _1b08vvh1q but has vjlibs1)
             original_price_elem = price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and '_1b08vvhnk' in x and '_1b08vvh1q' not in x)
