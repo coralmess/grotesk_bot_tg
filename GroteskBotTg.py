@@ -17,7 +17,7 @@ import aiosqlite
 colorama.init(autoreset=True)
 BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
 last_git_pull_time = None
-LIVE_MODE, ASK_FOR_LIVE_MODE = True, True
+LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
 
