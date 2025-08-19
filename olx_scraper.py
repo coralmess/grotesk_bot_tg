@@ -58,34 +58,51 @@ def normalize_price(text: str) -> Tuple[str, int]:
 
 
 def extract_id_from_link(link: str) -> str:
-    # e.g. https://www.olx.ua/d/uk/obyavlenie/tufli-lodochki-firmy-agnona-IDP0w0I.html
+    # e.g. https://www.olx.ua/d/uk/obyavlenie/tufli-lodochki-firmy-agnona-IDP0w0I.html?reason=seller_profile
     slug = link.rstrip("/").split("/")[-1]
+    # strip query params first, then optional .html suffix
+    slug = slug.split("?", 1)[0]
     if slug.endswith(".html"):
         slug = slug[:-5]
-    # strip query params if any
-    slug = slug.split("?")[0]
     return slug
 
 
 def parse_card(card) -> Optional[OlxItem]:
     try:
-        a = card.find("a", href=True)
+        # Prefer anchor with visible title text, fallback to first anchor
+        anchors = card.find_all("a", href=True)
+        title_anchor = next((a for a in anchors if a.get_text(strip=True)), None)
+        a = title_anchor or (anchors[0] if anchors else None)
         href = a["href"] if a else None
         if not href:
             return None
         link = href if href.startswith("http") else f"{BASE_OLX}{href}"
-        name_el = card.find(["h4", "h3"]) or card.find("img", alt=True)
-        name = name_el.get_text(strip=True) if hasattr(name_el, "get_text") else (name_el["alt"].strip() if name_el else "")
-        price_el = card.find("p", attrs={"data-testid": "ad-price"})
+
+        # Name: prefer visible anchor text, then headings, then img alt
+        name = ""
+        if title_anchor:
+            name = title_anchor.get_text(strip=True)
+        if not name:
+            name_el = card.find(["h4", "h3"]) or card.find("img", alt=True)
+            name = (
+                name_el.get_text(strip=True)
+                if hasattr(name_el, "get_text")
+                else (name_el["alt"].strip() if name_el else "")
+            )
+
+        # Price: support span or p with data-testid="ad-price"
+        price_el = card.find(attrs={"data-testid": "ad-price"})
         price_text_raw = price_el.get_text(" ", strip=True) if price_el else ""
         price_text, price_int = normalize_price(price_text_raw)
-        # state
+
+        # State (condition)
         state = ""
         st = card.find("span", attrs={"title": True})
         if st and st.get("title"):
             state = str(st.get("title")).strip()
         elif st:
             state = st.get_text(strip=True)
+
         item_id = extract_id_from_link(link)
         if not (name and link and item_id):
             return None
@@ -133,6 +150,13 @@ async def fetch_html(url: str, max_retries: int = 3) -> str:
 async def scrape_olx_url(url: str) -> List[OlxItem]:
     html = await fetch_html(url)
     soup = BeautifulSoup(html, "html.parser")
+    # Skip pages that explicitly state there are zero listings
+    try:
+        page_text = soup.get_text(" ", strip=True)
+        if "Ми знайшли 0 оголошень" in page_text:
+            return []
+    except Exception:
+        pass
     items: List[OlxItem] = []
     for card in collect_cards_with_stop(soup):
         item = parse_card(card)
@@ -213,6 +237,7 @@ async def fetch_item_images(item_url: str, max_images: int = 3) -> List[str]:
         wrapper = soup.find("div", class_="swiper-wrapper")
         if not wrapper:
             return []
+        # fix type annotation syntax
         imgs: List[str] = []
         for slide in wrapper.find_all(["div", "img"], recursive=True):
             if slide.name == "img":

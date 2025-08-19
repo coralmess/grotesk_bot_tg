@@ -7,6 +7,7 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 EXCHANGERATE_API_KEY = os.getenv('EXCHANGERATE_API_KEY')
 DANYLO_DEFAULT_CHAT_ID = os.getenv('DANYLO_DEFAULT_CHAT_ID')
+TELEGRAM_OLX_BOT_TOKEN = os.getenv('TELEGRAM_OLX_BOT_TOKEN')
 
 BASE_URLS = [
     { 
@@ -87,4 +88,67 @@ BASE_URLS = [
     #     "min_sale": 65,
     #     "url_name": "Fucking shorts"
     # }
+]
+
+OLX_URLS = [
+    { 
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-riri/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID,
+        "min_sale": 50,
+        "url_name": "Riri"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-derek-rose/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "min_sale": 50,
+        "url_name": "Derek Rose"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-sunspel/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "min_sale": 50,
+        "url_name": "Sunspel"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Zimmerli/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=2000",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "min_sale": 50,
+        "url_name": "Zimmerli"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Foscarini/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "min_sale": 50,
+        "url_name": "Foscarini"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-clinch/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "min_sale": 50,
+        "url_name": "Clinch"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/25lkx/",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "min_sale": 50,
+        "url_name": "Руслана"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-James-Perse/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "min_sale": 50,
+        "url_name": "James Perse"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-John-Smedley/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "min_sale": 50,
+        "url_name": "John Smedley"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Agnona/?search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "min_sale": 50,
+        "url_name": "Agnona"
+    },
 ]
