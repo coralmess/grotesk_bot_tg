@@ -12,6 +12,7 @@ from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
 import aiosqlite
+from olx_scraper import run_olx_scraper
 
 # Initialize constants and globals
 colorama.init(autoreset=True)
@@ -21,45 +22,32 @@ LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
 
+# Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
+COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
+SALE_EMOJI_ROCKET_THRESHOLD, SALE_EMOJI_UAH_THRESHOLD = 75, 2600
+try:
+    import config as _conf
+    COUNTRY_PRIORITY = getattr(_conf, 'COUNTRY_PRIORITY', COUNTRY_PRIORITY)
+    SALE_EMOJI_ROCKET_THRESHOLD = getattr(_conf, 'SALE_EMOJI_ROCKET_THRESHOLD', SALE_EMOJI_ROCKET_THRESHOLD)
+    SALE_EMOJI_UAH_THRESHOLD = getattr(_conf, 'SALE_EMOJI_UAH_THRESHOLD', SALE_EMOJI_UAH_THRESHOLD)
+except Exception:
+    pass
+
 # Database semaphore to prevent concurrent access issues
 DB_SEMAPHORE = Semaphore(1)
 
 # Define namedtuples and container classes
-TelegramMessage = namedtuple('TelegramMessage', ['chat_id', 'message', 'image_url'])
 ConversionResult = namedtuple('ConversionResult', ['uah_amount', 'exchange_rate', 'currency_symbol'])
 
 # Statistics tracking
 max_wait_times = {'url_changes': 0, 'final_url_changes': 0}
 link_statistics = {
-    'lyst_track_lead': {'success': 0, 'fail': 0, 'fail_links': []},
-    'click_here': {'success': 0, 'fail': 0, 'fail_links': []},
-    'other_failures': {'count': 0, 'links': []},
-    'steps': {
-        'Initial URL change': {'count': 0, 'final_url_obtained': 0},
-        'After some waiting': {'count': 0, 'final_url_obtained': 0},
-        'After Click here': {'count': 0, 'final_url_obtained': 0},
-        'Track Lead': {'count': 0, 'final_url_obtained': 0},
-        'Unknown': {'count': 0, 'final_url_obtained': 0}
-    },
+    'lyst_track_lead': {'success': 0, 'fail': 0, 'fail_links': []}, 'click_here': {'success': 0, 'fail': 0, 'fail_links': []},
+    'other_failures': {'count': 0, 'links': []}, 'steps': {
+        'Initial URL change': {'count': 0, 'final_url_obtained': 0}, 'After some waiting': {'count': 0, 'final_url_obtained': 0},
+        'After Click here': {'count': 0, 'final_url_obtained': 0}, 'Track Lead': {'count': 0, 'final_url_obtained': 0}, 'Unknown': {'count': 0, 'final_url_obtained': 0}
+    }
 }
-
-class CompactGroupedMessageHandler(logging.Handler):
-    def __init__(self, timeout=5):
-        super().__init__()
-        self.message_counts = defaultdict(lambda: {'count': 0, 'last_time': 0})
-        self.timeout = timeout
-
-    def emit(self, record):
-        current_time = time.time()
-        msg = self.format(record)
-        base_msg, content_msg = msg[:23], msg[23:]
-        if content_msg in self.message_counts and current_time - self.message_counts[content_msg]['last_time'] < self.timeout:
-            self.message_counts[content_msg]['count'] += 1
-            self.message_counts[content_msg]['last_time'] = current_time
-            return
-        count = self.message_counts[content_msg]['count']
-        print(f"{base_msg}{content_msg} ({count + 1})" if count > 0 else msg)
-        self.message_counts[content_msg] = {'count': 0, 'last_time': current_time}
 
 class ColoredFormatter(logging.Formatter):
     COLORS = {'DEBUG': Fore.CYAN, 'INFO': Fore.WHITE, 'WARNING': Fore.YELLOW, 'ERROR': Fore.RED, 
@@ -96,6 +84,8 @@ class TelegramMessageQueue:
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+if logger.hasHandlers():
+    logger.handlers.clear()
 handler = logging.StreamHandler()
 handler.setFormatter(ColoredFormatter('%(asctime)s', datefmt='%d.%m %H:%M:%S'))
 logger.addHandler(handler)
@@ -243,28 +233,30 @@ def process_image(image_url, uah_price, sale_percentage):
         response.close()
 
 # Database functions
+PRAGMA_STATEMENTS = ['PRAGMA foreign_keys = ON','PRAGMA journal_mode = WAL','PRAGMA synchronous = NORMAL','PRAGMA busy_timeout = 30000']
+
 def connect_db():
     conn = sqlite3.connect(DB_NAME, timeout=30.0)
-    conn.execute('PRAGMA foreign_keys = ON')
-    conn.execute('PRAGMA journal_mode = WAL')
-    conn.execute('PRAGMA synchronous = NORMAL')
-    conn.execute('PRAGMA busy_timeout = 30000')
+    for stmt in PRAGMA_STATEMENTS:
+        conn.execute(stmt)
     return conn
 
 def create_tables():
     conn = connect_db()
-    conn.execute('''CREATE TABLE IF NOT EXISTS shoes (
+    conn.executescript('''
+    CREATE TABLE IF NOT EXISTS shoes (
         key TEXT PRIMARY KEY, name TEXT, unique_id TEXT,
         original_price TEXT, sale_price TEXT, image_url TEXT,
         store TEXT, country TEXT, shoe_link TEXT,
         lowest_price TEXT, lowest_price_uah REAL,
-        uah_price REAL, active INTEGER)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS processed_shoes (
-        key TEXT PRIMARY KEY, active INTEGER DEFAULT 1)''')
-    conn.execute('''CREATE INDEX IF NOT EXISTS idx_processed_shoes_active 
-                  ON processed_shoes(key) WHERE active = 1''')
-    conn.commit()
-    conn.close()
+        uah_price REAL, active INTEGER);
+    CREATE TABLE IF NOT EXISTS processed_shoes (
+        key TEXT PRIMARY KEY, active INTEGER DEFAULT 1);
+    CREATE INDEX IF NOT EXISTS idx_processed_shoes_active 
+        ON processed_shoes(key) WHERE active = 1;
+    CREATE INDEX IF NOT EXISTS idx_shoe_active ON shoes (active, country, uah_price);
+    ''')
+    conn.commit(); conn.close()
 
 async def db_operation_with_retry(operation_func, max_retries=3):
     """Helper function to handle database operations with retry logic"""
@@ -272,9 +264,8 @@ async def db_operation_with_retry(operation_func, max_retries=3):
         for attempt in range(max_retries):
             try:
                 async with aiosqlite.connect(DB_NAME, timeout=30.0) as conn:
-                    await conn.execute('PRAGMA journal_mode = WAL')
-                    await conn.execute('PRAGMA synchronous = NORMAL')
-                    await conn.execute('PRAGMA busy_timeout = 30000')
+                    for stmt in PRAGMA_STATEMENTS:
+                        await conn.execute(stmt)
                     return await operation_func(conn)
             except Exception as e:
                 if "database is locked" in str(e).lower() and attempt < max_retries - 1:
@@ -318,24 +309,11 @@ def load_shoe_data_from_json():
 async def save_shoe_data_bulk(shoes):
     """Save multiple shoes to database in a single transaction."""
     async def _operation(conn):
-        # Ensure tables exist
-        await conn.execute('''CREATE TABLE IF NOT EXISTS shoes (
-            key TEXT PRIMARY KEY, name TEXT, unique_id TEXT,
-            original_price TEXT, sale_price TEXT, image_url TEXT,
-            store TEXT, country TEXT, shoe_link TEXT,
-            lowest_price TEXT, lowest_price_uah REAL,
-            uah_price REAL, active INTEGER)''')
-        await conn.execute('CREATE INDEX IF NOT EXISTS idx_shoe_active ON shoes (active, country, uah_price)')
-        
-        # Prepare data for bulk insert
         data = [(
             s['key'], s['name'], s['unique_id'], s['original_price'], s['sale_price'], s['image_url'],
-            s['store'], s['country'], s.get('shoe_link', ''),
-            s.get('lowest_price', ''), s.get('lowest_price_uah', 0.0),
+            s['store'], s['country'], s.get('shoe_link', ''), s.get('lowest_price', ''), s.get('lowest_price_uah', 0.0),
             s.get('uah_price', 0.0), 1 if s.get('active', True) else 0
         ) for s in shoes]
-        
-        # Execute bulk insert
         await conn.executemany('''INSERT OR REPLACE INTO shoes (
             key, name, unique_id, original_price, sale_price,
             image_url, store, country, shoe_link, lowest_price,
@@ -352,15 +330,10 @@ async def async_save_shoe_data(shoe_data):
 async def migrate_json_to_sqlite():
     async def _operation(conn):
         async with conn.execute('SELECT COUNT(*) FROM shoes') as cursor:
-            row_count = (await cursor.fetchone())[0]
-        return row_count
-    
-    row_count = await db_operation_with_retry(_operation)
-    
-    if row_count == 0:
-        json_data = load_shoe_data_from_json()
-        if json_data:
-            await async_save_shoe_data(json_data)
+            return (await cursor.fetchone())[0]
+    if await db_operation_with_retry(_operation) == 0:
+        data = load_shoe_data_from_json()
+        if data: await async_save_shoe_data(data)
 
 async def load_shoe_data():
     create_tables()
@@ -372,8 +345,8 @@ async def save_shoe_data(data):
 
 # Web scraping and browser functions
 async def scroll_page(page):
-    SCROLL_PAUSE_TIME = 1 if not LIVE_MODE else 10
-    SCROLL_STEP, MAX_SCROLL_ATTEMPTS = 700, 100
+    SCROLL_PAUSE_TIME = 1
+    SCROLL_STEP, MAX_SCROLL_ATTEMPTS = 1000, 10
     last_height = await page.evaluate("document.body.scrollHeight")
     total_scrolled, scroll_attempts = 0, 0
 
@@ -404,7 +377,12 @@ async def get_soup(url, country, max_retries=3):
     for attempt in range(max_retries):
         try:
             content = await get_page_content(url, country)
-            return BeautifulSoup(content, 'html.parser') if content else None
+            if not content:
+                return None
+            try:
+                return BeautifulSoup(content, 'lxml')
+            except Exception:
+                return BeautifulSoup(content, 'html.parser')
         except Exception as e:
             if attempt < max_retries - 1:
                 logger.warning(f"Failed to get soup (attempt {attempt + 1}/{max_retries}). Retrying...")
@@ -417,11 +395,10 @@ def is_lyst_domain(url):
     return 'lyst.com' in urllib.parse.urlparse(url).netloc
 
 def extract_embedded_url(url):
-    parsed = urllib.parse.urlparse(url)
-    query_params = urllib.parse.parse_qs(parsed.query)
-    for param in ['URL', 'murl', 'destination', 'url']:
-        if param in query_params:
-            return urllib.parse.unquote(query_params[param][0])
+    parsed = urllib.parse.urlparse(url); qs = urllib.parse.parse_qs(parsed.query)
+    for p in ('URL','murl','destination','url'):
+        v = qs.get(p)
+        if v: return urllib.parse.unquote(v[0])
     return url
 
 async def get_final_clear_link(initial_url, semaphore, item_name, country, current_item, total_items):
@@ -488,72 +465,55 @@ def extract_shoe_data(card, country):
         return None
         
     try:
-        # Extract name - try multiple approaches for compatibility
-        name_elements = card.find_all('span', class_=lambda x: x and 'vjlibs5' in x)
-        
-        # If no name elements found with vjlibs5, try alternative approach
+        # Extract name via a few fallback strategies
+        finders = [
+            lambda: card.find_all('span', class_=lambda x: x and 'vjlibs5' in x),
+            lambda: card.find_all('span', class_=lambda x: x and 'vjlibs5' in x and 'vjlibs2' in x),
+            lambda: card.find_all('span', class_=re.compile(r'.*vjlibs5.*')),
+            lambda: card.find_all('span', class_=lambda x: x and ('_1b08vvh31' in x and 'vjlibs' in x)),
+        ]
+        name_elements = []
+        for fn in finders:
+            name_elements = fn()
+            if name_elements: break
         if not name_elements:
-            # Look for spans that contain both vjlibs5 and vjlibs2 (new structure)
-            name_elements = card.find_all('span', class_=lambda x: x and 'vjlibs5' in x and 'vjlibs2' in x)
-        
-        # If still no name elements, try broader search
-        if not name_elements:
-            # Look for any span with vjlibs5 regardless of other classes
-            name_elements = card.find_all('span', class_=re.compile(r'.*vjlibs5.*'))
-          # Final fallback - look for spans with specific styling pattern
-        if not name_elements:
-            name_elements = card.find_all('span', class_=lambda x: x and ('_1b08vvh31' in x and 'vjlibs' in x))
-        
-        if not name_elements:
-            # Log the HTML structure for debugging
             logger.warning(f"No name elements found. Card HTML structure:")
-            if card:
-                # Find all spans with any vjlibs class for debugging
-                debug_spans = card.find_all('span', class_=re.compile(r'.*vjlibs.*'))
-                for i, span in enumerate(debug_spans[:5]):  # Limit to first 5 to avoid spam
-                    logger.warning(f"  Debug span {i}: class='{span.get('class')}', text='{span.text.strip()[:50]}'")
+            debug_spans = card.find_all('span', class_=re.compile(r'.*vjlibs.*'))
+            for i, span in enumerate(debug_spans[:5]):
+                logger.warning(f"  Debug span {i}: class='{span.get('class')}', text='{span.text.strip()[:50]}'")
             return None
-            
         full_name = ' '.join(e.text.strip() for e in name_elements if e and e.text)
         if 'Giuseppe Zanotti' in full_name: return None
         
-        # Extract price
+        # Extract price elements with strategy fallbacks
         price_div = card.find('div', class_='ducdwf0')
         if not price_div:
             logger.warning("Price div not found")
             return None
-                
-        # Try multiple patterns for price extraction to handle different layouts
-        original_price_elem = None
-        sale_price_elem = None
-        
-        # Pattern 1: Old structure
-        original_price_elem = price_div.find('div', class_=lambda x: x and ('_1b08vvhos' in x and 'vjlibs1' in x))
-        sale_price_elem = price_div.find('div', class_=lambda x: x and ('_1b08vvh1w' in x and 'vjlibs2' in x))
-        
-        # Pattern 2: New structure with _1b08vvhq2
-        if not original_price_elem or not sale_price_elem:
-            # Original price: has vjlibs1 and vjlibs2 but not _1b08vvh36
-            original_price_elem = price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and 'vjlibs2' in x and '_1b08vvhq2' in x and '_1b08vvh36' not in x)
-            # Sale price: has vjlibs2 and _1b08vvh36
-            sale_price_elem = price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh36' in x)
-        
-        # Pattern 3: Alternative structure
-        if not original_price_elem or not sale_price_elem:
-            # Look for the original price (doesn't have _1b08vvh1q but has vjlibs1)
-            original_price_elem = price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and '_1b08vvhnk' in x and '_1b08vvh1q' not in x)
-            # Look for the sale price (has _1b08vvh1q and vjlibs2)
-            sale_price_elem = price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh1q' in x)
-            
-            # If still not found, try a more generic approach for the sale price (class with _1b08vvh1w)
-            if not sale_price_elem:
-                sale_price_elem = price_div.find('div', class_=lambda x: x and '_1b08vvh1w' in x)
-
-        if original_price_elem == sale_price_elem: return None
+        strategies = [
+            lambda: (
+                price_div.find('div', class_=lambda x: x and ('_1b08vvhos' in x and 'vjlibs1' in x)),
+                price_div.find('div', class_=lambda x: x and ('_1b08vvh1w' in x and 'vjlibs2' in x))
+            ),
+            lambda: (
+                price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and 'vjlibs2' in x and '_1b08vvhq2' in x and '_1b08vvh36' not in x),
+                price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh36' in x)
+            ),
+            lambda: (
+                price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and '_1b08vvhnk' in x and '_1b08vvh1q' not in x),
+                price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh1q' in x) or
+                price_div.find('div', class_=lambda x: x and '_1b08vvh1w' in x)
+            ),
+        ]
+        original_price_elem = sale_price_elem = None
+        for strat in strategies:
+            o, s = strat()
+            if o and s and o != s:
+                original_price_elem, sale_price_elem = o, s
+                break
         if not original_price_elem or not sale_price_elem:
             logger.warning("Price elements not found")
             return None
-        
         original_price = original_price_elem.text.strip() if original_price_elem.text else "N/A"
         sale_price = sale_price_elem.text.strip() if sale_price_elem.text else "N/A"
         if extract_price(original_price) < 80:
@@ -563,6 +523,10 @@ def extract_shoe_data(card, country):
         # Extract image
         img_elem = card.find('img', class_='zmhz363')
         image_url = img_elem['src'] if img_elem and 'src' in img_elem.attrs else None
+        # Ignore inline data URLs or non-external image sources
+        if not image_url or not image_url.startswith(("http://", "https://")):
+            logger.info(f"Skipping item '{full_name}' due to non-external image src")
+            return None
         
         # Extract store
         store_elem = card.find('span', class_='_1fcx6l24')
@@ -582,7 +546,6 @@ def extract_shoe_data(card, country):
             'name': full_name, 'original_price': original_price, 'sale_price': sale_price,
             'image_url': image_url, 'store': store, 'shoe_link': full_url, 'unique_id': unique_id
         }
-        
         if any(not v for v in required_fields.values()):
             missing_fields = [f for f, v in required_fields.items() if not v]
             logger.warning(f"Missing required fields: {', '.join(missing_fields)}")
@@ -622,39 +585,31 @@ async def scrape_all_pages(base_url, country):
 
 # Price and currency conversions
 def calculate_sale_percentage(original_price, sale_price, country):
+    def parse(p):
+        symbol = '€' if country in ('PL', 'IT') else '£' if country == 'GB' else '$'
+        p = p.replace(symbol, '').strip()
+        p = p.replace(',', '.') if symbol == '€' and (',' in p and '.' not in p) else p.replace(',', '')
+        return float(re.sub(r'[^\d.]', '', p) or 0)
     try:
-        if country in ['PL', 'IT']:
-            original = float(original_price.replace('€', '').replace(',', '.'))
-            sale = float(sale_price.replace('€', '').replace(',', '.'))
-        elif country == 'GB':
-            original = float(original_price.replace('£', '').replace(',', ''))
-            sale = float(sale_price.replace('£', '').replace(',', ''))
-        else:
-            original = float(original_price.replace('$', '').replace(',', ''))
-            sale = float(sale_price.replace('$', '').replace(',', ''))
+        original, sale = parse(original_price), parse(sale_price)
         return int((1 - sale / original) * 100) if original > 0 else 0
-    except ValueError:
+    except Exception:
         return 0
 
 def load_exchange_rates():
     try:
         with open(EXCHANGE_RATES_FILE, 'r') as f:
             data = json.load(f)
-        if (datetime.now() - datetime.fromisoformat(data['last_update'])).days < 1:
-            return data['rates']
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        pass
-    return update_exchange_rates()
+        is_fresh = (datetime.now() - datetime.fromisoformat(data['last_update'])).days < 1
+        return data['rates'] if is_fresh else update_exchange_rates()
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
+        return update_exchange_rates()
+
 
 def update_exchange_rates():
     try:
-        response = requests.get(f"https://v6.exchangerate-api.com/v6/{EXCHANGERATE_API_KEY}/latest/UAH")
-        data = response.json()
-        rates = {
-            'EUR': data['conversion_rates']['EUR'],
-            'USD': data['conversion_rates']['USD'],
-            'GBP': data['conversion_rates']['GBP']
-        }
+        resp = requests.get(f"https://v6.exchangerate-api.com/v6/{EXCHANGERATE_API_KEY}/latest/UAH").json()
+        rates = {k: resp['conversion_rates'][k] for k in ('EUR', 'USD', 'GBP')}
         with open(EXCHANGE_RATES_FILE, 'w') as f:
             json.dump({'last_update': datetime.now().isoformat(), 'rates': rates}, f)
         return rates
@@ -692,8 +647,8 @@ def convert_to_uah(price, country, exchange_rates, name):
 
 # Message formatting and sending
 def get_sale_emoji(sale_percentage, uah_sale):
-    if sale_percentage >= 75: return "🚀🚀🚀"
-    if uah_sale < 2600: return "🐚🐚🐚"
+    if sale_percentage >= SALE_EMOJI_ROCKET_THRESHOLD: return "🚀🚀🚀"
+    if uah_sale < SALE_EMOJI_UAH_THRESHOLD: return "🐚🐚🐚"
     return "🍄🍄🍄"
 
 def build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol, old_sale_price=None, status=None):
@@ -746,34 +701,20 @@ async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah
 
 # Processing functions
 def filter_duplicates(shoes, exchange_rates):
-    priority = ["PL", "US", "IT", "GB"]
     filtered_shoes, grouped_shoes = [], defaultdict(list)
-
-    # Group shoes by name+id
     for shoe in shoes:
-        key = f"{shoe['name']}_{shoe['unique_id']}"
-        grouped_shoes[key].append(shoe)
+        grouped_shoes[f"{shoe['name']}_{shoe['unique_id']}"] .append(shoe)
 
-    for key, group in grouped_shoes.items():
+    for group in grouped_shoes.values():
         if len(group) == 1:
             filtered_shoes.append(group[0])
             continue
-            
-        # Sort by priority and convert prices
-        group.sort(key=lambda x: priority.index(x['country']))
+        group.sort(key=lambda x: COUNTRY_PRIORITY.index(x['country']) if x['country'] in COUNTRY_PRIORITY else len(COUNTRY_PRIORITY))
         for shoe in group:
             shoe['uah_price'] = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name']).uah_amount
-
-        base_shoe = group[0]
-        filtered_shoes.append(base_shoe)
-
-        # Replace with cheaper option if price difference is significant
-        for shoe in group[1:]:
-            if base_shoe['uah_price'] - shoe['uah_price'] >= 200:
-                filtered_shoes.pop()
-                filtered_shoes.append(shoe)
-                break
-
+        base = group[0]
+        replacement = next((s for s in group[1:] if base['uah_price'] - s['uah_price'] >= 200), None)
+        filtered_shoes.append(replacement or base)
     return filtered_shoes
 
 async def process_shoe(shoe, old_data, message_queue, exchange_rates):
@@ -823,7 +764,7 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
 
 async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     new_shoe_count = 0
-    semaphore = asyncio.Semaphore(8)  # Reduce concurrency to prevent database locks
+    semaphore = asyncio.Semaphore(9)  # Reduce concurrency to prevent database locks
     total_items = len(all_shoes)
 
     async def process_single_shoe(i, shoe):
@@ -860,35 +801,15 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
 
     # Handle removed shoes in batches
     current_shoes = {f"{shoe['name']}_{shoe['unique_id']}" for shoe in all_shoes}
-    removed_shoes = []
-    for key, shoe in old_data.items():
-        if key not in current_shoes and shoe.get('active', True):
-            shoe_copy = dict(shoe, key=key, active=False)
-            removed_shoes.append(shoe_copy)
-            old_data[key]['active'] = False
-    
-    # Save removed shoes in bulk
+    removed_shoes = [dict(shoe, key=k, active=False) for k, shoe in old_data.items() if k not in current_shoes and shoe.get('active', True)]
+    for s in removed_shoes:
+        old_data[s['key']]['active'] = False
     if removed_shoes:
         await save_shoe_data_bulk(removed_shoes)
 
 async def process_url(base_url, countries, exchange_rates):
     all_shoes = []
-    
-    async def scrape_country(country):
-        page, country_shoes = 1, []
-        while True:
-            url = f"{base_url['url']}&page={page}"
-            logger.info(f"Scraping page {page} for country {country} - {base_url['url_name']}")
-            shoes = await scrape_page(url, country)
-            if not shoes: break
-            country_shoes.extend(shoes)
-            page += 1
-            await asyncio.sleep(1)
-        return country_shoes
-
-    # Scrape all countries concurrently
-    country_results = await asyncio.gather(*[scrape_country(country) for country in countries])
-    
+    country_results = await asyncio.gather(*(scrape_all_pages(base_url, c) for c in countries))
     for country, result in zip(countries, country_results):
         for shoe in result:
             if isinstance(shoe, dict):
@@ -897,7 +818,6 @@ async def process_url(base_url, countries, exchange_rates):
             else:
                 logger.error(f"Unexpected item data type for {country}: {type(shoe)}")
         special_logger.info(f"Found {len(result)} items for {country} - {base_url['url_name']}")
-
     return all_shoes
 
 # Utility functions
@@ -916,9 +836,7 @@ def print_link_statistics():
             percentage_of_total = (final_url_count / total_final_urls) * 100 if total_final_urls > 0 else 0
             special_logger.stat(f"{step_name}: {final_url_count}/{count} final URLs obtained ({success_rate:.2f}% success rate), {percentage_of_total:.2f}% of total final URLs")
                     
-def center_text(text, width, fill_char=' '):
-    padding = (width - len(text)) // 2
-    return fill_char * padding + text + fill_char * (width - padding - len(text))
+def center_text(text, width, fill_char=' '): return text.center(width, fill_char)
 
 # Main application
 async def main():
@@ -931,18 +849,16 @@ async def main():
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("ver", ver_command))
     application.add_handler(CommandHandler("linkstat", linkstat_command))
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
+    await application.initialize(); await application.start(); await application.updater.start_polling()
 
-    # Print header
     terminal_width = shutil.get_terminal_size().columns
-    print(Fore.GREEN + '-' * terminal_width + Style.RESET_ALL)
     bot_version = f"Grotesk bot v.{BOT_VERSION}"
-    print(Fore.CYAN + Style.BRIGHT + center_text(bot_version, terminal_width) + Style.RESET_ALL)
-    print(Fore.GREEN + '-' * terminal_width + Style.RESET_ALL)
+    print(
+        Fore.GREEN + '-' * terminal_width + Style.RESET_ALL + '\n' +
+        Fore.CYAN + Style.BRIGHT + bot_version.center(terminal_width) + Style.RESET_ALL + '\n' +
+        Fore.GREEN + '-' * terminal_width + Style.RESET_ALL
+    )
 
-    # Ask for live mode if configured
     if ASK_FOR_LIVE_MODE:
         LIVE_MODE = input("Enter 'live' to enable live mode, or press Enter to continue in headless mode: ").strip().lower() == 'live'
     if LIVE_MODE:
@@ -954,6 +870,10 @@ async def main():
                 # Load data and exchange rates
                 old_data = await load_shoe_data()
                 exchange_rates = load_exchange_rates()
+
+                
+                # Also run OLX scraper this cycle
+                await run_olx_scraper()
 
                 # Process all URLs concurrently
                 url_tasks = [process_url(base_url, COUNTRIES, exchange_rates) for base_url in BASE_URLS]
