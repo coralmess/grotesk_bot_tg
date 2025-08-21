@@ -47,7 +47,8 @@ class OlxItem:
     link: str
     price_text: str
     price_int: int
-    state: str
+    state: Optional[str] = ""
+    size: Optional[str] = ""
 
 
 def normalize_price(text: str) -> Tuple[str, int]:
@@ -103,10 +104,16 @@ def parse_card(card) -> Optional[OlxItem]:
         elif st:
             state = st.get_text(strip=True)
 
+        # Size (optional), usually class "css-rkfuwj"
+        size = ""
+        size_el = card.find(class_="css-rkfuwj")
+        if size_el:
+            size = size_el.get_text(" ", strip=True)
+
         item_id = extract_id_from_link(link)
         if not (name and link and item_id):
             return None
-        return OlxItem(id=item_id, name=name, link=link, price_text=price_text, price_int=price_int, state=state)
+        return OlxItem(id=item_id, name=name, link=link, price_text=price_text, price_int=price_int, state=state, size=size)
     except Exception:
         return None
 
@@ -184,31 +191,40 @@ async def send_message(bot: Bot, chat_id: str, text: str, max_retries: int = 3):
 
 def build_message(item: OlxItem, prev: Optional[Dict], source_name: str) -> str:
     safe_name = escape(item.name, quote=True)
-    safe_state = escape(item.state or "-", quote=True)
+    safe_state = escape(item.state or "", quote=True)
+    safe_size = escape((item.size or ""), quote=True)
     safe_source = escape(source_name or "OLX", quote=True)
     safe_link = escape(item.link, quote=True)
     open_link = f'<a href="{safe_link}">Відкрити</a>'
+
+    # Compose optional lines
+    state_line = f"\n🥪 Стан: {safe_state}" if safe_state else ""
+    size_line = f"\n📏 Розмір: {safe_size}" if safe_size else ""
+
     if not prev:
         return (
             f"✨{safe_name}✨ \n\n"
-            f"💰 Ціна: {item.price_text}\n"
-            f"🥪 Стан: {safe_state}\n"
+            f"💰 Ціна: {item.price_text}" 
+            f"{state_line}"
+            f"{size_line}\n"
             f"🍘 Лінка: {safe_source}\n"
             f"🔗 {open_link}"
         )
     if prev and prev.get("price_int") != item.price_int:
         was = prev.get("price_int") or 0
         return (
-            f"OLX Price changed: {safe_name}\n"
-            f"💰 Ціна: {item.price_text} (було {was} грн)\n"
-            f"🥪 Стан: {safe_state}\n"
+            f"OLX Price changed: {safe_name}\n\n"
+            f"💰 Ціна: {item.price_text} (було {was} грн)"
+            f"{state_line}"
+            f"{size_line}\n"
             f"🍘 Лінка: {safe_source}\n"
             f"🔗 {open_link}"
         )
     return (
-        f"OLX: {safe_name}\n"
-        f"💰 Ціна: {item.price_text}\n"
-        f"🧩 Стан: {safe_state}\n"
+        f"OLX: {safe_name}\n\n"
+        f"💰 Ціна: {item.price_text}"
+        f"{state_line}"
+        f"{size_line}\n"
         f"🍘 Лінка: {safe_source}\n"
         f"🔗 {open_link}"
     )
@@ -410,6 +426,7 @@ def _db_init_sync():
                 price_text TEXT NOT NULL,
                 price_int INTEGER NOT NULL,
                 state TEXT,
+                size TEXT,
                 source TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now')),
@@ -428,7 +445,7 @@ async def db_init():
 def _db_get_item_sync(item_id: str) -> Optional[Dict]:
     with _db_connect() as conn:
         cur = conn.execute(
-            "SELECT id, name, link, price_text, price_int, state, source, created_at, updated_at, last_sent_at FROM olx_items WHERE id = ?",
+            "SELECT id, name, link, price_text, price_int, state, size, source, created_at, updated_at, last_sent_at FROM olx_items WHERE id = ?",
             (item_id,),
         )
         row = cur.fetchone()
@@ -444,19 +461,20 @@ def _db_upsert_item_sync(item: OlxItem, source_name: str, touch_last_sent: bool)
         # Upsert item, update metadata always; update last_sent_at only when sending
         conn.execute(
             """
-            INSERT INTO olx_items (id, name, link, price_text, price_int, state, source, created_at, updated_at, last_sent_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), CASE WHEN ? THEN datetime('now') ELSE NULL END)
+            INSERT INTO olx_items (id, name, link, price_text, price_int, state, size, source, created_at, updated_at, last_sent_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), CASE WHEN ? THEN datetime('now') ELSE NULL END)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
                 link=excluded.link,
                 price_text=excluded.price_text,
                 price_int=excluded.price_int,
                 state=excluded.state,
+                size=excluded.size,
                 source=excluded.source,
                 updated_at=datetime('now'),
                 last_sent_at=CASE WHEN ? THEN datetime('now') ELSE last_sent_at END
             """,
-            (item.id, item.name, item.link, item.price_text, item.price_int, item.state, source_name, 1 if touch_last_sent else 0, 1 if touch_last_sent else 0),
+            (item.id, item.name, item.link, item.price_text, item.price_int, item.state, item.size, source_name, 1 if touch_last_sent else 0, 1 if touch_last_sent else 0),
         )
         conn.commit()
 
