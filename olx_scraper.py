@@ -417,6 +417,7 @@ def _db_connect():
 
 def _db_init_sync():
     with _db_connect() as conn:
+        # Create table with all columns
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS olx_items (
@@ -434,6 +435,17 @@ def _db_init_sync():
             )
             """
         )
+        
+        # Migration: Add size column if it doesn't exist
+        try:
+            cursor = conn.execute("PRAGMA table_info(olx_items)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'size' not in columns:
+                conn.execute("ALTER TABLE olx_items ADD COLUMN size TEXT")
+                print("Added missing 'size' column to database")
+        except Exception as e:
+            print(f"Migration error (can be ignored if table is new): {e}")
+        
         conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_items_source ON olx_items(source);")
         conn.commit()
 
