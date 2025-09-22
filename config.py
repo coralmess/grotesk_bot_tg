@@ -196,4 +196,9 @@ OLX_URLS = [
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
         "url_name": "Cassina"
     },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/posuda-kuhonnaya-utvar/q-alessi/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Alessi"
+    },
 ]
