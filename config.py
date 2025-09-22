@@ -171,4 +171,29 @@ OLX_URLS = [
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
         "url_name": "Officine Creative"
     },
+    {
+        "url": "https://m.olx.ua/uk/moda-i-stil/q-schwanen/?search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Schwanen"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Iittala/?search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Iittala"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Georg-Jensen/?search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Georg Jensen"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Kartell/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Kartell"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Cassina/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Cassina"
+    },
 ]
