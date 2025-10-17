@@ -36,7 +36,7 @@ _http_session: Optional[aiohttp.ClientSession] = None
 
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
-    if _http_session is None or _http_session.closed:
+    if (_http_session is None) or _http_session.closed:
         timeout = aiohttp.ClientTimeout(total=25)
         connector = aiohttp.TCPConnector(limit=20)
         _http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
@@ -136,6 +136,20 @@ def _extract_size_from_card(card) -> Optional[str]:
     return None
 
 
+def _is_valid_image_url(url: Optional[str]) -> bool:
+    """Check if URL is a valid image URL (not a placeholder)."""
+    if not url:
+        return False
+    url = url.strip()
+    # Reject relative paths and placeholder images
+    if not url.startswith(("http://", "https://")):
+        return False
+    # Reject common placeholder patterns
+    if any(placeholder in url.lower() for placeholder in ["no_thumbnail", "placeholder", "no-image", "noimage"]):
+        return False
+    return True
+
+
 def _extract_first_image_from_card(card) -> Optional[str]:
     """Extract first image URL from card element (Improvement #2)."""
     img = card.find("img")
@@ -146,11 +160,12 @@ def _extract_first_image_from_card(card) -> Optional[str]:
     srcset = img.get("srcset")
     if srcset:
         best = _parse_highest_from_srcset(srcset)
-        if best:
+        if best and _is_valid_image_url(best):
             return best
     
     # Fallback to src
-    return img.get("src")
+    src = img.get("src")
+    return src if _is_valid_image_url(src) else None
 
 
 def parse_card(card) -> Optional[OlxItem]:
@@ -425,6 +440,11 @@ async def _upscale_image_bytes(img_bytes: bytes, scale: float = 2.0, max_dim: in
 @async_retry(max_retries=3, backoff_base=1.0)
 async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
     """Download bytes from URL with retry logic (Improvement #6)."""
+    # Validate URL before attempting download
+    if not _is_valid_image_url(url):
+        logger.debug(f"Skipping invalid/placeholder image URL: {url}")
+        return None
+    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
@@ -454,14 +474,17 @@ async def _send_photo_by_bytes(bot: Bot, chat_id: str, photo_bytes: bytes, capti
 
 async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
     """Send photo with upscaling (Improvement #6: unified retry logic)."""
-    if not image_url:
+    # Validate image URL first
+    if not image_url or not _is_valid_image_url(image_url):
+        logger.debug(f"No valid image URL, sending text-only message")
         result = await send_message(bot, chat_id, caption)
         return result if result is not None else False
     
+    # Try to download and upscale image
     raw = await _download_bytes(image_url)
     if not raw:
-        # Fallback: try sending by URL directly
-        result = await _send_photo_by_url(bot, chat_id, image_url, caption)
+        logger.debug(f"Failed to download image, falling back to text-only message")
+        result = await send_message(bot, chat_id, caption)
         return result if result is not None else False
     
     data = await _upscale_image_bytes(raw)
@@ -472,8 +495,9 @@ async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_ur
     if result is not None:
         return result
     
-    # Final fallback: try by URL
-    result = await _send_photo_by_url(bot, chat_id, image_url, caption)
+    # Final fallback: send text-only message
+    logger.debug(f"Failed to send photo, falling back to text-only message")
+    result = await send_message(bot, chat_id, caption)
     return result if result is not None else False
 
 
