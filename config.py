@@ -102,6 +102,26 @@ OLX_URLS = [
         "url_name": "Derek Rose"
     },
     {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-our-legacy/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Our Legacy"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Flat-Head/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Flat Head"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Lady-White/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Lady White"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Wonder-Looper/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Wonder Looper"
+    },
+    {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-sunspel/?currency=UAH&search%5Border%5D=created_at:desc",
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
         "url_name": "Sunspel"
@@ -201,4 +221,60 @@ OLX_URLS = [
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
         "url_name": "Alessi"
     },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Vitra/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Vitra"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Fritz-Hansen/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Fritz Hansen"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-BB-Italia/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "B&B Italia"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Knoll/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Knoll"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Carl-Hansen/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Carl Hansen & Søn"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Flexform/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Flexform"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Edra/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Edra"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Maxalto/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Maxalto"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Minotti/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Minotti"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Molteni/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Molteni"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-dornbracht/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Dornbracht"
+    },
+    
 ]
