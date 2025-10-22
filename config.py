@@ -276,5 +276,71 @@ OLX_URLS = [
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
         "url_name": "Dornbracht"
     },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-45rpm/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "45rpm "
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Porro/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Porro "
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/mebel/q-Zanotta/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Zanotta"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Rimadesio/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=50000",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Rimadesio"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Moroso/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=50000",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Moroso"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/mebel/q-Tacchini/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=50000",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Tacchini"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-antoniolupi/?search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=50000",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Tacchini"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/stroitelstvo-remont/santehnika/q-gessi/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=30000",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Gessi"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/stroitelstvo-remont/santehnika/q-THG/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "THG Paris"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Davide-Groppi/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Davide Groppi"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Normann-Copenhagen/?search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Normann Copenhagen"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-L'Objet/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "L'Objet"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Audo-Copenhagen/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Audo Copenhagen"
+    },
+    
     
 ]

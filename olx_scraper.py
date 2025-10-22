@@ -58,9 +58,12 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
                 try:
                     return await func(*args, **kwargs)
                 except RetryAfter as e:
+                    logger.warning(f"⏳ Rate limited, waiting {e.retry_after}s...")
                     await asyncio.sleep(e.retry_after)
                     last_error = e
                 except TimedOut as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"⏱️  Timeout in {func.__name__}, retrying... ({attempt + 1}/{max_retries})")
                     await asyncio.sleep(backoff_base * (attempt + 1))
                     last_error = e
                 except Exception as e:
@@ -68,7 +71,7 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
                     if attempt < max_retries - 1:
                         await asyncio.sleep(backoff_base * (attempt + 1) + random.random())
                     else:
-                        logger.error(f"Function {func.__name__} failed after {max_retries} retries: {e}")
+                        logger.error(f"❌ {func.__name__} failed after {max_retries} retries: {e}")
             return None
         return wrapper
     return decorator
@@ -144,28 +147,56 @@ def _is_valid_image_url(url: Optional[str]) -> bool:
     # Reject relative paths and placeholder images
     if not url.startswith(("http://", "https://")):
         return False
-    # Reject common placeholder patterns
-    if any(placeholder in url.lower() for placeholder in ["no_thumbnail", "placeholder", "no-image", "noimage"]):
+    # Reject common placeholder patterns (including SVG placeholders)
+    if any(placeholder in url.lower() for placeholder in ["no_thumbnail", "placeholder", "no-image", "noimage", ".svg"]):
+        return False
+    # Reject data URIs (often placeholders)
+    if url.startswith("data:"):
         return False
     return True
 
 
 def _extract_first_image_from_card(card) -> Optional[str]:
-    """Extract first image URL from card element (Improvement #2)."""
+    """Extract first image URL from card element - prioritizes highest quality from srcset."""
     img = card.find("img")
     if not img:
+        logger.debug("No img tag found in card")
         return None
     
-    # Try srcset first for best quality
+    # Try data-src first (lazy-loaded images often store URL here)
+    data_src = img.get("data-src")
+    if data_src and _is_valid_image_url(data_src):
+        logger.debug(f"Extracted image from data-src: {data_src[:80]}...")
+        return data_src
+    
+    # Try data-lazy-src
+    data_lazy_src = img.get("data-lazy-src")
+    if data_lazy_src and _is_valid_image_url(data_lazy_src):
+        logger.debug(f"Extracted image from data-lazy-src: {data_lazy_src[:80]}...")
+        return data_lazy_src
+    
+    # Try srcset first for best quality (e.g., 510x679 instead of 216x152)
     srcset = img.get("srcset")
     if srcset:
         best = _parse_highest_from_srcset(srcset)
         if best and _is_valid_image_url(best):
+            # Successfully extracted highest quality image
+            logger.debug(f"Extracted image from srcset: {best[:80]}...")
             return best
+        elif best:
+            logger.debug(f"Invalid image URL from srcset: {best[:100]}")
     
-    # Fallback to src
+    # Fallback to src attribute if srcset not available
     src = img.get("src")
-    return src if _is_valid_image_url(src) else None
+    if src and _is_valid_image_url(src):
+        logger.debug(f"Extracted image from src: {src[:80]}...")
+        return src
+    elif src:
+        logger.debug(f"Invalid image URL from src: {src[:100]}")
+    
+    # If all extraction methods failed, return None (will trigger fetch from detail page)
+    logger.debug("No valid image URL found in card, will fetch from detail page")
+    return None
 
 
 def parse_card(card) -> Optional[OlxItem]:
@@ -225,7 +256,7 @@ def collect_cards_with_stop(soup: BeautifulSoup) -> List:
 
 @async_retry(max_retries=3, backoff_base=1.0)
 async def fetch_html(url: str) -> str:
-    """Fetch HTML content from URL with retry logic (Improvement #6)."""
+    """Fetch HTML content from URL with retry logic and delay for lazy-loaded images."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
         "Accept-Language": "uk,ru;q=0.9,en;q=0.8",
@@ -235,14 +266,17 @@ async def fetch_html(url: str) -> str:
         session = _get_http_session()
         async with session.get(url, headers=headers) as r:
             r.raise_for_status()
-            return await r.text()
+            html = await r.text()
+            # Add small delay to allow lazy-loaded images to populate
+            await asyncio.sleep(2)
+            return html
 
 
 async def scrape_olx_url(url: str) -> List[OlxItem]:
     """Scrape OLX URL and return list of items with images included (Improvement #2)."""
     html = await fetch_html(url)
     if not html:
-        logger.warning(f"No HTML content received from {url}")
+        logger.warning(f"⚠️  No HTML content received from {url}")
         return []
     
     soup = BeautifulSoup(html, "html.parser")
@@ -250,7 +284,7 @@ async def scrape_olx_url(url: str) -> List[OlxItem]:
     try:
         page_text = soup.get_text(" ", strip=True)
         if "Ми знайшли 0 оголошень" in page_text:
-            logger.info(f"No listings found at {url}")
+            logger.info(f"📭 No listings found at {url}")
             return []
     except Exception as e:
         logger.debug(f"Error checking for zero listings: {e}")
@@ -260,6 +294,13 @@ async def scrape_olx_url(url: str) -> List[OlxItem]:
         item = parse_card(card)
         if item:
             items.append(item)
+    
+    # Log image extraction statistics
+    if items:
+        items_with_images = sum(1 for item in items if item.first_image_url)
+        items_without_images = len(items) - items_with_images
+        logger.info(f"📊 Scraped {len(items)} items: {items_with_images} with images, {items_without_images} without images")
+    
     return items
 
 
@@ -428,7 +469,7 @@ def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int
         out.seek(0)
         return out.getvalue()
     except Exception as e:
-        logger.debug(f"Image upscaling failed: {e}")
+        logger.error(f"🖼️  Image upscaling failed: {e}")
         return None
 
 
@@ -475,15 +516,20 @@ async def _send_photo_by_bytes(bot: Bot, chat_id: str, photo_bytes: bytes, capti
 async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
     """Send photo with upscaling (Improvement #6: unified retry logic)."""
     # Validate image URL first
-    if not image_url or not _is_valid_image_url(image_url):
-        logger.debug(f"No valid image URL, sending text-only message")
+    if not image_url:
+        logger.warning("⚠️  No image URL provided, sending text-only message")
+        result = await send_message(bot, chat_id, caption)
+        return result if result is not None else False
+    
+    if not _is_valid_image_url(image_url):
+        logger.warning(f"⚠️  Invalid image URL: {image_url[:100]}, sending text-only message")
         result = await send_message(bot, chat_id, caption)
         return result if result is not None else False
     
     # Try to download and upscale image
     raw = await _download_bytes(image_url)
     if not raw:
-        logger.debug(f"Failed to download image, falling back to text-only message")
+        logger.warning(f"⚠️  Failed to download image from {image_url[:100]}, falling back to text-only message")
         result = await send_message(bot, chat_id, caption)
         return result if result is not None else False
     
@@ -496,7 +542,7 @@ async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_ur
         return result
     
     # Final fallback: send text-only message
-    logger.debug(f"Failed to send photo, falling back to text-only message")
+    logger.warning(f"⚠️  Failed to send photo after retries, falling back to text-only message")
     result = await send_message(bot, chat_id, caption)
     return result if result is not None else False
 
@@ -551,9 +597,9 @@ def _db_init_sync():
             columns = [col[1] for col in cursor.fetchall()]
             if 'size' not in columns:
                 conn.execute("ALTER TABLE olx_items ADD COLUMN size TEXT")
-                print("Added missing 'size' column to database")
+                logger.info("➕ Added missing 'size' column to database")
         except Exception as e:
-            print(f"Migration error (can be ignored if table is new): {e}")
+            logger.error(f"❌ Migration error: {e}")
         
         conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_items_source ON olx_items(source);")
         conn.commit()
@@ -647,16 +693,46 @@ async def db_batch_operations(items: List[Tuple[OlxItem, str, bool]]) -> List[Op
 
 async def run_olx_scraper():
     """Main scraper function (Improvements #1, #2: batch DB ops, no redundant fetches)."""
+    logger.info("🚀 OLX Scraper started")
+    
     token = _clean_token(TELEGRAM_OLX_BOT_TOKEN)
     default_chat = _clean_token(DANYLO_DEFAULT_CHAT_ID)
     if not token:
-        logger.warning("No Telegram bot token configured")
+        logger.warning("⚠️  No Telegram bot token configured")
+        return
+      # initialize database on first run
+    try:
+        await db_init()
+    except Exception as e:
+        logger.error(f"❌ Database initialization failed: {e}")
         return
     
-    # initialize database on first run
-    await db_init()
     bot = Bot(token=token)
-
+    
+    async def _send_item_message(bot: Bot, chat_id: str, text: str, item: OlxItem, source_name: str):
+        """Send message for a single item."""
+        try:
+            # Fallback to detail page if card image extraction failed
+            image_url = item.first_image_url
+            if not image_url:
+                logger.warning(f"⚠️  No image from card for item {item.id}, fetching from detail page...")
+                image_url = await fetch_first_image_best(item.link)
+                if image_url:
+                    logger.info(f"✅ Fetched image from detail page for item {item.id}")
+                else:
+                    logger.warning(f"⚠️  No image available for item {item.id}")
+            
+            sent = await send_photo_with_upscale(bot, chat_id, text, image_url)
+            # Update only the sent status
+            await db_upsert_item(item, source_name, touch_last_sent=sent)
+            await asyncio.sleep(0.2)
+        except RetryAfter as e:
+            logger.warning(f"⏳ Rate limited for item {item.id}, waiting {e.retry_after}s")
+        except TimedOut:
+            logger.warning(f"⏱️  Timeout sending item {item.id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to send item {item.id}: {e}")
+    
     async def _process_entry(entry: Dict[str, Any]):
         url = entry.get("url")
         chat_id = _clean_token(entry.get("telegram_chat_id") or default_chat)
@@ -678,9 +754,25 @@ async def run_olx_scraper():
             send_tasks = []
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
-                need_send = (prev is None) or ((prev or {}).get("price_int") != it.price_int)
                 
-                if need_send:
+                # Determine if we should send a message
+                should_send = False
+                if prev is None:
+                    # New item - always send
+                    should_send = True
+                elif prev.get("price_int") != it.price_int:
+                    # Price changed - check if difference is >= 3%
+                    old_price = prev.get("price_int", 0)
+                    new_price = it.price_int
+                    if old_price > 0:
+                        price_diff_percent = abs((new_price - old_price) / old_price) * 100
+                        if price_diff_percent >= 3.0:
+                            should_send = True
+                    else:
+                        # Old price was 0, send anyway
+                        should_send = True
+                
+                if should_send:
                     text = build_message(it, prev, source_name)
                     # Use image from OlxItem (no redundant fetch - Improvement #2)
                     send_tasks.append(_send_item_message(bot, chat_id, text, it, source_name))
@@ -689,30 +781,23 @@ async def run_olx_scraper():
             if send_tasks:
                 await asyncio.gather(*send_tasks, return_exceptions=True)
                 
+        except aiohttp.ClientError as e:
+            logger.error(f"🌐 Network error processing {source_name}: {e}")
         except Exception as e:
-            logger.error(f"Failed to process entry {url}: {e}")
-
-    async def _send_item_message(bot: Bot, chat_id: str, text: str, item: OlxItem, source_name: str):
-        """Send message for a single item."""
-        try:
-            sent = await send_photo_with_upscale(bot, chat_id, text, item.first_image_url)
-            # Update only the sent status
-            await db_upsert_item(item, source_name, touch_last_sent=sent)
-            await asyncio.sleep(0.2)
-        except Exception as e:
-            logger.error(f"Failed to send message for item {item.id}: {e}")
-
-    # Process multiple OLX sources with limited concurrency
+            logger.error(f"❌ Failed to process {source_name}: {e}")    # Process multiple OLX sources with limited concurrency (max 3 at once)
     sem = asyncio.Semaphore(3)
 
     async def _guarded_process(entry: Dict[str, Any]):
         async with sem:
             await _process_entry(entry)
-
+    
     tasks = [_guarded_process(entry) for entry in OLX_URLS or []]
     if tasks:
+        logger.info(f"📊 Processing {len(tasks)} OLX source(s)... (max 3 concurrent)")
         await asyncio.gather(*tasks, return_exceptions=True)
+    else:
+        logger.warning("⚠️  No OLX URLs configured")
     
-    logger.info("OLX scraper completed")
+    logger.info("✅ OLX scraper completed successfully")
     # Close session optionally (keep alive across runs if module persists)
     # await _http_session.close()  # intentionally not closing to reuse across cycles if importer persists
