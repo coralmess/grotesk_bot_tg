@@ -1,73 +1,48 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
 from telegram.constants import ParseMode
 from PIL import Image
-import io
-import asyncio
-import re
-import sqlite3
-import aiohttp
-import random
-import logging
+import io, asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
 from functools import wraps
-
 from config import OLX_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 BASE_OLX = "https://www.olx.ua"
-
-# Concurrency controls
 _HTTP_SEMAPHORE = asyncio.Semaphore(10)
 _SEND_SEMAPHORE = asyncio.Semaphore(3)
-
-T = TypeVar('T')
-
-# aiohttp session (shared)
 _http_session: Optional[aiohttp.ClientSession] = None
-
 
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if (_http_session is None) or _http_session.closed:
-        timeout = aiohttp.ClientTimeout(total=25)
-        connector = aiohttp.TCPConnector(limit=20)
-        _http_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        _http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), connector=aiohttp.TCPConnector(limit=20))
     return _http_session
-
 
 def _clean_token(value: Optional[str]) -> str:
     return (value or "").strip().strip("'\"")
 
-
-# Generic retry decorator for async functions (Improvement #6)
 def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
     """Decorator that retries async functions with exponential backoff."""
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            last_error: Optional[Exception] = None
             for attempt in range(max_retries):
                 try:
                     return await func(*args, **kwargs)
                 except RetryAfter as e:
                     logger.warning(f"⏳ Rate limited, waiting {e.retry_after}s...")
                     await asyncio.sleep(e.retry_after)
-                    last_error = e
                 except TimedOut as e:
                     if attempt < max_retries - 1:
                         logger.warning(f"⏱️  Timeout in {func.__name__}, retrying... ({attempt + 1}/{max_retries})")
                     await asyncio.sleep(backoff_base * (attempt + 1))
-                    last_error = e
                 except Exception as e:
-                    last_error = e
                     if attempt < max_retries - 1:
                         await asyncio.sleep(backoff_base * (attempt + 1) + random.random())
                     else:
@@ -86,115 +61,60 @@ class OlxItem:
     price_int: int
     state: Optional[str] = None
     size: Optional[str] = None
-    first_image_url: Optional[str] = None  # Improvement #2: Include image in dataclass
-
+    first_image_url: Optional[str] = None
 
 def normalize_price(text: str) -> Tuple[str, int]:
-    # Keep only digits for integer comparison and format back as "<int> грн"
     digits = re.sub(r"[^\d]", "", text or "")
     price_int = int(digits) if digits else 0
     return (f"{price_int} грн" if price_int else (text or "").strip()), price_int
 
-
 def extract_id_from_link(link: str) -> str:
-    # e.g. https://www.olx.ua/d/uk/obyavlenie/tufli-lodochki-firmy-agnona-IDP0w0I.html?reason=seller_profile
-    slug = link.rstrip("/").split("/")[-1]
-    # strip query params first, then optional .html suffix
-    slug = slug.split("?", 1)[0]
-    if slug.endswith(".html"):
-        slug = slug[:-5]
-    return slug
-
+    slug = link.rstrip("/").split("/")[-1].split("?", 1)[0]
+    return slug[:-5] if slug.endswith(".html") else slug
 
 def _extract_name_from_card(card, title_anchor) -> str:
-    """Extract item name from card element (Improvement #8)."""
-    if title_anchor:
-        name = title_anchor.get_text(strip=True)
-        if name:
-            return name
-    
+    if title_anchor and (name := title_anchor.get_text(strip=True)):
+        return name
     name_el = card.find(["h4", "h3"]) or card.find("img", alt=True)
-    if hasattr(name_el, "get_text"):
-        return name_el.get_text(strip=True)
-    elif name_el and hasattr(name_el, "get"):
-        return name_el.get("alt", "").strip()
-    return ""
-
+    return name_el.get_text(strip=True) if hasattr(name_el, "get_text") else (name_el.get("alt", "").strip() if name_el else "")
 
 def _extract_state_from_card(card) -> Optional[str]:
-    """Extract item state/condition from card element (Improvement #8)."""
     st = card.find("span", attrs={"title": True})
-    if st and st.get("title"):
-        return str(st.get("title")).strip()
-    elif st:
-        return st.get_text(strip=True)
-    return None
-
+    return str(st.get("title")).strip() if st and st.get("title") else (st.get_text(strip=True) if st else None)
 
 def _extract_size_from_card(card) -> Optional[str]:
-    """Extract item size from card element (Improvement #8)."""
     size_el = card.find(class_="css-rkfuwj")
-    if size_el:
-        return size_el.get_text(" ", strip=True)
-    return None
-
+    return size_el.get_text(" ", strip=True) if size_el else None
 
 def _is_valid_image_url(url: Optional[str]) -> bool:
-    """Check if URL is a valid image URL (not a placeholder)."""
-    if not url:
+    if not url or not (url := url.strip()).startswith(("http://", "https://")):
         return False
-    url = url.strip()
-    # Reject relative paths and placeholder images
-    if not url.startswith(("http://", "https://")):
-        return False
-    # Reject common placeholder patterns (including SVG placeholders)
-    if any(placeholder in url.lower() for placeholder in ["no_thumbnail", "placeholder", "no-image", "noimage", ".svg"]):
-        return False
-    # Reject data URIs (often placeholders)
-    if url.startswith("data:"):
-        return False
-    return True
+    return not any(p in url.lower() for p in ["no_thumbnail", "placeholder", "no-image", "noimage", ".svg"]) and not url.startswith("data:")
 
 
 def _extract_first_image_from_card(card) -> Optional[str]:
     """Extract first image URL from card element - prioritizes highest quality from srcset."""
-    img = card.find("img")
-    if not img:
+    if not (img := card.find("img")):
         logger.debug("No img tag found in card")
         return None
     
-    # Try data-src first (lazy-loaded images often store URL here)
-    data_src = img.get("data-src")
-    if data_src and _is_valid_image_url(data_src):
-        logger.debug(f"Extracted image from data-src: {data_src[:80]}...")
-        return data_src
+    for attr in ["data-src", "data-lazy-src"]:
+        if (url := img.get(attr)) and _is_valid_image_url(url):
+            logger.debug(f"Extracted image from {attr}: {url[:80]}...")
+            return url
     
-    # Try data-lazy-src
-    data_lazy_src = img.get("data-lazy-src")
-    if data_lazy_src and _is_valid_image_url(data_lazy_src):
-        logger.debug(f"Extracted image from data-lazy-src: {data_lazy_src[:80]}...")
-        return data_lazy_src
-    
-    # Try srcset first for best quality (e.g., 510x679 instead of 216x152)
-    srcset = img.get("srcset")
-    if srcset:
-        best = _parse_highest_from_srcset(srcset)
-        if best and _is_valid_image_url(best):
-            # Successfully extracted highest quality image
+    if (srcset := img.get("srcset")) and (best := _parse_highest_from_srcset(srcset)):
+        if _is_valid_image_url(best):
             logger.debug(f"Extracted image from srcset: {best[:80]}...")
             return best
-        elif best:
-            logger.debug(f"Invalid image URL from srcset: {best[:100]}")
+        logger.debug(f"Invalid image URL from srcset: {best[:100]}")
     
-    # Fallback to src attribute if srcset not available
-    src = img.get("src")
-    if src and _is_valid_image_url(src):
-        logger.debug(f"Extracted image from src: {src[:80]}...")
-        return src
-    elif src:
+    if (src := img.get("src")):
+        if _is_valid_image_url(src):
+            logger.debug(f"Extracted image from src: {src[:80]}...")
+            return src
         logger.debug(f"Invalid image URL from src: {src[:100]}")
     
-    # If all extraction methods failed, return None (will trigger fetch from detail page)
     logger.debug("No valid image URL found in card, will fetch from detail page")
     return None
 
@@ -202,39 +122,22 @@ def _extract_first_image_from_card(card) -> Optional[str]:
 def parse_card(card) -> Optional[OlxItem]:
     """Parse OLX card element into OlxItem."""
     try:
-        # Prefer anchor with visible title text, fallback to first anchor
         anchors = card.find_all("a", href=True)
         title_anchor = next((a for a in anchors if a.get_text(strip=True)), None)
         a = title_anchor or (anchors[0] if anchors else None)
-        href = a["href"] if a else None
-        if not href:
+        if not (href := a["href"] if a else None):
             return None
         link = href if href.startswith("http") else f"{BASE_OLX}{href}"
-
-        # Extract fields using helper functions (Improvement #8)
         name = _extract_name_from_card(card, title_anchor)
-
-        # Price: support span or p with data-testid="ad-price"
         price_el = card.find(attrs={"data-testid": "ad-price"})
-        price_text_raw = price_el.get_text(" ", strip=True) if price_el else ""
-        price_text, price_int = normalize_price(price_text_raw)
-
-        state = _extract_state_from_card(card)
-        size = _extract_size_from_card(card)
-        first_image_url = _extract_first_image_from_card(card)
-
+        price_text, price_int = normalize_price(price_el.get_text(" ", strip=True) if price_el else "")
         item_id = extract_id_from_link(link)
         if not (name and link and item_id):
             return None
         return OlxItem(
-            id=item_id,
-            name=name,
-            link=link,
-            price_text=price_text,
-            price_int=price_int,
-            state=state,
-            size=size,
-            first_image_url=first_image_url
+            id=item_id, name=name, link=link, price_text=price_text, price_int=price_int,
+            state=_extract_state_from_card(card), size=_extract_size_from_card(card),
+            first_image_url=_extract_first_image_from_card(card)
         )
     except Exception as e:
         logger.debug(f"Failed to parse card: {e}")
@@ -242,17 +145,15 @@ def parse_card(card) -> Optional[OlxItem]:
 
 
 def collect_cards_with_stop(soup: BeautifulSoup) -> List:
-    cards: List = []
+    cards = []
     for el in soup.find_all(True, recursive=True):
         classes = el.get("class") or []
-        if isinstance(classes, str):
-            classes = [classes]
+        classes = [classes] if isinstance(classes, str) else classes
         if "css-wsrviy" in classes:
             break
         if el.name == "div" and (el.get("data-cy") == "l-card" or el.get("data-testid") == "l-card"):
             cards.append(el)
     return cards
-
 
 @async_retry(max_retries=3, backoff_base=1.0)
 async def fetch_html(url: str) -> str:
@@ -261,186 +162,108 @@ async def fetch_html(url: str) -> str:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
         "Accept-Language": "uk,ru;q=0.9,en;q=0.8",
     }
-
     async with _HTTP_SEMAPHORE:
         session = _get_http_session()
         async with session.get(url, headers=headers) as r:
             r.raise_for_status()
             html = await r.text()
-            # Add small delay to allow lazy-loaded images to populate
             await asyncio.sleep(2)
             return html
 
 
 async def scrape_olx_url(url: str) -> List[OlxItem]:
-    """Scrape OLX URL and return list of items with images included (Improvement #2)."""
-    html = await fetch_html(url)
-    if not html:
+    """Scrape OLX URL and return list of items with images included."""
+    if not (html := await fetch_html(url)):
         logger.warning(f"⚠️  No HTML content received from {url}")
         return []
     
     soup = BeautifulSoup(html, "html.parser")
-    # Skip pages that explicitly state there are zero listings
     try:
-        page_text = soup.get_text(" ", strip=True)
-        if "Ми знайшли 0 оголошень" in page_text:
+        if "Ми знайшли 0 оголошень" in soup.get_text(" ", strip=True):
             logger.info(f"📭 No listings found at {url}")
             return []
     except Exception as e:
         logger.debug(f"Error checking for zero listings: {e}")
     
-    items: List[OlxItem] = []
-    for card in collect_cards_with_stop(soup):
-        item = parse_card(card)
-        if item:
-            items.append(item)
-    
-    # Log image extraction statistics
-    if items:
-        items_with_images = sum(1 for item in items if item.first_image_url)
-        items_without_images = len(items) - items_with_images
-        logger.info(f"📊 Scraped {len(items)} items: {items_with_images} with images, {items_without_images} without images")
-    
+    items = [item for card in collect_cards_with_stop(soup) if (item := parse_card(card))]
     return items
-
 
 @async_retry(max_retries=3, backoff_base=2.0)
 async def send_message(bot: Bot, chat_id: str, text: str) -> bool:
-    """Send text message via Telegram bot (Improvement #6)."""
+    """Send text message via Telegram bot."""
     async with _SEND_SEMAPHORE:
         await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
     return True
 
-
 def _escape_html_dict(data: Dict[str, Optional[str]]) -> Dict[str, str]:
-    """Helper to escape all HTML values in dict (Improvement #15)."""
+    """Helper to escape all HTML values in dict."""
     return {key: escape(val or "", quote=True) for key, val in data.items()}
 
 
 def build_message(item: OlxItem, prev: Optional[Dict[str, Any]], source_name: str) -> str:
-    """Build Telegram message from OlxItem (Improvement #15: cleaner escaping)."""
-    # Escape all fields at once
-    safe = _escape_html_dict({
-        "name": item.name,
-        "state": item.state,
-        "size": item.size,
-        "source": source_name or "OLX",
-        "link": item.link,
-    })
-    
+    """Build Telegram message from OlxItem."""
+    safe = _escape_html_dict({"name": item.name, "state": item.state, "size": item.size, "source": source_name or "OLX", "link": item.link})
     open_link = f'<a href="{safe["link"]}">Відкрити</a>'
-
-    # Compose optional lines
     state_line = f"\n🥪 Стан: {safe['state']}" if safe["state"] else ""
     size_line = f"\n📏 Розмір: {safe['size']}" if safe["size"] else ""
-
+    
     if not prev:
-        return (
-            f"✨{safe['name']}✨ \n\n"
-            f"💰 Ціна: {item.price_text}" 
-            f"{state_line}"
-            f"{size_line}\n"
-            f"🍘 Лінка: {safe['source']}\n"
-            f"🔗 {open_link}"
-        )
+        return f"✨{safe['name']}✨ \n\n💰 Ціна: {item.price_text}{state_line}{size_line}\n🍘 Лінка: {safe['source']}\n🔗 {open_link}"
     if prev and prev.get("price_int") != item.price_int:
         was = prev.get("price_int") or 0
-        return (
-            f"OLX Price changed: {safe['name']}\n\n"
-            f"💰 Ціна: {item.price_text} (було {was} грн)"
-            f"{state_line}"
-            f"{size_line}\n"
-            f"🍘 Лінка: {safe['source']}\n"
-            f"🔗 {open_link}"
-        )
-    return (
-        f"OLX: {safe['name']}\n\n"
-        f"💰 Ціна: {item.price_text}"
-        f"{state_line}"
-        f"{size_line}\n"
-        f"🍘 Лінка: {safe['source']}\n"
-        f"🔗 {open_link}"
-    )
-
+        return f"OLX Price changed: {safe['name']}\n\n💰 Ціна: {item.price_text} (було {was} грн){state_line}{size_line}\n🍘 Лінка: {safe['source']}\n🔗 {open_link}"
+    return f"OLX: {safe['name']}\n\n💰 Ціна: {item.price_text}{state_line}{size_line}\n🍘 Лінка: {safe['source']}\n🔗 {open_link}"
 
 def _parse_highest_from_srcset(srcset: str) -> Optional[str]:
     if not srcset:
         return None
-    best = None
-    best_w = -1
+    best, best_w = None, -1
     for part in srcset.split(','):
-        m = re.search(r"\s*(\S+)\s+(\d+)w\s*", part)
-        if not m:
-            continue
-        url, w = m.group(1), int(m.group(2))
-        if w > best_w:
-            best_w = w
-            best = url
+        if m := re.search(r"\s*(\S+)\s+(\d+)w\s*", part):
+            url, w = m.group(1), int(m.group(2))
+            if w > best_w:
+                best_w, best = w, url
     return best
 
 
 async def fetch_item_images(item_url: str, max_images: int = 3) -> List[str]:
-    """
-    Fetch multiple images from item detail page.
-    Note: This is now rarely needed since images are extracted during scraping (Improvement #2).
-    """
+    """Fetch multiple images from item detail page."""
     try:
-        html = await fetch_html(item_url)
-        if not html:
+        if not (html := await fetch_html(item_url)):
             return []
         soup = BeautifulSoup(html, "html.parser")
-        wrapper = soup.find("div", class_="swiper-wrapper")
-        if not wrapper:
+        if not (wrapper := soup.find("div", class_="swiper-wrapper")):
             return []
-        imgs: List[str] = []
+        imgs = []
         for slide in wrapper.find_all(["div", "img"], recursive=True):
-            if slide.name == "img":
-                img = slide
-            else:
-                img = slide.find("img")
-            if not img:
-                continue
-            srcset = img.get("srcset")
-            src = img.get("src")
-            best = _parse_highest_from_srcset(srcset) if srcset else src
-            if best and best not in imgs:
+            img = slide if slide.name == "img" else slide.find("img")
+            if img and (best := (_parse_highest_from_srcset(img.get("srcset")) if img.get("srcset") else img.get("src"))) and best not in imgs:
                 imgs.append(best)
-            if len(imgs) >= max_images:
-                break
+                if len(imgs) >= max_images:
+                    break
         return imgs[:max_images]
     except Exception as e:
         logger.debug(f"Failed to fetch images from {item_url}: {e}")
         return []
 
-
 async def fetch_first_image_best(item_url: str) -> Optional[str]:
-    """
-    Fetch first image from item detail page.
-    Note: This is now rarely needed since images are extracted during scraping (Improvement #2).
-    """
+    """Fetch first image from item detail page."""
     try:
-        html = await fetch_html(item_url)
-        if not html:
+        if not (html := await fetch_html(item_url)):
             return None
         soup = BeautifulSoup(html, "html.parser")
-        wrapper = soup.find("div", class_="swiper-wrapper")
-        if not wrapper:
+        if not (wrapper := soup.find("div", class_="swiper-wrapper")):
             return None
-        # find the first slide image by DOM order
         img_tag = None
         for slide in wrapper.find_all(["div", "img"], recursive=True):
             if slide.name == "img":
                 img_tag = slide
                 break
-            else:
-                img_tag = slide.find("img")
-                if img_tag:
-                    break
+            elif img_tag := slide.find("img"):
+                break
         if not img_tag:
             return None
-        srcset = img_tag.get("srcset")
-        src = img_tag.get("src")
-        return _parse_highest_from_srcset(srcset) if srcset else src
+        return _parse_highest_from_srcset(img_tag.get("srcset")) if img_tag.get("srcset") else img_tag.get("src")
     except Exception as e:
         logger.debug(f"Failed to fetch first image from {item_url}: {e}")
         return None
@@ -450,17 +273,14 @@ def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int
     """Synchronous image upscaling (called via thread pool)."""
     try:
         im = Image.open(io.BytesIO(img_bytes))
-        # Convert to RGB to avoid Telegram issues with palette/alpha
         if im.mode not in ("RGB", "L"):
             im = im.convert("RGB")
         w, h = im.size
         new_w, new_h = int(w * scale), int(h * scale)
-        # cap by max_dim on longer side
         longer = max(new_w, new_h)
         if longer > max_dim:
             ratio = max_dim / float(longer)
-            new_w = int(new_w * ratio)
-            new_h = int(new_h * ratio)
+            new_w, new_h = int(new_w * ratio), int(new_h * ratio)
         if new_w <= 0 or new_h <= 0:
             new_w, new_h = w, h
         im_up = im.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
@@ -472,16 +292,14 @@ def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int
         logger.error(f"🖼️  Image upscaling failed: {e}")
         return None
 
-
 async def _upscale_image_bytes(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048) -> Optional[bytes]:
-    """Async wrapper for image upscaling (Improvement #5: offload to thread pool)."""
+    """Async wrapper for image upscaling."""
     return await asyncio.to_thread(_upscale_image_bytes_sync, img_bytes, scale, max_dim)
 
 
 @async_retry(max_retries=3, backoff_base=1.0)
 async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
-    """Download bytes from URL with retry logic (Improvement #6)."""
-    # Validate URL before attempting download
+    """Download bytes from URL with retry logic."""
     if not _is_valid_image_url(url):
         logger.debug(f"Skipping invalid/placeholder image URL: {url}")
         return None
@@ -496,61 +314,43 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
             r.raise_for_status()
             return await r.read()
 
-
 @async_retry(max_retries=3, backoff_base=2.0)
 async def _send_photo_by_url(bot: Bot, chat_id: str, photo_url: str, caption: str) -> bool:
-    """Send photo by URL (Improvement #6)."""
+    """Send photo by URL."""
     async with _SEND_SEMAPHORE:
         await bot.send_photo(chat_id=chat_id, photo=photo_url, caption=caption, parse_mode=ParseMode.HTML)
     return True
 
-
 @async_retry(max_retries=3, backoff_base=2.0)
 async def _send_photo_by_bytes(bot: Bot, chat_id: str, photo_bytes: bytes, caption: str) -> bool:
-    """Send photo by bytes (Improvement #6)."""
+    """Send photo by bytes."""
     async with _SEND_SEMAPHORE:
         await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(photo_bytes), caption=caption, parse_mode=ParseMode.HTML)
     return True
 
 
 async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
-    """Send photo with upscaling (Improvement #6: unified retry logic)."""
-    # Validate image URL first
-    if not image_url:
-        logger.warning("⚠️  No image URL provided, sending text-only message")
+    """Send photo with upscaling."""
+    if not image_url or not _is_valid_image_url(image_url):
+        logger.warning(f"⚠️  {'No' if not image_url else 'Invalid'} image URL{': ' + image_url[:100] if image_url else ''}, sending text-only message")
         result = await send_message(bot, chat_id, caption)
         return result if result is not None else False
     
-    if not _is_valid_image_url(image_url):
-        logger.warning(f"⚠️  Invalid image URL: {image_url[:100]}, sending text-only message")
-        result = await send_message(bot, chat_id, caption)
-        return result if result is not None else False
-    
-    # Try to download and upscale image
-    raw = await _download_bytes(image_url)
-    if not raw:
+    if not (raw := await _download_bytes(image_url)):
         logger.warning(f"⚠️  Failed to download image from {image_url[:100]}, falling back to text-only message")
         result = await send_message(bot, chat_id, caption)
         return result if result is not None else False
     
-    data = await _upscale_image_bytes(raw)
-    photo_bytes = data or raw
+    photo_bytes = (await _upscale_image_bytes(raw)) or raw
     
-    # Try sending upscaled image
-    result = await _send_photo_by_bytes(bot, chat_id, photo_bytes, caption)
-    if result is not None:
+    if (result := await _send_photo_by_bytes(bot, chat_id, photo_bytes, caption)) is not None:
         return result
     
-    # Final fallback: send text-only message
     logger.warning(f"⚠️  Failed to send photo after retries, falling back to text-only message")
     result = await send_message(bot, chat_id, caption)
     return result if result is not None else False
 
-
-# --- New SQLite storage (replaces JSON) ---
-
 DB_FILE = Path(__file__).with_name("olx_items.db")
-
 
 def _apply_pragmas(conn: sqlite3.Connection):
     """Apply SQLite pragmas for better performance."""
@@ -560,7 +360,6 @@ def _apply_pragmas(conn: sqlite3.Connection):
         conn.execute("PRAGMA busy_timeout=5000;")
     except Exception as e:
         logger.debug(f"Failed to apply pragmas: {e}")
-
 
 def _db_connect() -> sqlite3.Connection:
     """Create database connection with optimizations."""
@@ -572,98 +371,64 @@ def _db_connect() -> sqlite3.Connection:
 
 def _db_init_sync():
     with _db_connect() as conn:
-        # Create table with all columns
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS olx_items (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                link TEXT NOT NULL,
-                price_text TEXT NOT NULL,
-                price_int INTEGER NOT NULL,
-                state TEXT,
-                size TEXT,
-                source TEXT,
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, link TEXT NOT NULL,
+                price_text TEXT NOT NULL, price_int INTEGER NOT NULL,
+                state TEXT, size TEXT, source TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now')),
                 last_sent_at TEXT
             )
-            """
-        )
-        
-        # Migration: Add size column if it doesn't exist
+        """)
         try:
             cursor = conn.execute("PRAGMA table_info(olx_items)")
-            columns = [col[1] for col in cursor.fetchall()]
-            if 'size' not in columns:
+            if 'size' not in [col[1] for col in cursor.fetchall()]:
                 conn.execute("ALTER TABLE olx_items ADD COLUMN size TEXT")
                 logger.info("➕ Added missing 'size' column to database")
         except Exception as e:
             logger.error(f"❌ Migration error: {e}")
-        
         conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_items_source ON olx_items(source);")
         conn.commit()
-
 
 async def db_init():
     await asyncio.to_thread(_db_init_sync)
 
 
 def _db_get_item_sync(item_id: str, conn: Optional[sqlite3.Connection] = None) -> Optional[Dict[str, Any]]:
-    """Get item from database (Improvement #1: support reusing connection)."""
-    close_conn = False
-    if conn is None:
+    """Get item from database."""
+    close_conn = conn is None
+    if close_conn:
         conn = _db_connect()
-        close_conn = True
-    
     try:
-        cur = conn.execute(
-            "SELECT id, name, link, price_text, price_int, state, size, source, created_at, updated_at, last_sent_at FROM olx_items WHERE id = ?",
-            (item_id,),
-        )
-        row = cur.fetchone()
-        return dict(row) if row else None
+        cur = conn.execute("SELECT id, name, link, price_text, price_int, state, size, source, created_at, updated_at, last_sent_at FROM olx_items WHERE id = ?", (item_id,))
+        return dict(row) if (row := cur.fetchone()) else None
     finally:
         if close_conn:
             conn.close()
-
 
 async def db_get_item(item_id: str) -> Optional[Dict[str, Any]]:
     """Async wrapper for getting item from database."""
     return await asyncio.to_thread(_db_get_item_sync, item_id, None)
 
-
 def _db_upsert_item_sync(item: OlxItem, source_name: str, touch_last_sent: bool, conn: Optional[sqlite3.Connection] = None):
-    """Upsert item to database (Improvement #1: support reusing connection)."""
-    close_conn = False
-    if conn is None:
+    """Upsert item to database."""
+    close_conn = conn is None
+    if close_conn:
         conn = _db_connect()
-        close_conn = True
-    
     try:
-        # Upsert item, update metadata always; update last_sent_at only when sending
-        conn.execute(
-            """
+        conn.execute("""
             INSERT INTO olx_items (id, name, link, price_text, price_int, state, size, source, created_at, updated_at, last_sent_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), CASE WHEN ? THEN datetime('now') ELSE NULL END)
             ON CONFLICT(id) DO UPDATE SET
-                name=excluded.name,
-                link=excluded.link,
-                price_text=excluded.price_text,
-                price_int=excluded.price_int,
-                state=excluded.state,
-                size=excluded.size,
-                source=excluded.source,
-                updated_at=datetime('now'),
+                name=excluded.name, link=excluded.link, price_text=excluded.price_text, price_int=excluded.price_int,
+                state=excluded.state, size=excluded.size, source=excluded.source, updated_at=datetime('now'),
                 last_sent_at=CASE WHEN ? THEN datetime('now') ELSE last_sent_at END
-            """,
-            (item.id, item.name, item.link, item.price_text, item.price_int, item.state, item.size, source_name, 1 if touch_last_sent else 0, 1 if touch_last_sent else 0),
-        )
+            """, (item.id, item.name, item.link, item.price_text, item.price_int, item.state, item.size, source_name, 1 if touch_last_sent else 0, 1 if touch_last_sent else 0))
         conn.commit()
     finally:
         if close_conn:
             conn.close()
-
 
 async def db_upsert_item(item: OlxItem, source_name: str, touch_last_sent: bool):
     """Async wrapper for upserting item to database."""
@@ -671,36 +436,31 @@ async def db_upsert_item(item: OlxItem, source_name: str, touch_last_sent: bool)
 
 
 def _db_batch_operations_sync(items: List[Tuple[OlxItem, str, bool]]) -> List[Optional[Dict[str, Any]]]:
-    """Batch database operations with single connection (Improvement #1: reduce connections)."""
+    """Batch database operations with single connection."""
     conn = _db_connect()
     try:
         results = []
         for item, source_name, touch_last_sent in items:
-            # Get previous state
-            prev = _db_get_item_sync(item.id, conn)
-            results.append(prev)
-            # Upsert item
+            results.append(_db_get_item_sync(item.id, conn))
             _db_upsert_item_sync(item, source_name, touch_last_sent, conn)
         return results
     finally:
         conn.close()
 
-
 async def db_batch_operations(items: List[Tuple[OlxItem, str, bool]]) -> List[Optional[Dict[str, Any]]]:
-    """Async wrapper for batch database operations (Improvement #1)."""
+    """Async wrapper for batch database operations."""
     return await asyncio.to_thread(_db_batch_operations_sync, items)
 
 
 async def run_olx_scraper():
-    """Main scraper function (Improvements #1, #2: batch DB ops, no redundant fetches)."""
+    """Main scraper function."""
     logger.info("🚀 OLX Scraper started")
     
-    token = _clean_token(TELEGRAM_OLX_BOT_TOKEN)
-    default_chat = _clean_token(DANYLO_DEFAULT_CHAT_ID)
+    token, default_chat = _clean_token(TELEGRAM_OLX_BOT_TOKEN), _clean_token(DANYLO_DEFAULT_CHAT_ID)
     if not token:
         logger.warning("⚠️  No Telegram bot token configured")
         return
-      # initialize database on first run
+    
     try:
         await db_init()
     except Exception as e:
@@ -709,21 +469,24 @@ async def run_olx_scraper():
     
     bot = Bot(token=token)
     
+    # Statistics tracking
+    total_scraped = 0
+    total_without_images = 0
+    
     async def _send_item_message(bot: Bot, chat_id: str, text: str, item: OlxItem, source_name: str):
         """Send message for a single item."""
+        nonlocal total_without_images
         try:
-            # Fallback to detail page if card image extraction failed
             image_url = item.first_image_url
             if not image_url:
                 logger.warning(f"⚠️  No image from card for item {item.id}, fetching from detail page...")
-                image_url = await fetch_first_image_best(item.link)
-                if image_url:
+                if image_url := await fetch_first_image_best(item.link):
                     logger.info(f"✅ Fetched image from detail page for item {item.id}")
                 else:
                     logger.warning(f"⚠️  No image available for item {item.id}")
+                    total_without_images += 1
             
             sent = await send_photo_with_upscale(bot, chat_id, text, image_url)
-            # Update only the sent status
             await db_upsert_item(item, source_name, touch_last_sent=sent)
             await asyncio.sleep(0.2)
         except RetryAfter as e:
@@ -734,70 +497,50 @@ async def run_olx_scraper():
             logger.error(f"❌ Failed to send item {item.id}: {e}")
     
     async def _process_entry(entry: Dict[str, Any]):
-        url = entry.get("url")
-        chat_id = _clean_token(entry.get("telegram_chat_id") or default_chat)
-        source_name = entry.get("url_name") or "OLX"
+        nonlocal total_scraped
+        url, chat_id, source_name = entry.get("url"), _clean_token(entry.get("telegram_chat_id") or default_chat), entry.get("url_name") or "OLX"
         if not url or not chat_id:
             return
         
         try:
-            # Scrape items (images now included in OlxItem - Improvement #2)
-            items = await scrape_olx_url(url)
-            if not items:
+            if not (items := await scrape_olx_url(url)):
                 return
             
-            # Batch database operations (Improvement #1)
-            batch_data = [(item, source_name, False) for item in items]
-            prev_items = await db_batch_operations(batch_data)
+            total_scraped += len(items)
+            prev_items = await db_batch_operations([(item, source_name, False) for item in items])
             
-            # Process items with controlled concurrency (Improvement #1)
             send_tasks = []
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
-                
-                # Determine if we should send a message
-                should_send = False
-                if prev is None:
-                    # New item - always send
-                    should_send = True
-                elif prev.get("price_int") != it.price_int:
-                    # Price changed - check if difference is >= 3%
+                should_send = prev is None
+                if prev and prev.get("price_int") != it.price_int:
                     old_price = prev.get("price_int", 0)
-                    new_price = it.price_int
                     if old_price > 0:
-                        price_diff_percent = abs((new_price - old_price) / old_price) * 100
-                        if price_diff_percent >= 3.0:
-                            should_send = True
+                        should_send = abs((it.price_int - old_price) / old_price) * 100 >= 3.0
                     else:
-                        # Old price was 0, send anyway
                         should_send = True
                 
                 if should_send:
-                    text = build_message(it, prev, source_name)
-                    # Use image from OlxItem (no redundant fetch - Improvement #2)
-                    send_tasks.append(_send_item_message(bot, chat_id, text, it, source_name))
+                    send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
             
-            # Send messages with controlled concurrency
             if send_tasks:
                 await asyncio.gather(*send_tasks, return_exceptions=True)
                 
         except aiohttp.ClientError as e:
             logger.error(f"🌐 Network error processing {source_name}: {e}")
         except Exception as e:
-            logger.error(f"❌ Failed to process {source_name}: {e}")    # Process multiple OLX sources with limited concurrency (max 3 at once)
+            logger.error(f"❌ Failed to process {source_name}: {e}")
+    
     sem = asyncio.Semaphore(3)
-
     async def _guarded_process(entry: Dict[str, Any]):
         async with sem:
             await _process_entry(entry)
     
-    tasks = [_guarded_process(entry) for entry in OLX_URLS or []]
-    if tasks:
-        logger.info(f"📊 Processing {len(tasks)} OLX source(s)... (max 3 concurrent)")
+    if tasks := [_guarded_process(entry) for entry in OLX_URLS or []]:
+        logger.info(f"📊 Processing {len(tasks)} OLX source(s)...")
         await asyncio.gather(*tasks, return_exceptions=True)
     else:
         logger.warning("⚠️  No OLX URLs configured")
     
     logger.info("✅ OLX scraper completed successfully")
-    # Close session optionally (keep alive across runs if module persists)
-    # await _http_session.close()  # intentionally not closing to reuse across cycles if importer persists
+    logger.info(f"📈 TOTAL SCRAPED: {total_scraped} items | WITHOUT IMAGES: {total_without_images} items ({(total_without_images/total_scraped*100) if total_scraped > 0 else 0:.1f}%)")
