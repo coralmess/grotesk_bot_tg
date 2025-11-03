@@ -64,30 +64,6 @@ BASE_URLS = [
     #     "min_sale": 50,
     #     "url_name": "Grotesk Pricy Shoes"
     # },
-    # {
-    #     "url": "https://www.lyst.com/shop/mens-t-shirts/?designer_slug=a_cold_wall&designer_slug=westfall&designer_slug=givenchy&designer_slug=cormio&designer_slug=isabel-marant&designer_slug=burberry&designer_slug=charles-jeffrey&designer_slug=helmut-lang&designer_slug=neighborhood&designer_slug=aaspectrum&designer_slug=032c&designer_slug=acne&designer_slug=ambush&designer_slug=ami&designer_slug=andersson-bell-designer&designer_slug=boris-bidjan-saberi-11&designer_slug=boris-bidjan-saberi&designer_slug=c2h4&designer_slug=comme-des-garcons&designer_slug=craig-green&designer_slug=dries-van-noten&designer_slug=fce&designer_slug=eytys&designer_slug=feng-chen-wang-designer&designer_slug=gr10k&designer_slug=jacquemus&designer_slug=maison-martin-margiela&designer_slug=mm6-by-maison-martin-margiela&designer_slug=marine-serre&designer_slug=rick-owens&designer_slug=undercover&designer_slug=vetements&designer_slug=wales-bonner&designer_slug=y-3&designer_slug=ys-yohji-yamamoto&designer_slug=song-for-the-mute&designer_slug=acronym&designer_slug=objects-iv-life&designer_slug=post-archive-faction-paf&designer_slug=kusikohc&discount_from=60&final_price_to=100&instock_size=size.t-shirt.international.s&instock_size=size.t-shirt.international.m&instock_size=size.t-shirt.international.l&view=price_asc",
-    #     "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID,
-    #     "min_sale": 50,
-    #     "url_name": "Fucking T-shirts"
-    # },
-    # {
-    #     "url": "https://www.lyst.com/shop/mens-pants/?designer_slug=white-mountaineering&designer_slug=rta&designer_slug=off-white-co-virgil-abloh&designer_slug=diesel&designer_slug=ami&designer_slug=etudes-studio&designer_slug=apc&discount_from=66&final_price_from=60&final_price_to=200&instock_size=size.pants.eu.m.48&instock_size=size.pants.eu.m.46&view=price_asc",
-    #     "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID,
-    #     "min_sale": 50,
-    #     "url_name": "Fucking Pants"
-    # },
-    #     {
-    #     "url": "https://www.lyst.com/shop/mens-straight-jeans/?designer_slug=aaspectrum&designer_slug=white-mountaineering&designer_slug=our-legacy&designer_slug=eytys&designer_slug=032c&designer_slug=dion-lee&designer_slug=jacquemus&designer_slug=ambush&designer_slug=marni&designer_slug=doublet-designer&designer_slug=low-classic&designer_slug=filippa-k&designer_slug=fce&designer_slug=feng-chen-wang-designer&designer_slug=saul-nash&designer_slug=heron-preston&designer_slug=anna-sui&designer_slug=we11done&designer_slug=c-p-company&designer_slug=recto-designer&designer_slug=rta&designer_slug=darkpark&designer_slug=spencer-badu&designer_slug=off-white-co-virgil-abloh&designer_slug=vetements&designer_slug=diesel&designer_slug=ami&designer_slug=acne&designer_slug=adererror&designer_slug=etudes-studio&designer_slug=vtmnts&designer_slug=1017-alyx-9sm&designer_slug=a_cold_wall&designer_slug=apc&discount_from=70&final_price_from=70&final_price_to=200&view=price_asc",
-    #     "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID,
-    #     "min_sale": 40,
-    #     "url_name": "Fucking jeans"
-    # },
-    #       {
-    #     "url": "https://www.lyst.com/shop/mens-bermuda-shorts/?designer_slug=dries-van-noten&designer_slug=ami&designer_slug=apc&designer_slug=a_cold_wall&designer_slug=carhartt&designer_slug=diesel&designer_slug=etudes-studio&designer_slug=gcds&designer_slug=haikure&designer_slug=helmut-lang&designer_slug=ih-nom-uh-nit&designer_slug=kenzo&designer_slug=msgm&designer_slug=norse-projects&designer_slug=represent&designer_slug=sandro&designer_slug=sporty-rich&designer_slug=truenyc&designer_slug=y-3&designer_slug=424&designer_slug=1017-alyx-9sm&discount_from=50&final_price_to=100&instock_size=size.shorts.eu.m.46&instock_size=size.shorts.eu.m.48",
-    #     "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID,
-    #     "min_sale": 65,
-    #     "url_name": "Fucking shorts"
-    # }
 ]
 
 OLX_URLS = [
@@ -272,14 +248,14 @@ OLX_URLS = [
         "url_name": "Molteni"
     },
     {
-        "url": "https://www.olx.ua/uk/dom-i-sad/q-dornbracht/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-dornbracht/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=15000",
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
         "url_name": "Dornbracht"
     },
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-45rpm/?currency=UAH&search%5Border%5D=created_at:desc",
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
-        "url_name": "45rpm "
+        "url_name": "45rpm"
     },
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Porro/?currency=UAH&search%5Border%5D=created_at:desc",
@@ -352,11 +328,6 @@ OLX_URLS = [
         "url_name": "Desalto"
     },
     {
-        "url": "https://www.olx.ua/uk/dom-i-sad/q-Viccarbe/?currency=UAH&search%5Border%5D=created_at:desc",
-        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
-        "url_name": "Desalto"
-    },
-    {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Oluce/?currency=UAH&search%5Border%5D=created_at:desc",
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
         "url_name": "Oluce"
@@ -382,14 +353,14 @@ OLX_URLS = [
         "url_name": "Axor"
     },
     {
-        "url": "https://www.olx.ua/uk/dom-i-sad/stroitelstvo-remont/santehnika/q-Axor/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=13000",
+        "url": "https://www.olx.ua/uk/dom-i-sad/mebel/q-Saba-Italia/?currency=UAH&search%5Border%5D=created_at:desc",
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
-        "url_name": "Axor"
+        "url_name": "Saba Italia"
     },
     {
-        "url": "https://www.olx.ua/uk/dom-i-sad/stroitelstvo-remont/santehnika/q-Axor/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=13000",
+        "url": "https://www.olx.ua/uk/dom-i-sad/mebel/q-Roche-Bobois/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=40000",
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
-        "url_name": "Axor"
+        "url_name": "Roche Bobois"
     },
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Ceccotti-Collezioni/?currency=UAH&search%5Border%5D=created_at:desc",
@@ -407,13 +378,88 @@ OLX_URLS = [
         "url_name": "La Cividina"
     },
     {
-        "url": "https://www.olx.ua/uk/dom-i-sad/q-Viccarbe/?currency=UAH&search%5Border%5D=created_at:desc",
-        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
-        "url_name": "Viccarbe"
-    },  
-    {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Miniforms/?currency=UAH&search%5Border%5D=created_at:desc",
         "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
         "url_name": "Miniforms"
-    }, 
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Viccarbe/?search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Viccarbe"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-FontanaArte/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=12000",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "FontanaArte"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/mebel/q-Mattiazzi/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Mattiazzi"
+    },  
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Punt-Mobles/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Punt Mobles"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-KEUCO/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "KEUCO"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-ClassiCon/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "ClassiCon"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Delta-light/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Delta Light"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-De-Castelli/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "De Castelli"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Ritzwell/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Ritzwell"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Brodware/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Brodware"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Eilersen/?search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Eilersen"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Leolux/?currency=UAH&search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Leolux"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-liaigre/?search%5Border%5D=created_at:desc",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID, 
+        "url_name": "Liaigre"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/83Rzs/",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID,
+        "url_name": "Гоша"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/4XOGU/",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID,
+        "url_name": "Андрій"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/2fnjBw/",
+        "telegram_chat_id": DANYLO_DEFAULT_CHAT_ID,
+        "url_name": "Євгенія'"
+    }
 ]
