@@ -17,6 +17,8 @@ BASE_OLX = "https://www.olx.ua"
 _HTTP_SEMAPHORE = asyncio.Semaphore(10)
 _SEND_SEMAPHORE = asyncio.Semaphore(3)
 _http_session: Optional[aiohttp.ClientSession] = None
+MIN_PRICE_DIFF = 50
+MIN_PRICE_DIFF_PERCENT = 3.0
 
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
@@ -435,21 +437,20 @@ async def db_upsert_item(item: OlxItem, source_name: str, touch_last_sent: bool)
     await asyncio.to_thread(_db_upsert_item_sync, item, source_name, touch_last_sent, None)
 
 
-def _db_batch_operations_sync(items: List[Tuple[OlxItem, str, bool]]) -> List[Optional[Dict[str, Any]]]:
-    """Batch database operations with single connection."""
+def _db_fetch_existing_sync(item_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
+    """Fetch existing items using a single shared connection."""
     conn = _db_connect()
     try:
         results = []
-        for item, source_name, touch_last_sent in items:
-            results.append(_db_get_item_sync(item.id, conn))
-            _db_upsert_item_sync(item, source_name, touch_last_sent, conn)
+        for item_id in item_ids:
+            results.append(_db_get_item_sync(item_id, conn))
         return results
     finally:
         conn.close()
 
-async def db_batch_operations(items: List[Tuple[OlxItem, str, bool]]) -> List[Optional[Dict[str, Any]]]:
-    """Async wrapper for batch database operations."""
-    return await asyncio.to_thread(_db_batch_operations_sync, items)
+async def db_fetch_existing(item_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
+    """Async wrapper for fetching existing items from the database."""
+    return await asyncio.to_thread(_db_fetch_existing_sync, item_ids)
 
 
 async def run_olx_scraper():
@@ -498,7 +499,8 @@ async def run_olx_scraper():
     
     async def _process_entry(entry: Dict[str, Any]):
         nonlocal total_scraped
-        url, chat_id, source_name = entry.get("url"), _clean_token(entry.get("telegram_chat_id") or default_chat), entry.get("url_name") or "OLX"
+        # Always send to the single default chat id; ignore any per-entry chat override
+        url, chat_id, source_name = entry.get("url"), default_chat, entry.get("url_name") or "OLX"
         if not url or not chat_id:
             return
         
@@ -507,21 +509,31 @@ async def run_olx_scraper():
                 return
             
             total_scraped += len(items)
-            prev_items = await db_batch_operations([(item, source_name, False) for item in items])
+            prev_items = await db_fetch_existing([item.id for item in items])
             
             send_tasks = []
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
-                should_send = prev is None
-                if prev and prev.get("price_int") != it.price_int:
-                    old_price = prev.get("price_int", 0)
-                    if old_price > 0:
-                        should_send = abs((it.price_int - old_price) / old_price) * 100 >= 3.0
-                    else:
-                        should_send = True
-                
-                if should_send:
+                if prev is None:
                     send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
+                    continue
+
+                previous_price = prev.get("price_int") or 0
+                price_diff = abs(it.price_int - previous_price)
+                percent_change = (price_diff / previous_price * 100.0) if previous_price > 0 else None
+
+                # Skip updates when price delta does not meet the configured thresholds.
+                if price_diff < MIN_PRICE_DIFF or (percent_change is not None and percent_change < MIN_PRICE_DIFF_PERCENT):
+                    pct_display = f"{percent_change:.2f}%" if percent_change is not None else "N/A"
+                    logger.debug(
+                        "Skipping item %s due to minor price change (diff=%d грн, %s)",
+                        it.id,
+                        price_diff,
+                        pct_display,
+                    )
+                    continue
+
+                send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
             
             if send_tasks:
                 await asyncio.gather(*send_tasks, return_exceptions=True)
