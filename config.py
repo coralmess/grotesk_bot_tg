@@ -390,5 +390,29 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Fima/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=20000",
         "url_name": "Fima"
-    }
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-briggs-riley/?search%5Border%5D=created_at:desc",
+        "url_name": "Briggs & Riley"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Skultuna/?search%5Border%5D=created_at:desc",
+        "url_name": "Skultuna"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Azmaya/?search%5Border%5D=created_at:desc",
+        "url_name": "Azmaya"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Linteloo/?search%5Border%5D=created_at:desc",
+        "url_name": "Linteloo"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-paola-zani/?search%5Border%5D=created_at:desc",
+        "url_name": "Paola Zani"
+    },
+     {
+        "url": "https://www.olx.ua/uk/list/user/1OyGf/",
+        "url_name": "Сергій Олігарх"
+    }, 
 ]
