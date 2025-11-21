@@ -414,5 +414,33 @@ OLX_URLS = [
      {
         "url": "https://www.olx.ua/uk/list/user/1OyGf/",
         "url_name": "Сергій Олігарх"
-    }, 
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Frette/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Frette"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-arteluce/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Arteluce"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Verpan/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Verpan"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-NORR11/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "NORR11"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Victoria-Albert/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Victoria Albert"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Hender-Scheme/?search%5Border%5D=created_at:desc",
+        "url_name": "Hender Scheme"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/verhnyaya-odezhda/puhoviki-zimnie-kurtki/q-moorer/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Moorer"
+    }
 ]

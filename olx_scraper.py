@@ -18,7 +18,7 @@ _HTTP_SEMAPHORE = asyncio.Semaphore(10)
 _SEND_SEMAPHORE = asyncio.Semaphore(3)
 _http_session: Optional[aiohttp.ClientSession] = None
 MIN_PRICE_DIFF = 50
-MIN_PRICE_DIFF_PERCENT = 3.0
+MIN_PRICE_DIFF_PERCENT = 10.0
 
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
@@ -173,11 +173,11 @@ async def fetch_html(url: str) -> str:
             return html
 
 
-async def scrape_olx_url(url: str) -> List[OlxItem]:
-    """Scrape OLX URL and return list of items with images included."""
+async def scrape_olx_url(url: str) -> Optional[List[OlxItem]]:
+    """Scrape OLX URL and return list of items with images included. Returns None on error."""
     if not (html := await fetch_html(url)):
         logger.warning(f"⚠️  No HTML content received from {url}")
-        return []
+        return None
     
     soup = BeautifulSoup(html, "html.parser")
     try:
@@ -383,6 +383,14 @@ def _db_init_sync():
                 last_sent_at TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS olx_sources (
+                url TEXT PRIMARY KEY,
+                no_items_streak INTEGER DEFAULT 0,
+                cycle_count INTEGER DEFAULT 0,
+                last_checked_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         try:
             cursor = conn.execute("PRAGMA table_info(olx_items)")
             if 'size' not in [col[1] for col in cursor.fetchall()]:
@@ -438,19 +446,55 @@ async def db_upsert_item(item: OlxItem, source_name: str, touch_last_sent: bool)
 
 
 def _db_fetch_existing_sync(item_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
-    """Fetch existing items using a single shared connection."""
+    """Fetch existing items using a single shared connection with batch query."""
+    if not item_ids:
+        return []
+    
     conn = _db_connect()
     try:
-        results = []
-        for item_id in item_ids:
-            results.append(_db_get_item_sync(item_id, conn))
-        return results
+        # Batch query using IN clause - much faster than N individual queries
+        placeholders = ','.join('?' * len(item_ids))
+        query = f"SELECT id, name, link, price_text, price_int, state, size, source, created_at, updated_at, last_sent_at FROM olx_items WHERE id IN ({placeholders})"
+        rows = conn.execute(query, item_ids).fetchall()
+        
+        # Build lookup dict for O(1) access
+        items_dict = {row['id']: dict(row) for row in rows}
+        
+        # Return results in same order as input item_ids (preserving None for missing items)
+        return [items_dict.get(item_id) for item_id in item_ids]
     finally:
         conn.close()
 
 async def db_fetch_existing(item_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
     """Async wrapper for fetching existing items from the database."""
     return await asyncio.to_thread(_db_fetch_existing_sync, item_ids)
+
+
+def _db_get_source_stats_sync(url: str) -> Dict[str, int]:
+    with _db_connect() as conn:
+        cur = conn.execute("SELECT no_items_streak, cycle_count FROM olx_sources WHERE url = ?", (url,))
+        row = cur.fetchone()
+        if row:
+            return {"streak": row[0], "cycle_count": row[1]}
+        return {"streak": 0, "cycle_count": 0}
+
+async def db_get_source_stats(url: str) -> Dict[str, int]:
+    return await asyncio.to_thread(_db_get_source_stats_sync, url)
+
+def _db_update_source_stats_sync(url: str, streak: int, cycle_count: int):
+    with _db_connect() as conn:
+        conn.execute("""
+            INSERT INTO olx_sources (url, no_items_streak, cycle_count, last_checked_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(url) DO UPDATE SET
+                no_items_streak=excluded.no_items_streak,
+                cycle_count=excluded.cycle_count,
+                last_checked_at=datetime('now')
+        """, (url, streak, cycle_count))
+        conn.commit()
+
+async def db_update_source_stats(url: str, streak: int, cycle_count: int):
+    await asyncio.to_thread(_db_update_source_stats_sync, url, streak, cycle_count)
 
 
 async def run_olx_scraper():
@@ -480,10 +524,8 @@ async def run_olx_scraper():
         try:
             image_url = item.first_image_url
             if not image_url:
-                logger.warning(f"⚠️  No image from card for item {item.id}, fetching from detail page...")
-                if image_url := await fetch_first_image_best(item.link):
-                    logger.info(f"✅ Fetched image from detail page for item {item.id}")
-                else:
+                image_url = await fetch_first_image_best(item.link)
+                if not image_url:
                     logger.warning(f"⚠️  No image available for item {item.id}")
                     total_without_images += 1
             
@@ -504,8 +546,33 @@ async def run_olx_scraper():
         if not url or not chat_id:
             return
         
+        stats = await db_get_source_stats(url)
+        streak = stats["streak"]
+        cycle_count = stats["cycle_count"] + 1
+        
+        level = min(streak // 365, 23)
+        divisor = level + 1
+        
+        if cycle_count % divisor != 0:
+            logger.info(f"⏭️ Skipping {source_name} (Streak: {streak}, Level: {level}, Cycle: {cycle_count}/{divisor})")
+            await db_update_source_stats(url, streak, cycle_count)
+            return
+        
         try:
-            if not (items := await scrape_olx_url(url)):
+            items = await scrape_olx_url(url)
+            if items is None:
+                return
+            
+            if items:
+                new_streak = 0
+                new_cycle = 0
+            else:
+                new_streak = streak + 1
+                new_cycle = 0
+            
+            await db_update_source_stats(url, new_streak, new_cycle)
+            
+            if not items:
                 return
             
             total_scraped += len(items)

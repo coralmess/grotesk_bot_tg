@@ -1,5 +1,4 @@
 import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3
-from telegram.ext import CommandHandler, Application
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple
 from datetime import datetime
@@ -17,7 +16,6 @@ from olx_scraper import run_olx_scraper
 # Initialize constants and globals
 colorama.init(autoreset=True)
 BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
-last_git_pull_time = None
 LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
@@ -139,58 +137,9 @@ class BrowserWrapper:
 browser_pool = BrowserPool(max_browsers=6)
 
 # Helper functions
-def get_git_info():
-    global last_git_pull_time
-    if last_git_pull_time is None:
-        try:
-            git_log = subprocess.check_output(['git', 'log', '-1', '--format=%cd'], universal_newlines=True).strip()
-            last_git_pull_time = datetime.strptime(git_log, '%a %b %d %H:%M:%S %Y %z')
-        except subprocess.CalledProcessError:
-            last_git_pull_time = "Unknown"
-    return last_git_pull_time
-
-async def ver_command(update):
-    await update.message.reply_text(f"Bot version: {BOT_VERSION}\nLast git pull: {get_git_info()}")
-
 def clean_link_for_display(link):
     cleaned_link = re.sub(r'^(https?://)?(www\.)?', '', link)
     return (cleaned_link[:22] + '...') if len(cleaned_link) > 25 else cleaned_link
-
-async def linkstat_command(update):
-    stats_message = "Link Processing Statistics:\n\n"
-    for step, stats in link_statistics.items():
-        if step != 'other_failures':
-            total = stats['success'] + stats['fail']
-            success_rate = (stats['success'] / total) * 100 if total > 0 else 0
-            stats_message += f"{step}:\n  Success rate: {success_rate:.2f}%\n  Successful: {stats['success']}\n  Failed: {stats['fail']}\n"
-            if stats['fail'] > 0:
-                stats_message += "  Failed links (up to 5):\n"
-                for link in stats['fail_links'][:5]:
-                    display_link = clean_link_for_display(link)
-                    stats_message += f"    <a href='{html.escape(link)}'>{html.escape(display_link)}</a>\n"
-        else:
-            stats_message += f"Other failures: {stats['count']}\n"
-            if stats['count'] > 0:
-                stats_message += "  Failed links (up to 5):\n"
-                for link in stats['links'][:5]:
-                    display_link = clean_link_for_display(link)
-                    stats_message += f"    <a href='{html.escape(link)}'>{html.escape(display_link)}</a>\n"
-        stats_message += "\n"
-    
-    # Split long messages
-    max_message_length = 4096
-    messages = []
-    while stats_message:
-        if len(stats_message) <= max_message_length:
-            messages.append(stats_message)
-            break
-        split_index = stats_message.rfind('\n', 0, max_message_length)
-        split_index = max_message_length if split_index == -1 else split_index
-        messages.append(stats_message[:split_index])
-        stats_message = stats_message[split_index:].lstrip()
-
-    for message in messages:
-        await update.message.reply_text(message, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 def load_font(font_size):
     for font_file in ["SFPro-Bold.ttf", "arialbd.ttf"]:
@@ -491,6 +440,10 @@ def extract_shoe_data(card, country):
             logger.warning("Price div not found")
             return None
         strategies = [
+            lambda: (
+                price_div.find('div', class_=lambda x: x and '_1b08vvhr6' in x and 'vjlibs1' in x),
+                price_div.find('div', class_=lambda x: x and '_1b08vvh36' in x and 'vjlibs2' in x)
+            ),
             lambda: (
                 price_div.find('div', class_=lambda x: x and ('_1b08vvhos' in x and 'vjlibs1' in x)),
                 price_div.find('div', class_=lambda x: x and ('_1b08vvh1w' in x and 'vjlibs2' in x))
@@ -844,12 +797,6 @@ async def main():
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
     asyncio.create_task(message_queue.process_queue())
-    
-    # Initialize and start the bot
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("ver", ver_command))
-    application.add_handler(CommandHandler("linkstat", linkstat_command))
-    await application.initialize(); await application.start(); await application.updater.start_polling()
 
     terminal_width = shutil.get_terminal_size().columns
     bot_version = f"Grotesk bot v.{BOT_VERSION}"
@@ -906,7 +853,7 @@ async def main():
                 logger.info("Waiting for 60 minutes before retrying")
                 await asyncio.sleep(3600)
     finally:
-        await application.stop()
+        pass  # Removed application.stop() as we're no longer using telegram.ext.Application
 
 if __name__ == "__main__":
     create_tables()  # Create tables at startup instead of creating them just before using
