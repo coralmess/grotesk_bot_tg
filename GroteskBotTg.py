@@ -317,7 +317,9 @@ async def scroll_page(page, max_attempts=None):
         new_height = await page.evaluate("document.body.scrollHeight")
         
         if total_scrolled > new_height: break
-        scroll_attempts = 0 if new_height > last_height else scroll_attempts + 1
+        # scroll_attempts = 0 if new_height > last_height else scroll_attempts + 1
+        scroll_attempts += 1
+
         last_height = new_height
 
 async def get_page_content(url, country, max_scroll_attempts=None):
