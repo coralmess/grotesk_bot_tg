@@ -17,10 +17,10 @@ from olx_scraper import run_olx_scraper
 colorama.init(autoreset=True)
 BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
 LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
-PAGE_SCRAPE = False
+PAGE_SCRAPE = True
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
-BLOCK_RESOURCES = True
+BLOCK_RESOURCES = False
 
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
@@ -304,7 +304,7 @@ async def handle_route(route):
 
 async def scroll_page(page, max_attempts=None):
     SCROLL_PAUSE_TIME = 1
-    SCROLL_STEP = 5000 if BLOCK_RESOURCES else 1000
+    SCROLL_STEP = 5000 if BLOCK_RESOURCES else 800
     if max_attempts is None:
         max_attempts = 10 if PAGE_SCRAPE else 300
     last_height = await page.evaluate("document.body.scrollHeight")
@@ -493,7 +493,7 @@ def extract_shoe_data(card, country):
         image_url = img_elem['src'] if img_elem and 'src' in img_elem.attrs else None
         # Ignore inline data URLs or non-external image sources
         if not image_url or not image_url.startswith(("http://", "https://")):
-            logger.info(f"Skipping item '{full_name}' due to non-external image src ( {image_url})")
+            logger.info(f"Skip item '{full_name}' [{country}] due to internal image src ( {image_url})")
             return None
         
         # Extract store
@@ -544,7 +544,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
     
     while True:
         if use_pagination:
-            url = f"{base_url['url']}&page={page}"
+            url = base_url['url'] if page == 1 else f"{base_url['url']}&page={page}"
             logger.info(f"Scraping page {page} for country {country} - {base_url['url_name']}")
         else:
             url = base_url['url']
@@ -692,6 +692,25 @@ def filter_duplicates(shoes, exchange_rates):
         grouped_shoes[f"{shoe['name']}_{shoe['unique_id']}"] .append(shoe)
 
     for group in grouped_shoes.values():
+        # Deduplicate within same country: prefer item with valid image_url
+        country_map = {}
+        for shoe in group:
+            country = shoe['country']
+            if country not in country_map:
+                country_map[country] = shoe
+            else:
+                existing = country_map[country]
+                existing_img = existing.get('image_url')
+                new_img = shoe.get('image_url')
+                
+                existing_has_img = existing_img and existing_img.startswith(('http', 'https'))
+                new_has_img = new_img and new_img.startswith(('http', 'https'))
+                
+                if not existing_has_img and new_has_img:
+                    country_map[country] = shoe
+        
+        group = list(country_map.values())
+
         if len(group) == 1:
             filtered_shoes.append(group[0])
             continue
