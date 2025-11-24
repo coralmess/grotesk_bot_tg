@@ -21,6 +21,8 @@ PAGE_SCRAPE = True
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
 BLOCK_RESOURCES = False
+RESOLVE_REDIRECTS = False
+SKIPPED_ITEMS = set()
 
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
@@ -31,6 +33,7 @@ try:
     SALE_EMOJI_ROCKET_THRESHOLD = getattr(_conf, 'SALE_EMOJI_ROCKET_THRESHOLD', SALE_EMOJI_ROCKET_THRESHOLD)
     SALE_EMOJI_UAH_THRESHOLD = getattr(_conf, 'SALE_EMOJI_UAH_THRESHOLD', SALE_EMOJI_UAH_THRESHOLD)
     BLOCK_RESOURCES = getattr(_conf, 'BLOCK_RESOURCES', BLOCK_RESOURCES)
+    RESOLVE_REDIRECTS = getattr(_conf, 'RESOLVE_REDIRECTS', RESOLVE_REDIRECTS)
 except Exception:
     pass
 
@@ -490,12 +493,17 @@ def extract_shoe_data(card, country):
             logger.info(f"Skipping item '{full_name}' with original price {original_price}")
             return None
         
+        # Extract unique ID
+        product_card_div = card.find('div', class_=lambda x: 'kah5ce0' in x and 'kah5ce2' in x)
+        unique_id = product_card_div['id'] if product_card_div and 'id' in product_card_div.attrs else None
+
         # Extract image
         img_elem = card.find('img', class_='zmhz363')
         image_url = img_elem['src'] if img_elem and 'src' in img_elem.attrs else None
         # Ignore inline data URLs or non-external image sources
         if not image_url or not image_url.startswith(("http://", "https://")):
-            logger.info(f"Skip item '{full_name}' [{country}] due to internal image src ( {image_url})")
+            if unique_id:
+                SKIPPED_ITEMS.add(unique_id)
             return None
         
         # Extract store
@@ -506,10 +514,6 @@ def extract_shoe_data(card, country):
         link_elem = card.find('a', href=True)
         href = link_elem['href'] if link_elem and 'href' in link_elem.attrs else None
         full_url = f"https://www.lyst.com{href}" if href and href.startswith('/') else href if href and href.startswith('http') else None
-        
-        # Extract unique ID
-        product_card_div = card.find('div', class_=lambda x: 'kah5ce0' in x and 'kah5ce2' in x)
-        unique_id = product_card_div['id'] if product_card_div and 'id' in product_card_div.attrs else None
         
         # Validate required fields
         required_fields = {
@@ -786,7 +790,9 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
 
                 # Get final link or use existing one
                 if key not in old_data:
-                    shoe['shoe_link'] = await get_final_clear_link(shoe['shoe_link'], semaphore, name, country, i, total_items)
+                    if RESOLVE_REDIRECTS:
+                        shoe['shoe_link'] = await get_final_clear_link(shoe['shoe_link'], semaphore, name, country, i, total_items)
+                    # else: shoe['shoe_link'] remains the initial URL
                     new_shoe_count += 1
                 else:
                     shoe['shoe_link'] = old_data[key]['shoe_link']
@@ -868,6 +874,7 @@ async def main():
     try:
         while True:
             try:
+                SKIPPED_ITEMS.clear()
                 # Load data and exchange rates
                 old_data = await load_shoe_data()
                 exchange_rates = load_exchange_rates()
@@ -884,6 +891,11 @@ async def main():
                 all_shoes = []
                 for result in url_results:
                     all_shoes.extend(result)
+                
+                # Check skipped items statistics
+                collected_ids = {shoe['unique_id'] for shoe in all_shoes}
+                recovered_count = sum(1 for uid in SKIPPED_ITEMS if uid in collected_ids)
+                special_logger.stat(f"Items skipped due to image but present in final list: {recovered_count}/{len(SKIPPED_ITEMS)}")
                     
                 unfiltered_len = len(all_shoes)
                 all_shoes = filter_duplicates(all_shoes, exchange_rates)
