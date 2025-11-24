@@ -304,7 +304,7 @@ async def handle_route(route):
 
 async def scroll_page(page, max_attempts=None):
     SCROLL_PAUSE_TIME = 1
-    SCROLL_STEP = 10000 if BLOCK_RESOURCES else 1000
+    SCROLL_STEP = 5000 if BLOCK_RESOURCES else 1000
     if max_attempts is None:
         max_attempts = 10 if PAGE_SCRAPE else 300
     last_height = await page.evaluate("document.body.scrollHeight")
