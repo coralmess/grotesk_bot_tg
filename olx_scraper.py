@@ -18,7 +18,7 @@ _HTTP_SEMAPHORE = asyncio.Semaphore(10)
 _SEND_SEMAPHORE = asyncio.Semaphore(3)
 _http_session: Optional[aiohttp.ClientSession] = None
 MIN_PRICE_DIFF = 50
-MIN_PRICE_DIFF_PERCENT = 10.0
+MIN_PRICE_DIFF_PERCENT = 11.0
 
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session

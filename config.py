@@ -442,5 +442,14 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/verhnyaya-odezhda/puhoviki-zimnie-kurtki/q-moorer/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
         "url_name": "Moorer"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Artilect/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Artilect"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Nuyarn/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Nuyarn"
     }
+    
 ]

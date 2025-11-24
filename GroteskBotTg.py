@@ -17,8 +17,10 @@ from olx_scraper import run_olx_scraper
 colorama.init(autoreset=True)
 BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
 LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
+PAGE_SCRAPE = False
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
+BLOCK_RESOURCES = True
 
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
@@ -28,6 +30,7 @@ try:
     COUNTRY_PRIORITY = getattr(_conf, 'COUNTRY_PRIORITY', COUNTRY_PRIORITY)
     SALE_EMOJI_ROCKET_THRESHOLD = getattr(_conf, 'SALE_EMOJI_ROCKET_THRESHOLD', SALE_EMOJI_ROCKET_THRESHOLD)
     SALE_EMOJI_UAH_THRESHOLD = getattr(_conf, 'SALE_EMOJI_UAH_THRESHOLD', SALE_EMOJI_UAH_THRESHOLD)
+    BLOCK_RESOURCES = getattr(_conf, 'BLOCK_RESOURCES', BLOCK_RESOURCES)
 except Exception:
     pass
 
@@ -293,13 +296,21 @@ async def save_shoe_data(data):
     await async_save_shoe_data(data)
 
 # Web scraping and browser functions
-async def scroll_page(page):
+async def handle_route(route):
+    if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
+        await route.abort()
+    else:
+        await route.continue_()
+
+async def scroll_page(page, max_attempts=None):
     SCROLL_PAUSE_TIME = 1
-    SCROLL_STEP, MAX_SCROLL_ATTEMPTS = 1000, 10
+    SCROLL_STEP = 10000 if BLOCK_RESOURCES else 1000
+    if max_attempts is None:
+        max_attempts = 10 if PAGE_SCRAPE else 300
     last_height = await page.evaluate("document.body.scrollHeight")
     total_scrolled, scroll_attempts = 0, 0
 
-    while scroll_attempts < MAX_SCROLL_ATTEMPTS:
+    while scroll_attempts < max_attempts:
         await page.evaluate(f"window.scrollBy(0, {SCROLL_STEP})")
         total_scrolled += SCROLL_STEP
         await asyncio.sleep(SCROLL_PAUSE_TIME)
@@ -309,23 +320,25 @@ async def scroll_page(page):
         scroll_attempts = 0 if new_height > last_height else scroll_attempts + 1
         last_height = new_height
 
-async def get_page_content(url, country):
+async def get_page_content(url, country, max_scroll_attempts=None):
     async with (await browser_pool.get_browser()) as browser:
         context = await browser.new_context()
         await context.add_cookies([{'name': 'country', 'value': country, 'domain': '.lyst.com', 'path': '/'}])
         page = await context.new_page()
+        if BLOCK_RESOURCES:
+            await page.route("**/*", handle_route)
         await page.goto(url)
-        await scroll_page(page)
+        await scroll_page(page, max_scroll_attempts)
         try:
             await page.wait_for_selector('._693owt3', timeout=10000)
             return await page.content()
         except: return None
         finally: await context.close()
 
-async def get_soup(url, country, max_retries=3):
+async def get_soup(url, country, max_retries=3, max_scroll_attempts=None):
     for attempt in range(max_retries):
         try:
-            content = await get_page_content(url, country)
+            content = await get_page_content(url, country, max_scroll_attempts)
             if not content:
                 return None
             try:
@@ -358,6 +371,8 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
         steps_info = {'steps_taken': [], 'final_step': None, 'initial_url': initial_url, 'final_url': None}
         
         try:
+            if BLOCK_RESOURCES:
+                await page.route("**/*", handle_route)
             await page.goto(initial_url)
             # Step 1: Initial URL change
             start_time = time.time()
@@ -478,7 +493,7 @@ def extract_shoe_data(card, country):
         image_url = img_elem['src'] if img_elem and 'src' in img_elem.attrs else None
         # Ignore inline data URLs or non-external image sources
         if not image_url or not image_url.startswith(("http://", "https://")):
-            logger.info(f"Skipping item '{full_name}' due to non-external image src")
+            logger.info(f"Skipping item '{full_name}' due to non-external image src ( {image_url})")
             return None
         
         # Extract store
@@ -513,25 +528,43 @@ def extract_shoe_data(card, country):
         logger.error(f"Error extracting shoe data: {e}")
         return None
 
-async def scrape_page(url, country):
-    soup = await get_soup(url, country)
+async def scrape_page(url, country, max_scroll_attempts=None):
+    soup = await get_soup(url, country, max_scroll_attempts=max_scroll_attempts)
     if not soup: return []
     
     shoe_cards = soup.find_all('div', class_='_693owt3')
     return [data for card in shoe_cards if (data := extract_shoe_data(card, country))]
 
-async def scrape_all_pages(base_url, country):
+async def scrape_all_pages(base_url, country, use_pagination=None):
+    if use_pagination is None:
+        use_pagination = PAGE_SCRAPE
+    
+    max_scroll_attempts = 10 if use_pagination else 300
     all_shoes, page = [], 1
+    
     while True:
-        url = f"{base_url['url']}&page={page}"
-        logger.info(f"Scraping page {page} for country {country} - {base_url['url_name']}")
-        shoes = await scrape_page(url, country)
+        if use_pagination:
+            url = f"{base_url['url']}&page={page}"
+            logger.info(f"Scraping page {page} for country {country} - {base_url['url_name']}")
+        else:
+            url = base_url['url']
+            logger.info(f"Scraping single page for country {country} - {base_url['url_name']}")
+
+        shoes = await scrape_page(url, country, max_scroll_attempts=max_scroll_attempts)
         if not shoes:
-            if page < 3:
+            if use_pagination and page < 3:
                 logger.error(f"{base_url['url_name']} for {country} Stopped too early. Please check for errors")
+                if use_pagination == PAGE_SCRAPE:
+                    logger.info(f"Retrying {base_url['url_name']} for {country} with PAGE_SCRAPE={not use_pagination}")
+                    return await scrape_all_pages(base_url, country, use_pagination=not use_pagination)
+            
             logger.info(f"Total for {country} {base_url['url_name']}: {len(all_shoes)}. Stopped on page {page}")
             break
         all_shoes.extend(shoes)
+        
+        if not use_pagination:
+            break
+            
         page += 1
         await asyncio.sleep(1) 
     return all_shoes
