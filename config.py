@@ -450,6 +450,45 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Nuyarn/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Nuyarn"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Alivar/?search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=40000",
+        "url_name": "Alivar"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-USM-Haller/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "USM Haller"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-demeyere/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=6000",
+        "url_name": "Demeyere"
     }
-    
+    ,
+    {
+        "url": "https://www.olx.ua/uk/list/q-Zwilling-twinox/?search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=2000",
+        "url_name": "Zwilling Twinox"
+    }
+    ,
+    {
+        "url": "https://www.olx.ua/uk/list/q-Vitsoe/?search%5Border%5D=created_at:desc",
+        "url_name": "Vitsoe"
+    }
+    ,
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-poltrona-frau/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=40000",
+        "url_name": "Poltrona Frau"
+    },
+    {
+        "url": "https://www.olx.ua/uk/elektronika/q-v-zug/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:from%5D=1000&search%5Bfilter_float_price:to%5D=15000",
+        "url_name": "V-Zug"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Wilkhahn/?search%5Border%5D=created_at:desc",
+        "url_name": "Wilkhahn"
+    }
+    ,
+    {
+        "url": "https://www.olx.ua/uk/list/q-Vollebak/?search%5Border%5D=created_at:desc",
+        "url_name": "Vollebak"
+    }
 ]
