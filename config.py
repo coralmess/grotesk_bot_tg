@@ -489,6 +489,10 @@ OLX_URLS = [
     },
     {
         "url": "https://www.olx.ua/uk/list/user/8LMcQ/",
-        "url_name": "Андрій А."
+        "url_name": "Андрій A"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Humanscale/?search%5Border%5D=created_at:desc",
+        "url_name": "Humanscale"
     }
 ]
