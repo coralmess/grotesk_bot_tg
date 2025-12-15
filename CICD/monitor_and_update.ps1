@@ -5,6 +5,7 @@
 $SCRIPT_DIR = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $BOT_SCRIPT = Join-Path $SCRIPT_DIR "GroteskBotTg.py"
 $LOG_FILE = Join-Path $SCRIPT_DIR "monitor.log"
+$LOCK_FILE = Join-Path $SCRIPT_DIR "monitor.lock"
 $CHECK_INTERVAL = 600 # 10 minutes in seconds
 $GIT_CHECK_INTERVAL = 60 # Check git status every 60 seconds, but only fetch every 10 minutes
 
@@ -20,6 +21,85 @@ function Write-Log {
     $logMessage = "[$timestamp] [$Level] $Message"
     Write-Host $logMessage
     Add-Content -Path $LOG_FILE -Value $logMessage
+}
+
+# Function to create lock file
+function Create-LockFile {
+    try {
+        $currentPid = $PID
+        Set-Content -Path $LOCK_FILE -Value $currentPid -Force
+        Write-Log "Created lock file with PID: $currentPid"
+        return $true
+    }
+    catch {
+        Write-Log "Failed to create lock file: $_" "ERROR"
+        return $false
+    }
+}
+
+# Function to remove lock file
+function Remove-LockFile {
+    try {
+        if (Test-Path $LOCK_FILE) {
+            Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
+            Write-Log "Removed lock file"
+        }
+    }
+    catch {
+        Write-Log "Failed to remove lock file: $_" "WARNING"
+    }
+}
+
+# Function to check if monitor is already running
+function Check-AlreadyRunning {
+    # Check for existing monitor processes (excluding current process)
+    $monitorProcesses = Get-Process powershell* -ErrorAction SilentlyContinue | Where-Object {
+        try {
+            $proc = $_
+            if ($proc.Id -eq $PID) { return $false }  # Skip current process
+            
+            $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($proc.Id)" -ErrorAction SilentlyContinue).CommandLine
+            $cmdLine -like "*monitor_and_update.ps1*"
+        }
+        catch {
+            $false
+        }
+    }
+    
+    if ($monitorProcesses -and $monitorProcesses.Count -gt 0) {
+        Write-Log "Another monitor instance is already running (PIDs: $($monitorProcesses.Id -join ', '))" "ERROR"
+        Write-Log "Please stop the existing monitor first using stop_all.ps1" "ERROR"
+        return $true
+    }
+    
+    # Check lock file
+    if (Test-Path $LOCK_FILE) {
+        $lockContent = Get-Content $LOCK_FILE -ErrorAction SilentlyContinue
+        if ($lockContent) {
+            $lockPid = $lockContent[0]
+            
+            # Skip if lock file is from current process
+            if ($lockPid -eq $PID) {
+                Write-Log "Lock file is from current process, continuing..." "INFO"
+                return $false
+            }
+            
+            $lockProcess = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+            
+            if ($lockProcess -and $lockProcess.ProcessName -like "powershell*") {
+                Write-Log "Monitor lock file exists for PID $lockPid (still running)" "ERROR"
+                Write-Log "Please stop the existing monitor first or delete stale lock file: $LOCK_FILE" "ERROR"
+                return $true
+            }
+            else {
+                # Stale lock file, remove it
+                Write-Log "Removing stale lock file from PID $lockPid..." "WARNING"
+                Remove-LockFile
+            }
+        }
+    }
+    
+    return $false
 }
 
 # Function to send Telegram notification
@@ -157,7 +237,18 @@ function Pull-Updates {
         Push-Location $SCRIPT_DIR
         Write-Log "Pulling updates from repository..."
         
-        $output = git pull origin 2>&1
+        # Get current branch name
+        $currentBranch = git rev-parse --abbrev-ref HEAD 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log "Failed to get current branch: $currentBranch" "ERROR"
+            Pop-Location
+            return $false
+        }
+        
+        Write-Log "Current branch: $currentBranch"
+        
+        # Pull from origin with explicit branch
+        $output = git pull origin $currentBranch 2>&1
         
         if ($LASTEXITCODE -eq 0) {
             Write-Log "Successfully pulled updates"
@@ -296,7 +387,22 @@ function Update-AndRestart {
 
 # Main monitoring loop
 function Start-Monitoring {
+    # Check if already running BEFORE any initialization
+    if (Check-AlreadyRunning) {
+        Write-Host ""
+        Write-Host "ERROR: Cannot start - monitor is already running!" -ForegroundColor Red
+        Write-Host "Use stop_all.ps1 to stop the existing instance first." -ForegroundColor Yellow
+        exit 1
+    }
+    
+    # Create lock file
+    if (-not (Create-LockFile)) {
+        Write-Log "Failed to create lock file, aborting" "ERROR"
+        exit 1
+    }
+    
     Write-Log "========== GROTESK BOT MONITOR STARTED =========="
+    Write-Log "Monitor PID: $PID"
     Write-Log "Script Directory: $SCRIPT_DIR"
     Write-Log "Check Interval: $CHECK_INTERVAL seconds"
     
@@ -366,5 +472,6 @@ try {
 finally {
     Write-Log "Monitor shutting down..."
     Stop-Bot -Reason "monitor shutdown"
+    Remove-LockFile
     Write-Log "========== MONITOR STOPPED =========="
 }

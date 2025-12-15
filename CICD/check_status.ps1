@@ -8,6 +8,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 $SCRIPT_DIR = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $TASK_NAME = "GroteskBotTg-AutoStart"
 $LOG_FILE = Join-Path $SCRIPT_DIR "monitor.log"
+$LOCK_FILE = Join-Path $SCRIPT_DIR "monitor.lock"
 
 function Get-ColoredStatus {
     param([bool]$IsGood, [string]$GoodText, [string]$BadText)
@@ -83,6 +84,48 @@ if ($botProcesses) {
     }
 } else {
     Write-Host "  [X] Bot process not found" -ForegroundColor Red
+}
+
+# Check monitor processes
+Write-Host "`nMonitor Process:" -ForegroundColor Yellow
+$monitorProcesses = Get-Process powershell* -ErrorAction SilentlyContinue | Where-Object {
+    try {
+        $cmdLine = (Get-CimInstance Win32_Process -Filter "ProcessId = $($_.Id)" -ErrorAction SilentlyContinue).CommandLine
+        $cmdLine -like "*monitor_and_update.ps1*"
+    }
+    catch {
+        $false
+    }
+}
+if ($monitorProcesses) {
+    Write-Host "  [OK] Monitor is running" -ForegroundColor Green
+    foreach ($proc in $monitorProcesses) {
+        Write-Host "     PID: $($proc.Id), Started: $($proc.StartTime)" -ForegroundColor White
+    }
+} else {
+    Write-Host "  [X] Monitor process not found" -ForegroundColor Red
+}
+
+# Check lock file
+Write-Host "`nMonitor Lock File:" -ForegroundColor Yellow
+if (Test-Path $LOCK_FILE) {
+    $lockContent = Get-Content $LOCK_FILE -ErrorAction SilentlyContinue
+    if ($lockContent) {
+        $lockPid = $lockContent[0]
+        $lockProcess = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+        
+        if ($lockProcess) {
+            Write-Host "  [OK] Lock file exists (PID: $lockPid, process running)" -ForegroundColor Green
+        } else {
+            Write-Host "  [!] Lock file exists but process not found (stale lock)" -ForegroundColor Yellow
+            Write-Host "     PID from lock: $lockPid" -ForegroundColor White
+            Write-Host "     Run stop_all.ps1 to clean up" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  [!] Lock file exists but is empty" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  [i] No lock file (monitor not running)" -ForegroundColor Gray
 }
 
 # Check log file

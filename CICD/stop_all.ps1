@@ -7,6 +7,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $SCRIPT_DIR = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $TASK_NAME = "GroteskBotTg-AutoStart"
+$LOCK_FILE = Join-Path $SCRIPT_DIR "monitor.lock"
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Red
@@ -128,6 +129,22 @@ if ($otherPythonProcesses) {
 }
 else {
     Write-Host "  [i] No other Python processes found" -ForegroundColor Gray
+}
+
+# Clean up lock file
+Write-Host "`nCleaning up lock file..." -ForegroundColor Yellow
+if (Test-Path $LOCK_FILE) {
+    try {
+        Remove-Item $LOCK_FILE -Force -ErrorAction Stop
+        Write-Host "  [OK] Removed monitor lock file" -ForegroundColor Green
+        $stoppedSomething = $true
+    }
+    catch {
+        Write-Host "  [!] Failed to remove lock file: $_" -ForegroundColor Yellow
+    }
+}
+else {
+    Write-Host "  [i] No lock file found" -ForegroundColor Gray
 }
 
 # Summary
