@@ -498,6 +498,9 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/stroitelstvo-remont/q-boch-subway/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
         "url_name": "Boch Subway"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-bossini/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Bossini"
     }
-    
 ]
