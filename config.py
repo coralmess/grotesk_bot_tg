@@ -500,7 +500,7 @@ OLX_URLS = [
         "url_name": "Boch Subway"
     },
     {
-        "url": "https://www.olx.ua/uk/dom-i-sad/q-bossini/?currency=UAH&search%5Border%5D=created_at:desc",
-        "url_name": "Bossini"
-    }
+        "url": "https://www.olx.ua/uk/list/q-Hestan/?search%5Border%5D=created_at:desc",
+        "url_name": "Hestan"
+    },
 ]
