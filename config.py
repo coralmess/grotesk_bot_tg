@@ -476,7 +476,7 @@ OLX_URLS = [
         "url_name": "Poltrona Frau"
     },
     {
-        "url": "https://www.olx.ua/uk/elektronika/q-v-zug/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:from%5D=1000&search%5Bfilter_float_price:to%5D=15000",
+        "url": "https://www.olx.ua/uk/elektronika/q-v-zug/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:from%5D=1000&search%5Bfilter_float_price:to%5D=30000",
         "url_name": "V-Zug"
     },
     {
@@ -503,4 +503,119 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/list/q-Hestan/?search%5Border%5D=created_at:desc",
         "url_name": "Hestan"
     },
+    {
+        "url": "https://www.olx.ua/uk/elektronika/q-Falmec/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:from%5D=1000&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Falmec"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Descente-Allterrain/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Descente Allterrain"
+    }
+]
+
+SHAFA_URLS = [
+    {
+        "url": "https://shafa.ua/uk/men?search_text=sunspel&sort=4",
+        "url_name": "Sunspel"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=riri&sort=4",
+        "url_name": "Riri"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Derek%20Rose&sort=4",
+        "url_name": "Derek Rose"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Our%20Legacy&sort=4",
+        "url_name": "Our Legacy"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Whitesville&sort=4",
+        "url_name": "Whitesville"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Flat%20Head&sort=4",
+        "url_name": "Flat Head"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Loopwheeler&sort=4",
+        "url_name": "Loopwheeler"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Lady%20White&sort=4",
+        "url_name": "Lady White"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Wonder%20Looper&sort=4",
+        "url_name": "Wonder Looper"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Zimmerli&sort=4",
+        "url_name": "Zimmerli"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=james%20perse&sort=4",
+        "url_name": "James Perse"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=John%20Smedley&sort=4",
+        "url_name": "John Smedley"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Agnona&sort=4",
+        "url_name": "Agnona"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Ann%20Demeulemeester&sort=4",
+        "url_name": "Ann Demeulemeester"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Carol%20Christian%20Poell&sort=4",
+        "url_name": "Carol Christian Poell"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Hender%20Scheme&sort=4",
+        "url_name": "Hender Scheme"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Officine%20Creative&sizes=174&sizes=239&sizes=176&sizes=240&sizes=175&sort=4",
+        "url_name": "Officine Creative"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Schwanen&sort=4",
+        "url_name": "Schwanen"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=45rpm&sort=4",
+        "url_name": "45rpm"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?price_to=10000&search_text=dries%20van&sort=4",
+        "url_name": "Dries Van Noten"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Moorer&sort=4",
+        "url_name": "Moorer"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Artilect&sort=4",
+        "url_name": "Artilect"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Nuyarn&sort=4",
+        "url_name": "Nuyarn"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Vollebak&sort=4",
+        "url_name": "Vollebak"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=visvim&sort=4",
+        "url_name": "Visvim"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=allterain&sort=4",
+        "url_name": "Allterrain"
+    }
 ]
