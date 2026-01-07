@@ -538,6 +538,10 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Devoa/?search%5Border%5D=created_at%3Adesc",
         "url_name": "Devoa"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Stephan-Schneider/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Stephan Schneider"
     }
 ]
 

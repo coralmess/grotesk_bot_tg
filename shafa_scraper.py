@@ -64,10 +64,14 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
                     logger.warning(f"Telegram rate limit hit; waiting {e.retry_after}s...")
                     await asyncio.sleep(e.retry_after)
                 except TimedOut:
+                    if attempt == max_retries - 1:
+                        logger.warning(f"Timeout in {func.__name__} after {max_retries} attempts")
                     if attempt < max_retries - 1:
-                        logger.warning(f"Timeout in {func.__name__}, retry {attempt + 1}/{max_retries}")
-                    await asyncio.sleep(backoff_base * (attempt + 1))
+                        await asyncio.sleep(backoff_base * (attempt + 1))
                 except Exception as e:
+                    if "Wrong type of the page content" in str(e):
+                        logger.warning(f"{func.__name__} got non-image content, falling back to bytes")
+                        return None
                     if attempt < max_retries - 1:
                         await asyncio.sleep(backoff_base * (attempt + 1) + random.random())
                     else:
