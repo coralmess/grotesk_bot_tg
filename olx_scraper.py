@@ -14,11 +14,14 @@ from config import OLX_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 BASE_OLX = "https://www.olx.ua"
-_HTTP_SEMAPHORE = asyncio.Semaphore(10)
+_HTTP_HTML_SEMAPHORE = asyncio.Semaphore(10)
+_HTTP_IMAGE_SEMAPHORE = asyncio.Semaphore(6)
 _SEND_SEMAPHORE = asyncio.Semaphore(3)
+_UPSCALE_SEMAPHORE = asyncio.Semaphore(2)
 _http_session: Optional[aiohttp.ClientSession] = None
 MIN_PRICE_DIFF = 50
 MIN_PRICE_DIFF_PERCENT = 12.0
+NO_LISTINGS_TEXT = "Ми знайшли 0 оголошень"
 
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
@@ -164,13 +167,11 @@ async def fetch_html(url: str) -> str:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
         "Accept-Language": "uk,ru;q=0.9,en;q=0.8",
     }
-    async with _HTTP_SEMAPHORE:
+    async with _HTTP_HTML_SEMAPHORE:
         session = _get_http_session()
         async with session.get(url, headers=headers) as r:
             r.raise_for_status()
-            html = await r.text()
-            await asyncio.sleep(2)
-            return html
+            return await r.text()
 
 
 async def scrape_olx_url(url: str) -> Optional[List[OlxItem]]:
@@ -179,15 +180,20 @@ async def scrape_olx_url(url: str) -> Optional[List[OlxItem]]:
         logger.warning(f"⚠️  No HTML content received from {url}")
         return None
     
+    if NO_LISTINGS_TEXT in html:
+        logger.info(f"No listings found at {url}")
+        return []
+
     soup = BeautifulSoup(html, "html.parser")
     try:
-        if "Ми знайшли 0 оголошень" in soup.get_text(" ", strip=True):
-            logger.info(f"📭 No listings found at {url}")
+        if NO_LISTINGS_TEXT in soup.get_text(" ", strip=True):
+            logger.info(f"No listings found at {url}")
             return []
     except Exception as e:
         logger.debug(f"Error checking for zero listings: {e}")
-    
-    items = [item for card in collect_cards_with_stop(soup) if (item := parse_card(card))]
+
+    cards = collect_cards_with_stop(soup)
+    items = [item for card in cards if (item := parse_card(card))]
     return items
 
 @async_retry(max_retries=3, backoff_base=2.0)
@@ -221,7 +227,8 @@ def _parse_highest_from_srcset(srcset: str) -> Optional[str]:
         return None
     best, best_w = None, -1
     for part in srcset.split(','):
-        if m := re.search(r"\s*(\S+)\s+(\d+)w\s*", part):
+        m = re.search(r"\s*(\S+)\s+(\d+)w\s*", part)
+        if m:
             url, w = m.group(1), int(m.group(2))
             if w > best_w:
                 best_w, best = w, url
@@ -296,7 +303,8 @@ def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int
 
 async def _upscale_image_bytes(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048) -> Optional[bytes]:
     """Async wrapper for image upscaling."""
-    return await asyncio.to_thread(_upscale_image_bytes_sync, img_bytes, scale, max_dim)
+    async with _UPSCALE_SEMAPHORE:
+        return await asyncio.to_thread(_upscale_image_bytes_sync, img_bytes, scale, max_dim)
 
 
 @async_retry(max_retries=3, backoff_base=1.0)
@@ -310,7 +318,7 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     }
-    async with _HTTP_SEMAPHORE:
+    async with _HTTP_IMAGE_SEMAPHORE:
         session = _get_http_session()
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
             r.raise_for_status()
@@ -393,9 +401,10 @@ def _db_init_sync():
         """)
         try:
             cursor = conn.execute("PRAGMA table_info(olx_items)")
-            if 'size' not in [col[1] for col in cursor.fetchall()]:
+            cols = [col[1] for col in cursor.fetchall()]
+            if 'size' not in cols:
                 conn.execute("ALTER TABLE olx_items ADD COLUMN size TEXT")
-                logger.info("➕ Added missing 'size' column to database")
+                logger.info("Added missing 'size' column to database")
         except Exception as e:
             logger.error(f"❌ Migration error: {e}")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_items_source ON olx_items(source);")
@@ -528,7 +537,6 @@ async def run_olx_scraper():
                 if not image_url:
                     logger.warning(f"⚠️  No image available for item {item.id}")
                     total_without_images += 1
-            
             sent = await send_photo_with_upscale(bot, chat_id, text, image_url)
             await db_upsert_item(item, source_name, touch_last_sent=sent)
             await asyncio.sleep(0.2)
@@ -538,7 +546,6 @@ async def run_olx_scraper():
             logger.warning(f"⏱️  Timeout sending item {item.id}")
         except Exception as e:
             logger.error(f"❌ Failed to send item {item.id}: {e}")
-    
     async def _process_entry(entry: Dict[str, Any]):
         nonlocal total_scraped
         # Always send to the single default chat id; ignore any per-entry chat override

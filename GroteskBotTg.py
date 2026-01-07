@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
 import aiosqlite
 from olx_scraper import run_olx_scraper
+from shafa_scraper import run_shafa_scraper
 
 # Initialize constants and globals
 colorama.init(autoreset=True)
@@ -880,8 +881,9 @@ async def main():
                 exchange_rates = load_exchange_rates()
 
                 
-                # Also run OLX scraper this cycle
+                # Also run OLX and SHAFA scrapers this cycle
                 await run_olx_scraper()
+                await run_shafa_scraper()
 
                 # Process all URLs concurrently
                 url_tasks = [process_url(base_url, COUNTRIES, exchange_rates) for base_url in BASE_URLS]

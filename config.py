@@ -510,6 +510,34 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Descente-Allterrain/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Descente Allterrain"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Fedeli/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Fedeli"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-helmut-lang/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Helmut Lang"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Veilance/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Veilance"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Filippo-De-Laurentiis/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=5000",
+        "url_name": "Filippo De Laurentiis"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-drumohr/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Drumohr"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Avon-Celli/?search%5Border%5D=created_at:desc",
+        "url_name": "Avon Celli"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Devoa/?search%5Border%5D=created_at%3Adesc",
+        "url_name": "Devoa"
     }
 ]
 
@@ -617,5 +645,65 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=allterain&sort=4",
         "url_name": "Allterrain"
+    },
+    {
+        "url": "https://shafa.ua/clothes?search_text=Veilance&sort=4",
+        "url_name": "Veilance"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=ten%20c&sort=4",
+        "url_name": "Ten C"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Agnona&sort=4",
+        "url_name": "Agnona"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?price_to=10000&search_text=Fedeli&sort=4",
+        "url_name": "Fedeli"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?conditions=3&conditions=2&search_text=maison%20margiela&sort=4",
+        "url_name": "Maison Margiela (M)"
+    },
+    {
+        "url": "https://shafa.ua/uk/women?conditions=3&conditions=2&search_text=maison%20margiela&sort=4",
+        "url_name": "Maison Margiela (W)"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Helmut%20Lang&sort=4",
+        "url_name": "Helmut Lang"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?conditions=3&conditions=2&search_text=ambush&sort=4",
+        "url_name": "Ambush"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Herno%20Laminar&sort=4",
+        "url_name": "Herno Laminar"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=tilak&sort=4",
+        "url_name": "Tilak"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?price_to=10000&search_text=grenoble&sort=4",
+        "url_name": "Moncler Grenoble"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Drumohr&sort=4",
+        "url_name": "Drumohr"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Zanone&sort=4",
+        "url_name": "Zanone"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Avon%20Celli&sort=4",
+        "url_name": "Avon Celli"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=devoa&sort=4",
+        "url_name": "Devoa"
     }
 ]
