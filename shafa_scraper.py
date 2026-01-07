@@ -222,7 +222,7 @@ async def scrape_shafa_url(url: str) -> Optional[List[ShafaItem]]:
     if not html:
         logger.warning(f"Empty response from {url}")
         return None
-    items = _parse_items_from_html(html)
+    items, _ = _parse_items_from_html(html)
     return items
 
 @async_retry(max_retries=3, backoff_base=2.0)
