@@ -542,6 +542,30 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Stephan-Schneider/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Stephan Schneider"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Ziggy-Chen/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Ziggy Chen"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Barena-Venezia/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Barena Venezia"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Cornelian-Taurus/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Cornelian Taurus"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Margaret-Howell/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Margaret Howell"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Masnada/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Masnada"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Majestic-Filatures/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Majestic Filatures"
     }
 ]
 
@@ -670,10 +694,10 @@ SHAFA_URLS = [
         "url": "https://shafa.ua/uk/men?conditions=3&conditions=2&search_text=maison%20margiela&sort=4",
         "url_name": "Maison Margiela (M)"
     },
-    {
-        "url": "https://shafa.ua/uk/women?conditions=3&conditions=2&search_text=maison%20margiela&sort=4",
-        "url_name": "Maison Margiela (W)"
-    },
+    # {
+    #     "url": "https://shafa.ua/uk/women?conditions=3&conditions=2&search_text=maison%20margiela&sort=4",
+    #     "url_name": "Maison Margiela (W)"
+    # },
     {
         "url": "https://shafa.ua/uk/men?search_text=Helmut%20Lang&sort=4",
         "url_name": "Helmut Lang"
@@ -709,5 +733,33 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/men?search_text=devoa&sort=4",
         "url_name": "Devoa"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Ziggy%20Chen&sort=4",
+        "url_name": "Ziggy Chen"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?price_to=5000&search_text=Barena%20Venezia&sort=4",
+        "url_name": "Barena Venezia"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Cornelian%20Taurus&sort=4",
+        "url_name": "Cornelian Taurus"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Attachment%20&sort=4",
+        "url_name": "Attachment"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Margaret%20Howell%20&sort=4",
+        "url_name": "Margaret Howell"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Masnada%20&sort=4",
+        "url_name": "Masnada"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Majestic%20Filatures%20&sort=4",
+        "url_name": "Majestic Filatures"
     }
 ]

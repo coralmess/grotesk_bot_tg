@@ -429,6 +429,30 @@ def extract_price(price_str):
     try: return float(price_num)
     except ValueError: return 0
 
+def find_price_elements_by_value(root):
+    if not root:
+        return None, None
+    candidates = []
+    for el in root.find_all(['div', 'span', 'p']):
+        text = el.get_text(" ", strip=True)
+        if not text:
+            continue
+        price_val = extract_price(text)
+        if price_val > 0:
+            candidates.append((price_val, el))
+    if len(candidates) < 2:
+        return None, None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    original = candidates[0]
+    sale = None
+    for item in candidates[1:]:
+        if item[0] != original[0]:
+            sale = item
+            break
+    if not sale:
+        return None, None
+    return original[1], sale[1]
+
 def extract_shoe_data(card, country):
     if not card:
         logger.warning("Received None card in extract_shoe_data")
@@ -486,8 +510,10 @@ def extract_shoe_data(card, country):
                 original_price_elem, sale_price_elem = o, s
                 break
         if not original_price_elem or not sale_price_elem:
-            logger.warning("Price elements not found")
-            return None
+            original_price_elem, sale_price_elem = find_price_elements_by_value(price_div)
+            if not original_price_elem or not sale_price_elem:
+                logger.warning("Price elements not found")
+                return None
         original_price = original_price_elem.text.strip() if original_price_elem.text else "N/A"
         sale_price = sale_price_elem.text.strip() if sale_price_elem.text else "N/A"
         if extract_price(original_price) < 80:
