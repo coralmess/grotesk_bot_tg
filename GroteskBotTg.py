@@ -1,12 +1,13 @@
 import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3
+from pathlib import Path
 from telegram.constants import ParseMode
-from collections import defaultdict, namedtuple
+from collections import defaultdict, namedtuple, deque
 from datetime import datetime
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
-from config import TELEGRAM_BOT_TOKEN, EXCHANGERATE_API_KEY, BASE_URLS
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, BASE_URLS
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
@@ -20,6 +21,8 @@ BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
 LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
 PAGE_SCRAPE = True
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
+BOT_LOG_FILE = Path(__file__).with_name("python.log")
+LOG_TAIL_LINES = 500
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
 BLOCK_RESOURCES = False
 RESOLVE_REDIRECTS = False
@@ -91,9 +94,13 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 if logger.hasHandlers():
     logger.handlers.clear()
-handler = logging.StreamHandler()
-handler.setFormatter(ColoredFormatter('%(asctime)s', datefmt='%d.%m %H:%M:%S'))
-logger.addHandler(handler)
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(ColoredFormatter('%(asctime)s', datefmt='%d.%m %H:%M:%S'))
+logger.addHandler(console_handler)
+
+file_handler = logging.FileHandler(BOT_LOG_FILE, encoding="utf-8")
+file_handler.setFormatter(ColoredFormatter('%(asctime)s', datefmt='%d.%m %H:%M:%S'))
+logger.addHandler(file_handler)
 
 class SpecialLogger:
     @staticmethod
@@ -718,6 +725,84 @@ async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah
             await asyncio.sleep(2 * (attempt + 1))
     return False
 
+def get_allowed_chat_ids():
+    allowed = set()
+    for raw in (DANYLO_DEFAULT_CHAT_ID, TELEGRAM_CHAT_ID):
+        if raw is None:
+            continue
+        try:
+            allowed.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return allowed
+
+def tail_log_lines(path, line_count=LOG_TAIL_LINES):
+    if not path.exists():
+        return []
+    lines = deque(maxlen=line_count)
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                lines.append(line.rstrip("\n"))
+    except Exception as exc:
+        logger.error(f"Failed to read log file: {exc}")
+        return []
+    return list(lines)
+
+async def send_log_tail(bot, chat_id, log_path, line_count=LOG_TAIL_LINES):
+    lines = tail_log_lines(log_path, line_count)
+    if not lines:
+        await bot.send_message(chat_id=chat_id, text="Log file is empty or missing.")
+        return
+    payload = "\n".join(lines) + "\n"
+    log_bytes = payload.encode("utf-8", errors="replace")
+    bio = io.BytesIO(log_bytes)
+    bio.name = f"python_last_{line_count}.ansi"
+    await bot.send_document(
+        chat_id=chat_id,
+        document=bio,
+        caption=f"Last {line_count} lines from {log_path.name}"
+    )
+
+async def command_listener(bot_token, allowed_chat_ids, log_path):
+    if not bot_token:
+        logger.warning("Command listener disabled: TELEGRAM_BOT_TOKEN is not set.")
+        return
+    if not allowed_chat_ids:
+        logger.warning("Command listener disabled: no allowed chat IDs configured.")
+        return
+
+    bot = Bot(token=bot_token)
+    offset = None
+    logger.info("Command listener started.")
+
+    while True:
+        try:
+            updates = await bot.get_updates(
+                offset=offset,
+                timeout=20,
+                allowed_updates=["message"]
+            )
+            for update in updates:
+                offset = update.update_id + 1
+                message = update.message
+                if not message or not message.text:
+                    continue
+                chat_id = message.chat_id
+                if chat_id not in allowed_chat_ids:
+                    continue
+                raw_text = message.text.strip()
+                if not raw_text:
+                    continue
+                command = raw_text.split()[0].split("@")[0].lower()
+                if command in ("/log", "/logs", "/log500"):
+                    await send_log_tail(bot, chat_id, log_path, LOG_TAIL_LINES)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Command listener error: {exc}")
+            await asyncio.sleep(5)
+
 # Processing functions
 def filter_duplicates(shoes, exchange_rates):
     filtered_shoes, grouped_shoes = [], defaultdict(list)
@@ -884,6 +969,7 @@ async def main():
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
     asyncio.create_task(message_queue.process_queue())
+    asyncio.create_task(command_listener(TELEGRAM_BOT_TOKEN, get_allowed_chat_ids(), BOT_LOG_FILE))
 
     terminal_width = shutil.get_terminal_size().columns
     bot_version = f"Grotesk bot v.{BOT_VERSION}"

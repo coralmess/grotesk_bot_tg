@@ -279,16 +279,14 @@ function Start-Bot {
 
         Write-Log "Starting GroteskBotTg..."
         
-        # Start the bot process with visible window
+        # Start the bot process without a visible window
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $global:PythonCommand
         $psi.Arguments = "`"$BOT_SCRIPT`""
         $psi.WorkingDirectory = $SCRIPT_DIR
-        $psi.UseShellExecute = $true  # Changed to true to show window
-        # Remove these when UseShellExecute = true
-        # $psi.RedirectStandardOutput = $true
-        # $psi.RedirectStandardError = $true
-        # $psi.CreateNoWindow = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
         
         $global:BotProcess = [System.Diagnostics.Process]::Start($psi)
         

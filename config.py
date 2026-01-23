@@ -566,6 +566,34 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Majestic-Filatures/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Majestic Filatures"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Outlier/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Outlier"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Fissler/?search%5Bfilter_enum_state%5D%5B0%5D=new&search%5Bfilter_float_price%3Ato%5D=6000&search%5Border%5D=created_at%3Adesc",
+        "url_name": "Fissler"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Blurhms/?currency=UAH&search%5Border%5D=created_at%3Adesc",
+        "url_name": "Blurhms"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Graphpaper/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Graphpaper"
+    }, 
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Pillivuyt/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Pillivuyt"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Herno-Laminar/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Herno Laminar"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-all-clad/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "All Clad"
     }
 ]
 
@@ -761,5 +789,33 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Majestic%20Filatures%20&sort=4",
         "url_name": "Majestic Filatures"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Facetasm&sort=4",
+        "url_name": "Facetasm"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Jackman%20&sizes=148&sizes=151&sizes=150&sizes=149",
+        "url_name": "Jackman"
+    },
+    # {
+    #     "url": "https://shafa.ua/uk/men?price_to=3000&search_text=Malo%20&sort=4",
+    #     "url_name": "Malo"
+    # },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Outlier&sort=4",
+        "url_name": "Outlier"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Blurhms&sort=4",
+        "url_name": "Blurhms"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Graphpaper&sort=4",
+        "url_name": "Graphpaper"    
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Van%20Essche&sort=4",
+        "url_name": "Van Essche"    
     }
 ]
