@@ -1,4 +1,4 @@
-import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3
+import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, random
 from pathlib import Path
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple, deque
@@ -7,7 +7,7 @@ from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, BASE_URLS, IS_RUNNING_LYST
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, BASE_URLS, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
@@ -22,6 +22,7 @@ LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
 PAGE_SCRAPE = True
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 BOT_LOG_FILE = Path(__file__).with_name("python.log")
+STATUS_MSG_FILE = Path(__file__).with_name("status_message_id.txt")
 LOG_TAIL_LINES = 500
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
 BLOCK_RESOURCES = False
@@ -803,6 +804,53 @@ async def command_listener(bot_token, allowed_chat_ids, log_path):
             logger.error(f"Command listener error: {exc}")
             await asyncio.sleep(5)
 
+async def _ensure_status_message(bot: Bot, chat_id: int) -> int:
+    """Get or create the status message and persist its message_id."""
+    if STATUS_MSG_FILE.exists():
+        try:
+            stored = STATUS_MSG_FILE.read_text(encoding="utf-8").strip()
+            if stored.isdigit():
+                return int(stored)
+        except Exception:
+            pass
+    msg = await bot.send_message(chat_id=chat_id, text="🟢 Bot status: starting...", parse_mode=ParseMode.HTML)
+    try:
+        STATUS_MSG_FILE.write_text(str(msg.message_id), encoding="utf-8")
+    except Exception:
+        pass
+    return msg.message_id
+
+def _format_status_text(start_ts: float) -> str:
+    now = datetime.utcnow()
+    uptime_sec = int(time.time() - start_ts)
+    hours = uptime_sec // 3600
+    minutes = (uptime_sec % 3600) // 60
+    return (
+        "✅ <b>Grotesk Bot OK</b>\n"
+        f"⏱ Uptime: {hours}h {minutes}m\n"
+        f"🕒 Last update (UTC): {now.strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600):
+    if not bot_token or not chat_id:
+        return
+    bot = Bot(token=bot_token)
+    start_ts = time.time()
+    message_id = await _ensure_status_message(bot, chat_id)
+    while True:
+        try:
+            text = _format_status_text(start_ts)
+            await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=ParseMode.HTML)
+        except Exception:
+            # If edit fails (message deleted or not found), create a new one
+            try:
+                message_id = await _ensure_status_message(bot, chat_id)
+                text = _format_status_text(start_ts)
+                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+        await asyncio.sleep(interval_s)
+
 # Processing functions
 def filter_duplicates(shoes, exchange_rates):
     filtered_shoes, grouped_shoes = [], defaultdict(list)
@@ -963,6 +1011,15 @@ def print_link_statistics():
                     
 def center_text(text, width, fill_char=' '): return text.center(width, fill_char)
 
+def _sleep_interval_with_jitter(base_sec: int, jitter_sec: int) -> int:
+    if base_sec <= 0:
+        return 60
+    if jitter_sec <= 0:
+        return base_sec
+    low = max(1, base_sec - jitter_sec)
+    high = base_sec + jitter_sec
+    return random.randint(low, high)
+
 # Main application
 async def main():
     global LIVE_MODE
@@ -970,6 +1027,12 @@ async def main():
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
     asyncio.create_task(message_queue.process_queue())
     asyncio.create_task(command_listener(TELEGRAM_BOT_TOKEN, get_allowed_chat_ids(), BOT_LOG_FILE))
+    try:
+        chat_id = int((DANYLO_DEFAULT_CHAT_ID or "").strip())
+    except Exception:
+        chat_id = None
+    if chat_id:
+        asyncio.create_task(status_heartbeat(TELEGRAM_BOT_TOKEN, chat_id, interval_s=600))
 
     terminal_width = shutil.get_terminal_size().columns
     bot_version = f"Grotesk bot v.{BOT_VERSION}"
@@ -1023,8 +1086,9 @@ async def main():
                     print_link_statistics()
                 else:
                     logger.info("Lyst scraping disabled (IsRunningLyst=false)")
-                logger.info("Sleeping for 1 hour before next check")
-                await asyncio.sleep(3600)
+                sleep_for = _sleep_interval_with_jitter(CHECK_INTERVAL_SEC, CHECK_JITTER_SEC)
+                logger.info(f"Sleeping for {sleep_for} seconds before next check")
+                await asyncio.sleep(sleep_for)
                 
             except KeyboardInterrupt:
                 logger.info("Script terminated by user")
@@ -1032,8 +1096,9 @@ async def main():
             except Exception as e:
                 logger.error(f"An unexpected error occurred in main loop: {e}")
                 logger.error(traceback.format_exc())
-                logger.info("Waiting for 60 minutes before retrying")
-                await asyncio.sleep(3600)
+                sleep_for = _sleep_interval_with_jitter(CHECK_INTERVAL_SEC, CHECK_JITTER_SEC)
+                logger.info(f"Waiting for {sleep_for} seconds before retrying")
+                await asyncio.sleep(sleep_for)
     finally:
         pass  # Removed application.stop() as we're no longer using telegram.ext.Application
 

@@ -9,7 +9,7 @@ from PIL import Image
 import io, asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
 from functools import wraps
-from config import OLX_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID
+from config import OLX_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -170,6 +170,16 @@ async def fetch_html(url: str) -> str:
     async with _HTTP_HTML_SEMAPHORE:
         session = _get_http_session()
         async with session.get(url, headers=headers) as r:
+            if r.status == 429:
+                retry_after = r.headers.get("Retry-After")
+                wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 15
+                logger.warning(f"⏳ OLX rate limited (429). Sleeping {wait_s}s before retry.")
+                await asyncio.sleep(wait_s)
+                raise aiohttp.ClientResponseError(r.request_info, r.history, status=r.status)
+            if r.status == 403:
+                logger.warning("⛔ OLX forbidden (403). Backing off for 60s.")
+                await asyncio.sleep(60)
+                raise aiohttp.ClientResponseError(r.request_info, r.history, status=r.status)
             r.raise_for_status()
             return await r.text()
 
@@ -321,6 +331,16 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
     async with _HTTP_IMAGE_SEMAPHORE:
         session = _get_http_session()
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
+            if r.status == 429:
+                retry_after = r.headers.get("Retry-After")
+                wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 15
+                logger.warning(f"⏳ Image rate limited (429). Sleeping {wait_s}s before retry.")
+                await asyncio.sleep(wait_s)
+                return None
+            if r.status == 403:
+                logger.warning("⛔ Image forbidden (403). Backing off for 30s.")
+                await asyncio.sleep(30)
+                return None
             r.raise_for_status()
             return await r.read()
 
@@ -552,6 +572,8 @@ async def run_olx_scraper():
         url, chat_id, source_name = entry.get("url"), default_chat, entry.get("url_name") or "OLX"
         if not url or not chat_id:
             return
+        if OLX_REQUEST_JITTER_SEC > 0:
+            await asyncio.sleep(random.uniform(0, OLX_REQUEST_JITTER_SEC))
         
         stats = await db_get_source_stats(url)
         streak = stats["streak"]

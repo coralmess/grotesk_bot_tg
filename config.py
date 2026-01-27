@@ -9,6 +9,10 @@ EXCHANGERATE_API_KEY = os.getenv('EXCHANGERATE_API_KEY')
 DANYLO_DEFAULT_CHAT_ID = os.getenv('DANYLO_DEFAULT_CHAT_ID')
 TELEGRAM_OLX_BOT_TOKEN = os.getenv('TELEGRAM_OLX_BOT_TOKEN')
 IS_RUNNING_LYST = os.getenv('IsRunningLyst', 'true').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+CHECK_INTERVAL_SEC = int(os.getenv('CHECK_INTERVAL_SEC', '3600'))
+CHECK_JITTER_SEC = int(os.getenv('CHECK_JITTER_SEC', '300'))
+OLX_REQUEST_JITTER_SEC = float(os.getenv('OLX_REQUEST_JITTER_SEC', '2.0'))
+SHAFA_REQUEST_JITTER_SEC = float(os.getenv('SHAFA_REQUEST_JITTER_SEC', '2.0'))
 
 BASE_URLS = [
     { 

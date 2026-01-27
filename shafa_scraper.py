@@ -9,7 +9,7 @@ from PIL import Image
 import io, asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
 from functools import wraps
-from config import SHAFA_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID
+from config import SHAFA_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC
 
 try:
     from playwright.async_api import async_playwright, Browser, BrowserContext
@@ -304,6 +304,16 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
     async with _HTTP_SEMAPHORE:
         session = _get_http_session()
         async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
+            if r.status == 429:
+                retry_after = r.headers.get("Retry-After")
+                wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 15
+                logger.warning(f"Rate limited (429). Sleeping {wait_s}s before retry.")
+                await asyncio.sleep(wait_s)
+                return None
+            if r.status == 403:
+                logger.warning("Forbidden (403). Backing off for 30s.")
+                await asyncio.sleep(30)
+                return None
             r.raise_for_status()
             return await r.read()
 
@@ -483,6 +493,8 @@ async def run_shafa_scraper():
         url, chat_id, source_name = entry.get("url"), default_chat, entry.get("url_name") or "SHAFA"
         if not url or not chat_id:
             return
+        if SHAFA_REQUEST_JITTER_SEC > 0:
+            await asyncio.sleep(random.uniform(0, SHAFA_REQUEST_JITTER_SEC))
         stats = await asyncio.to_thread(_db_get_source_stats_sync, url)
         streak = stats["streak"]
         cycle_count = stats["cycle_count"] + 1
