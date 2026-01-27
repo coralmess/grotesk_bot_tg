@@ -19,7 +19,7 @@ from shafa_scraper import run_shafa_scraper
 # Initialize constants and globals
 colorama.init(autoreset=True)
 BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
-LIVE_MODE, ASK_FOR_LIVE_MODE = True, False
+LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
 PAGE_SCRAPE = True
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 BOT_LOG_FILE = Path(__file__).with_name("python.log")
@@ -502,38 +502,39 @@ def extract_shoe_data(card, country):
         full_name = ' '.join(e.text.strip() for e in name_elements if e and e.text)
         if 'Giuseppe Zanotti' in full_name: return None
         
-        # Extract price elements with strategy fallbacks
-        price_div = card.find('div', class_='ducdwf0')
-        if not price_div:
-            logger.warning("Price div not found")
+        # Extract price elements (prefer data-testid, fallback to class heuristics)
+        price_container = card.find('div', attrs={'data-testid': 'product-price'}) or card.find('div', class_='ducdwf0')
+        if not price_container:
+            logger.warning("Price container not found")
             return None
-        strategies = [
-            lambda: (
-                price_div.find('div', class_=lambda x: x and '_1b08vvhr6' in x and 'vjlibs1' in x),
-                price_div.find('div', class_=lambda x: x and '_1b08vvh36' in x and 'vjlibs2' in x)
-            ),
-            lambda: (
-                price_div.find('div', class_=lambda x: x and ('_1b08vvhos' in x and 'vjlibs1' in x)),
-                price_div.find('div', class_=lambda x: x and ('_1b08vvh1w' in x and 'vjlibs2' in x))
-            ),
-            lambda: (
-                price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and 'vjlibs2' in x and '_1b08vvhq2' in x and '_1b08vvh36' not in x),
-                price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh36' in x)
-            ),
-            lambda: (
-                price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and '_1b08vvhnk' in x and '_1b08vvh1q' not in x),
-                price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh1q' in x) or
-                price_div.find('div', class_=lambda x: x and '_1b08vvh1w' in x)
-            ),
-        ]
-        original_price_elem = sale_price_elem = None
-        for strat in strategies:
-            o, s = strat()
-            if o and s and o != s:
-                original_price_elem, sale_price_elem = o, s
-                break
+        original_price_elem, sale_price_elem = find_price_elements_by_value(price_container)
         if not original_price_elem or not sale_price_elem:
-            original_price_elem, sale_price_elem = find_price_elements_by_value(price_div)
+            # Legacy class-based fallbacks
+            price_div = card.find('div', class_='ducdwf0') or price_container
+            strategies = [
+                lambda: (
+                    price_div.find('div', class_=lambda x: x and '_1b08vvhr6' in x and 'vjlibs1' in x),
+                    price_div.find('div', class_=lambda x: x and '_1b08vvh36' in x and 'vjlibs2' in x)
+                ),
+                lambda: (
+                    price_div.find('div', class_=lambda x: x and ('_1b08vvhos' in x and 'vjlibs1' in x)),
+                    price_div.find('div', class_=lambda x: x and ('_1b08vvh1w' in x and 'vjlibs2' in x))
+                ),
+                lambda: (
+                    price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and 'vjlibs2' in x and '_1b08vvhq2' in x and '_1b08vvh36' not in x),
+                    price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh36' in x)
+                ),
+                lambda: (
+                    price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and '_1b08vvhnk' in x and '_1b08vvh1q' not in x),
+                    price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh1q' in x) or
+                    price_div.find('div', class_=lambda x: x and '_1b08vvh1w' in x)
+                ),
+            ]
+            for strat in strategies:
+                o, s = strat()
+                if o and s and o != s:
+                    original_price_elem, sale_price_elem = o, s
+                    break
             if not original_price_elem or not sale_price_elem:
                 logger.warning("Price elements not found")
                 return None
@@ -544,12 +545,14 @@ def extract_shoe_data(card, country):
             return None
         
         # Extract unique ID
-        product_card_div = card.find('div', class_=lambda x: 'kah5ce0' in x and 'kah5ce2' in x)
+        product_card_div = card.find('div', attrs={'data-testid': 'product-card'}) or card.find('div', class_=lambda x: x and 'kah5ce0' in x and 'kah5ce2' in x)
         unique_id = product_card_div['id'] if product_card_div and 'id' in product_card_div.attrs else None
 
         # Extract image
-        img_elem = card.find('img', class_='zmhz363')
-        image_url = img_elem['src'] if img_elem and 'src' in img_elem.attrs else None
+        img_elem = card.find('img', src=True) or card.find('img', attrs={'data-src': True}) or card.find('img', attrs={'data-lazy-src': True})
+        image_url = None
+        if img_elem:
+            image_url = img_elem.get('src') or img_elem.get('data-src') or img_elem.get('data-lazy-src')
         # Ignore inline data URLs or non-external image sources
         if not image_url or not image_url.startswith(("http://", "https://")):
             if unique_id:
@@ -557,11 +560,20 @@ def extract_shoe_data(card, country):
             return None
         
         # Extract store
-        store_elem = card.find('span', class_='_1fcx6l24')
-        store = store_elem.text.strip() if store_elem and store_elem.text else "Unknown Store"
+        store_elem = card.find('div', attrs={'data-testid': 'retailer'}) or card.find('span', class_='_1fcx6l24')
+        store = store_elem.get_text(strip=True) if store_elem else "Unknown Store"
         
         # Extract link
-        link_elem = card.find('a', href=True)
+        link_elem = None
+        for a in card.find_all('a', href=True):
+            href = a.get('href') or ''
+            if '/track/' in href:
+                continue
+            if any(p in href for p in ['/clothing/', '/shoes/', '/accessories/', '/bags/', '/jewelry/']):
+                link_elem = a
+                break
+        if not link_elem:
+            link_elem = card.find('a', href=True)
         href = link_elem['href'] if link_elem and 'href' in link_elem.attrs else None
         full_url = f"https://www.lyst.com{href}" if href and href.startswith('/') else href if href and href.startswith('http') else None
         
@@ -1138,11 +1150,12 @@ async def main():
             try:
                 SKIPPED_ITEMS.clear()
                 # Also run OLX and SHAFA scrapers on flowy 15–60 min schedule
-                now_ts = time.time()
-                if now_ts >= NEXT_OLX_RUN_TS:
-                    await _run_olx_and_mark()
-                if now_ts >= NEXT_SHAFA_RUN_TS:
-                    await _run_shafa_and_mark()
+                # (temporarily disabled for Lyst debugging)
+                # now_ts = time.time()
+                # if now_ts >= NEXT_OLX_RUN_TS:
+                #     await _run_olx_and_mark()
+                # if now_ts >= NEXT_SHAFA_RUN_TS:
+                #     await _run_shafa_and_mark()
 
                 if IS_RUNNING_LYST:
                     # Load data and exchange rates
