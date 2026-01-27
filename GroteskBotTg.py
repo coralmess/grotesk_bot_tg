@@ -2,7 +2,8 @@ import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, ur
 from pathlib import Path
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple, deque
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from telegram import Bot
@@ -31,6 +32,9 @@ COUNTRIES = ['IT', 'PL', 'US', 'GB']
 BLOCK_RESOURCES = False
 RESOLVE_REDIRECTS = False
 SKIPPED_ITEMS = set()
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
+LAST_OLX_RUN_UTC = None
+LAST_SHAFA_RUN_UTC = None
 
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
@@ -65,6 +69,12 @@ class ColoredFormatter(logging.Formatter):
     COLORS = {'DEBUG': Fore.CYAN, 'INFO': Fore.WHITE, 'WARNING': Fore.YELLOW, 'ERROR': Fore.RED, 
               'CRITICAL': Fore.RED + Back.WHITE, 'STAT': Fore.MAGENTA, 'GOOD': Fore.GREEN, 
               'LIGHTBLUE_INFO': Fore.LIGHTBLUE_EX}
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=KYIV_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.isoformat()
 
     def format(self, record):
         log_color = self.COLORS.get(record.levelname, Fore.WHITE)
@@ -824,15 +834,29 @@ async def _ensure_status_message(bot: Bot, chat_id: int) -> int:
     return msg.message_id
 
 def _format_status_text(start_ts: float) -> str:
-    now = datetime.utcnow()
+    now = datetime.now(KYIV_TZ)
     uptime_sec = int(time.time() - start_ts)
     hours = uptime_sec // 3600
     minutes = (uptime_sec % 3600) // 60
+    olx_str = LAST_OLX_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_OLX_RUN_UTC else "never"
+    shafa_str = LAST_SHAFA_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_SHAFA_RUN_UTC else "never"
     return (
         "✅ <b>Grotesk Bot OK</b>\n"
         f"⏱ Uptime: {hours}h {minutes}m\n"
-        f"🕒 Last update (UTC): {now.strftime('%Y-%m-%d %H:%M:%S')}"
+        f"🕒 Last update (Kyiv): {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"🧾 Last OLX run: {olx_str}\n"
+        f"🧾 Last SHAFA run: {shafa_str}"
     )
+
+async def _run_olx_and_mark():
+    global LAST_OLX_RUN_UTC
+    await run_olx_scraper()
+    LAST_OLX_RUN_UTC = datetime.now(timezone.utc)
+
+async def _run_shafa_and_mark():
+    global LAST_SHAFA_RUN_UTC
+    await run_shafa_scraper()
+    LAST_SHAFA_RUN_UTC = datetime.now(timezone.utc)
 
 async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600):
     if not bot_token or not chat_id:
@@ -841,15 +865,18 @@ async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600):
     start_ts = time.time()
     message_id = await _ensure_status_message(bot, chat_id)
     while True:
+        text = _format_status_text(start_ts)
         try:
-            text = _format_status_text(start_ts)
             await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=ParseMode.HTML)
         except Exception:
-            # If edit fails (message deleted or not found), create a new one
+            # If edit fails (message deleted or not found), send a new one and persist its id
             try:
-                message_id = await _ensure_status_message(bot, chat_id)
-                text = _format_status_text(start_ts)
-                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=ParseMode.HTML)
+                msg = await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+                message_id = msg.message_id
+                try:
+                    STATUS_MSG_FILE.write_text(str(message_id), encoding="utf-8")
+                except Exception:
+                    pass
             except Exception:
                 pass
         await asyncio.sleep(interval_s)
@@ -1064,6 +1091,7 @@ async def maintenance_loop(interval_s: int):
 
 # Main application
 async def main():
+    global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC
     global LIVE_MODE
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
@@ -1096,8 +1124,8 @@ async def main():
             try:
                 SKIPPED_ITEMS.clear()
                 # Also run OLX and SHAFA scrapers this cycle
-                # await run_olx_scraper()
-                # await run_shafa_scraper()
+                await _run_olx_and_mark()
+                await _run_shafa_and_mark()
 
                 if IS_RUNNING_LYST:
                     # Load data and exchange rates
