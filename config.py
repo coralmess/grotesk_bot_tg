@@ -8,6 +8,7 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 EXCHANGERATE_API_KEY = os.getenv('EXCHANGERATE_API_KEY')
 DANYLO_DEFAULT_CHAT_ID = os.getenv('DANYLO_DEFAULT_CHAT_ID')
 TELEGRAM_OLX_BOT_TOKEN = os.getenv('TELEGRAM_OLX_BOT_TOKEN')
+IS_RUNNING_LYST = os.getenv('IsRunningLyst', 'true').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 
 BASE_URLS = [
     { 
@@ -594,6 +595,10 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-all-clad/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "All Clad"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/2hwtHL/#912656074",
+        "url_name": "User 2hwtHL"
     }
 ]
 

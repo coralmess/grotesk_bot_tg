@@ -7,7 +7,7 @@ from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, BASE_URLS
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, BASE_URLS, IS_RUNNING_LYST
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
@@ -124,7 +124,7 @@ class BrowserPool:
     async def init(self):
         if not self._playwright:
             self._playwright = await async_playwright().start()
-            self._browser_type = self._playwright.firefox
+            self._browser_type = self._playwright.chromium
 
     async def close(self):
         if self._playwright:
@@ -988,39 +988,41 @@ async def main():
         while True:
             try:
                 SKIPPED_ITEMS.clear()
-                # Load data and exchange rates
-                old_data = await load_shoe_data()
-                exchange_rates = load_exchange_rates()
-
-                
                 # Also run OLX and SHAFA scrapers this cycle
                 await run_olx_scraper()
                 await run_shafa_scraper()
 
-                # Process all URLs concurrently
-                url_tasks = [process_url(base_url, COUNTRIES, exchange_rates) for base_url in BASE_URLS]
-                url_results = await asyncio.gather(*url_tasks)
-                
-                # Combine results and filter duplicates
-                all_shoes = []
-                for result in url_results:
-                    all_shoes.extend(result)
-                
-                # Check skipped items statistics
-                collected_ids = {shoe['unique_id'] for shoe in all_shoes}
-                recovered_count = sum(1 for uid in SKIPPED_ITEMS if uid in collected_ids)
-                special_logger.stat(f"Items skipped due to image but present in final list: {recovered_count}/{len(SKIPPED_ITEMS)}")
-                    
-                unfiltered_len = len(all_shoes)
-                all_shoes = filter_duplicates(all_shoes, exchange_rates)
-                special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
-                
-                # Process all shoes
-                await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
+                if IS_RUNNING_LYST:
+                    # Load data and exchange rates
+                    old_data = await load_shoe_data()
+                    exchange_rates = load_exchange_rates()
 
-                # Print statistics and wait for next cycle
-                print_statistics()
-                print_link_statistics()
+                    # Process all URLs concurrently
+                    url_tasks = [process_url(base_url, COUNTRIES, exchange_rates) for base_url in BASE_URLS]
+                    url_results = await asyncio.gather(*url_tasks)
+
+                    # Combine results and filter duplicates
+                    all_shoes = []
+                    for result in url_results:
+                        all_shoes.extend(result)
+
+                    # Check skipped items statistics
+                    collected_ids = {shoe['unique_id'] for shoe in all_shoes}
+                    recovered_count = sum(1 for uid in SKIPPED_ITEMS if uid in collected_ids)
+                    special_logger.stat(f"Items skipped due to image but present in final list: {recovered_count}/{len(SKIPPED_ITEMS)}")
+
+                    unfiltered_len = len(all_shoes)
+                    all_shoes = filter_duplicates(all_shoes, exchange_rates)
+                    special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
+
+                    # Process all shoes
+                    await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
+
+                    # Print statistics
+                    print_statistics()
+                    print_link_statistics()
+                else:
+                    logger.info("Lyst scraping disabled (IsRunningLyst=false)")
                 logger.info("Sleeping for 1 hour before next check")
                 await asyncio.sleep(3600)
                 
@@ -1036,5 +1038,6 @@ async def main():
         pass  # Removed application.stop() as we're no longer using telegram.ext.Application
 
 if __name__ == "__main__":
-    create_tables()  # Create tables at startup instead of creating them just before using
+    if IS_RUNNING_LYST:
+        create_tables()  # Create tables at startup instead of creating them just before using
     asyncio.run(main())
