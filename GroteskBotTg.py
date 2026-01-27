@@ -35,6 +35,8 @@ SKIPPED_ITEMS = set()
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 LAST_OLX_RUN_UTC = None
 LAST_SHAFA_RUN_UTC = None
+NEXT_OLX_RUN_TS = 0.0
+NEXT_SHAFA_RUN_TS = 0.0
 
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
@@ -849,14 +851,16 @@ def _format_status_text(start_ts: float) -> str:
     )
 
 async def _run_olx_and_mark():
-    global LAST_OLX_RUN_UTC
+    global LAST_OLX_RUN_UTC, NEXT_OLX_RUN_TS
     await run_olx_scraper()
     LAST_OLX_RUN_UTC = datetime.now(timezone.utc)
+    NEXT_OLX_RUN_TS = _schedule_next_run(900, 3600)
 
 async def _run_shafa_and_mark():
-    global LAST_SHAFA_RUN_UTC
+    global LAST_SHAFA_RUN_UTC, NEXT_SHAFA_RUN_TS
     await run_shafa_scraper()
     LAST_SHAFA_RUN_UTC = datetime.now(timezone.utc)
+    NEXT_SHAFA_RUN_TS = _schedule_next_run(900, 3600)
 
 async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600):
     if not bot_token or not chat_id:
@@ -1050,6 +1054,11 @@ def _sleep_interval_with_jitter(base_sec: int, jitter_sec: int) -> int:
     high = base_sec + jitter_sec
     return random.randint(low, high)
 
+def _schedule_next_run(min_sec: int, max_sec: int) -> float:
+    if min_sec < 1 or max_sec < min_sec:
+        min_sec, max_sec = 900, 3600
+    return time.time() + random.randint(min_sec, max_sec)
+
 def _db_maintenance_sync():
     db_files = [SHOES_DB_FILE, OLX_DB_FILE, SHAFA_DB_FILE]
     for db_path in db_files:
@@ -1091,7 +1100,7 @@ async def maintenance_loop(interval_s: int):
 
 # Main application
 async def main():
-    global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC
+    global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC, NEXT_OLX_RUN_TS, NEXT_SHAFA_RUN_TS
     global LIVE_MODE
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
@@ -1105,6 +1114,11 @@ async def main():
         asyncio.create_task(status_heartbeat(TELEGRAM_BOT_TOKEN, chat_id, interval_s=600))
     if MAINTENANCE_INTERVAL_SEC > 0:
         asyncio.create_task(maintenance_loop(MAINTENANCE_INTERVAL_SEC))
+    # Initialize flowy schedules for OLX/SHAFA (15–60 minutes)
+    if NEXT_OLX_RUN_TS == 0:
+        NEXT_OLX_RUN_TS = _schedule_next_run(900, 3600)
+    if NEXT_SHAFA_RUN_TS == 0:
+        NEXT_SHAFA_RUN_TS = _schedule_next_run(900, 3600)
 
     terminal_width = shutil.get_terminal_size().columns
     bot_version = f"Grotesk bot v.{BOT_VERSION}"
@@ -1123,9 +1137,12 @@ async def main():
         while True:
             try:
                 SKIPPED_ITEMS.clear()
-                # Also run OLX and SHAFA scrapers this cycle
-                await _run_olx_and_mark()
-                await _run_shafa_and_mark()
+                # Also run OLX and SHAFA scrapers on flowy 15–60 min schedule
+                now_ts = time.time()
+                if now_ts >= NEXT_OLX_RUN_TS:
+                    await _run_olx_and_mark()
+                if now_ts >= NEXT_SHAFA_RUN_TS:
+                    await _run_shafa_and_mark()
 
                 if IS_RUNNING_LYST:
                     # Load data and exchange rates
