@@ -13,6 +13,10 @@ CHECK_INTERVAL_SEC = int(os.getenv('CHECK_INTERVAL_SEC', '3600'))
 CHECK_JITTER_SEC = int(os.getenv('CHECK_JITTER_SEC', '300'))
 OLX_REQUEST_JITTER_SEC = float(os.getenv('OLX_REQUEST_JITTER_SEC', '2.0'))
 SHAFA_REQUEST_JITTER_SEC = float(os.getenv('SHAFA_REQUEST_JITTER_SEC', '2.0'))
+MAINTENANCE_INTERVAL_SEC = int(os.getenv('MAINTENANCE_INTERVAL_SEC', '21600'))
+DB_VACUUM = os.getenv('DB_VACUUM', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+OLX_RETENTION_DAYS = int(os.getenv('OLX_RETENTION_DAYS', '0'))
+SHAFA_RETENTION_DAYS = int(os.getenv('SHAFA_RETENTION_DAYS', '0'))
 
 BASE_URLS = [
     { 

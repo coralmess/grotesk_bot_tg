@@ -7,7 +7,7 @@ from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, BASE_URLS, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, BASE_URLS, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
@@ -18,11 +18,14 @@ from shafa_scraper import run_shafa_scraper
 # Initialize constants and globals
 colorama.init(autoreset=True)
 BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
-LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
+LIVE_MODE, ASK_FOR_LIVE_MODE = True, False
 PAGE_SCRAPE = True
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 BOT_LOG_FILE = Path(__file__).with_name("python.log")
 STATUS_MSG_FILE = Path(__file__).with_name("status_message_id.txt")
+SHOES_DB_FILE = Path(__file__).with_name("shoes.db")
+OLX_DB_FILE = Path(__file__).with_name("olx_items.db")
+SHAFA_DB_FILE = Path(__file__).with_name("shafa_items.db")
 LOG_TAIL_LINES = 500
 COUNTRIES = ['IT', 'PL', 'US', 'GB']
 BLOCK_RESOURCES = False
@@ -1020,6 +1023,45 @@ def _sleep_interval_with_jitter(base_sec: int, jitter_sec: int) -> int:
     high = base_sec + jitter_sec
     return random.randint(low, high)
 
+def _db_maintenance_sync():
+    db_files = [SHOES_DB_FILE, OLX_DB_FILE, SHAFA_DB_FILE]
+    for db_path in db_files:
+        if not db_path.exists():
+            continue
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            conn.execute("PRAGMA optimize;")
+            conn.execute("ANALYZE;")
+            if db_path == OLX_DB_FILE and OLX_RETENTION_DAYS > 0:
+                conn.execute(
+                    "DELETE FROM olx_items WHERE updated_at < datetime('now', ?)",
+                    (f"-{OLX_RETENTION_DAYS} days",),
+                )
+                conn.commit()
+            if db_path == SHAFA_DB_FILE and SHAFA_RETENTION_DAYS > 0:
+                conn.execute(
+                    "DELETE FROM shafa_items WHERE updated_at < datetime('now', ?)",
+                    (f"-{SHAFA_RETENTION_DAYS} days",),
+                )
+                conn.commit()
+            if DB_VACUUM:
+                conn.execute("VACUUM;")
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logger.warning(f"DB maintenance failed for {db_path.name}: {exc}")
+
+async def maintenance_loop(interval_s: int):
+    if interval_s <= 0:
+        return
+    while True:
+        await asyncio.to_thread(_db_maintenance_sync)
+        await asyncio.sleep(interval_s)
+
 # Main application
 async def main():
     global LIVE_MODE
@@ -1033,6 +1075,8 @@ async def main():
         chat_id = None
     if chat_id:
         asyncio.create_task(status_heartbeat(TELEGRAM_BOT_TOKEN, chat_id, interval_s=600))
+    if MAINTENANCE_INTERVAL_SEC > 0:
+        asyncio.create_task(maintenance_loop(MAINTENANCE_INTERVAL_SEC))
 
     terminal_width = shutil.get_terminal_size().columns
     bot_version = f"Grotesk bot v.{BOT_VERSION}"
@@ -1052,8 +1096,8 @@ async def main():
             try:
                 SKIPPED_ITEMS.clear()
                 # Also run OLX and SHAFA scrapers this cycle
-                await run_olx_scraper()
-                await run_shafa_scraper()
+                # await run_olx_scraper()
+                # await run_shafa_scraper()
 
                 if IS_RUNNING_LYST:
                     # Load data and exchange rates
