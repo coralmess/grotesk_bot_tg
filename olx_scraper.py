@@ -9,7 +9,7 @@ from PIL import Image
 import io, asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
 from functools import wraps
-from config import OLX_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC
+from config import OLX_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -164,8 +164,8 @@ def collect_cards_with_stop(soup: BeautifulSoup) -> List:
 async def fetch_html(url: str) -> str:
     """Fetch HTML content from URL with retry logic and delay for lazy-loaded images."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-        "Accept-Language": "uk,ru;q=0.9,en;q=0.8",
+        "User-Agent": RUN_USER_AGENT,
+        "Accept-Language": RUN_ACCEPT_LANGUAGE,
     }
     async with _HTTP_HTML_SEMAPHORE:
         session = _get_http_session()
@@ -325,7 +325,8 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
         return None
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "User-Agent": RUN_USER_AGENT,
+        "Accept-Language": RUN_ACCEPT_LANGUAGE,
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     }
     async with _HTTP_IMAGE_SEMAPHORE:

@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+import random
 
 load_dotenv()
 
@@ -17,6 +18,28 @@ MAINTENANCE_INTERVAL_SEC = int(os.getenv('MAINTENANCE_INTERVAL_SEC', '21600'))
 DB_VACUUM = os.getenv('DB_VACUUM', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 OLX_RETENTION_DAYS = int(os.getenv('OLX_RETENTION_DAYS', '0'))
 SHAFA_RETENTION_DAYS = int(os.getenv('SHAFA_RETENTION_DAYS', '0'))
+
+# Lightweight per-run header rotation (kept consistent during a single process run)
+HEADER_PROFILES = [
+    {
+        "name": "chrome_win_124_uk",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "accept_language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7",
+    },
+    {
+        "name": "chrome_win_123_uk",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "accept_language": "uk,ru;q=0.9,en;q=0.8",
+    },
+    {
+        "name": "firefox_win_122_uk",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+        "accept_language": "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7",
+    },
+]
+_header_profile = random.choice(HEADER_PROFILES)
+RUN_USER_AGENT = _header_profile["user_agent"]
+RUN_ACCEPT_LANGUAGE = _header_profile["accept_language"]
 
 BASE_URLS = [
     { 
@@ -606,7 +629,7 @@ OLX_URLS = [
     },
     {
         "url": "https://www.olx.ua/uk/list/user/2hwtHL/#912656074",
-        "url_name": "User 2hwtHL"
+        "url_name": "Олег"
     }
 ]
 

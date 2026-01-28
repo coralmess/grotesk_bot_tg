@@ -49,6 +49,11 @@ SKIPPED_ITEMS = set()
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 LAST_OLX_RUN_UTC = None
 LAST_SHAFA_RUN_UTC = None
+LAST_LYST_RUN_START_UTC = None
+LAST_LYST_RUN_OK = None
+LAST_LYST_RUN_NOTE = ""
+LYST_RUN_HAD_ERRORS = False
+LYST_RUN_NOTES = []
 LAST_RUNS_FILE = Path(__file__).with_name("last_runs.json")
 NEXT_OLX_RUN_TS = 0.0
 NEXT_SHAFA_RUN_TS = 0.0
@@ -397,6 +402,7 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None):
         try:
             content = await get_page_content(url, country, max_scroll_attempts)
             if not content:
+                _mark_lyst_issue("Failed to get soup")
                 return None
             try:
                 return BeautifulSoup(content, 'lxml')
@@ -408,6 +414,7 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None):
                 await asyncio.sleep(5)
             else:
                 logger.error(f"Failed to get soup for {url}")
+                _mark_lyst_issue("Failed to get soup")
                 raise
 
 def is_lyst_domain(url):
@@ -658,7 +665,9 @@ def extract_shoe_data(card, country):
 
 async def scrape_page(url, country, max_scroll_attempts=None):
     soup = await get_soup(url, country, max_scroll_attempts=max_scroll_attempts)
-    if not soup: return []
+    if not soup:
+        _mark_lyst_issue("Failed to get soup")
+        return []
     
     shoe_cards = soup.find_all('div', class_='_693owt3')
     return [data for card in shoe_cards if (data := extract_shoe_data(card, country))]
@@ -682,6 +691,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
         if not shoes:
             if use_pagination and page < 3:
                 logger.error(f"{base_url['url_name']} for {country} Stopped too early. Please check for errors")
+                _mark_lyst_issue("Stopped too early")
                 if use_pagination == PAGE_SCRAPE:
                     logger.info(f"Retrying {base_url['url_name']} for {country} with PAGE_SCRAPE={not use_pagination}")
                     return await scrape_all_pages(base_url, country, use_pagination=not use_pagination)
@@ -914,12 +924,17 @@ def _format_status_text(start_ts: float) -> str:
     minutes = (uptime_sec % 3600) // 60
     olx_str = LAST_OLX_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_OLX_RUN_UTC else "never"
     shafa_str = LAST_SHAFA_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_SHAFA_RUN_UTC else "never"
+    lyst_time = LAST_LYST_RUN_START_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_LYST_RUN_START_UTC else "never"
+    lyst_ok = (LAST_LYST_RUN_OK is True)
+    lyst_icon = "🟢" if lyst_ok else "🔴"
+    lyst_note = f" ({LAST_LYST_RUN_NOTE})" if LAST_LYST_RUN_NOTE else ""
     return (
         "✅ <b>Grotesk Bot OK</b>\n"
         f"⏱ Uptime: {hours}h {minutes}m\n"
         f"🕒 Last update (Kyiv): {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"🧾 Last OLX run: {olx_str}\n"
-        f"🧾 Last SHAFA run: {shafa_str}"
+        f"🧾 Last SHAFA run: {shafa_str}\n"
+        f"{lyst_icon} Last LYST run: {lyst_time}{lyst_note}"
     )
 
 async def _run_olx_and_mark():
@@ -1133,6 +1148,19 @@ def _schedule_next_run(min_sec: int, max_sec: int) -> float:
         min_sec, max_sec = 900, 3600
     return time.time() + random.randint(min_sec, max_sec)
 
+def _reset_lyst_run_status():
+    global LYST_RUN_HAD_ERRORS, LYST_RUN_NOTES, LAST_LYST_RUN_NOTE
+    LYST_RUN_HAD_ERRORS = False
+    LYST_RUN_NOTES = []
+    LAST_LYST_RUN_NOTE = ""
+
+def _mark_lyst_issue(note: str):
+    global LYST_RUN_HAD_ERRORS, LYST_RUN_NOTES, LAST_LYST_RUN_NOTE
+    if note:
+        LYST_RUN_NOTES.append(note)
+        LAST_LYST_RUN_NOTE = note
+    LYST_RUN_HAD_ERRORS = True
+
 def _load_last_runs_from_file():
     global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC
     if not LAST_RUNS_FILE.exists():
@@ -1250,6 +1278,9 @@ async def main():
                     await _run_shafa_and_mark()
 
                 if IS_RUNNING_LYST:
+                    global LAST_LYST_RUN_START_UTC, LAST_LYST_RUN_OK, LAST_LYST_RUN_NOTE
+                    _reset_lyst_run_status()
+                    LAST_LYST_RUN_START_UTC = datetime.now(timezone.utc)
                     # Load data and exchange rates
                     old_data = await load_shoe_data()
                     exchange_rates = load_exchange_rates()
@@ -1262,6 +1293,8 @@ async def main():
                     all_shoes = []
                     for result in url_results:
                         all_shoes.extend(result)
+                    if not all_shoes:
+                        _mark_lyst_issue("0 items scraped")
 
                     # Check skipped items statistics
                     collected_ids = {shoe['unique_id'] for shoe in all_shoes}
@@ -1274,6 +1307,9 @@ async def main():
 
                     # Process all shoes
                     await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
+                    LAST_LYST_RUN_OK = not LYST_RUN_HAD_ERRORS
+                    if not LAST_LYST_RUN_OK and LYST_RUN_NOTES:
+                        LAST_LYST_RUN_NOTE = "; ".join(sorted(set(LYST_RUN_NOTES)))
 
                     # Print statistics
                     print_statistics()

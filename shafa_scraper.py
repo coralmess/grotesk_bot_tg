@@ -9,7 +9,7 @@ from PIL import Image
 import io, asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
 from functools import wraps
-from config import SHAFA_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC
+from config import SHAFA_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE
 
 try:
     from playwright.async_api import async_playwright, Browser, BrowserContext
@@ -298,7 +298,8 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
     if not _is_valid_image_url(url):
         return None
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "User-Agent": RUN_USER_AGENT,
+        "Accept-Language": RUN_ACCEPT_LANGUAGE,
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     }
     async with _HTTP_SEMAPHORE:
