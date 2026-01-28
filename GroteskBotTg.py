@@ -1131,6 +1131,11 @@ async def main():
         NEXT_OLX_RUN_TS = _schedule_next_run(900, 3600)
     if NEXT_SHAFA_RUN_TS == 0:
         NEXT_SHAFA_RUN_TS = _schedule_next_run(900, 3600)
+    # Run once shortly after startup to avoid "never" status
+    if LAST_OLX_RUN_UTC is None:
+        NEXT_OLX_RUN_TS = time.time()
+    if LAST_SHAFA_RUN_UTC is None:
+        NEXT_SHAFA_RUN_TS = time.time()
 
     terminal_width = shutil.get_terminal_size().columns
     bot_version = f"Grotesk bot v.{BOT_VERSION}"
@@ -1150,12 +1155,11 @@ async def main():
             try:
                 SKIPPED_ITEMS.clear()
                 # Also run OLX and SHAFA scrapers on flowy 15–60 min schedule
-                # (temporarily disabled for Lyst debugging)
-                # now_ts = time.time()
-                # if now_ts >= NEXT_OLX_RUN_TS:
-                #     await _run_olx_and_mark()
-                # if now_ts >= NEXT_SHAFA_RUN_TS:
-                #     await _run_shafa_and_mark()
+                now_ts = time.time()
+                if now_ts >= NEXT_OLX_RUN_TS:
+                    await _run_olx_and_mark()
+                if now_ts >= NEXT_SHAFA_RUN_TS:
+                    await _run_shafa_and_mark()
 
                 if IS_RUNNING_LYST:
                     # Load data and exchange rates
