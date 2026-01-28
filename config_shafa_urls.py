@@ -260,5 +260,13 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=isaora&sort=4",
         "url_name": "Isaora"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Shoto&sort=4",
+        "url_name": "Shoto"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Thom%20Krom&sort=4",
+        "url_name": "Thom Krom"
     }
 ]
