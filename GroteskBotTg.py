@@ -517,7 +517,7 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
             await context.close()
 
 # Data extraction and processing
-PRICE_TOKEN_RE = re.compile(r'[$€£]\s?[\d.,]+')
+PRICE_TOKEN_RE = re.compile(r'([\d.,]+\s*[^\d\s]+|[^\d\s]+\s*[\d.,]+)')
 
 def extract_price(price_str):
     price_num = re.sub(r'[^\d.]', '', price_str)
@@ -530,6 +530,9 @@ def extract_price_tokens(text):
     tokens = []
     for m in PRICE_TOKEN_RE.finditer(text.replace('\xa0', ' ')):
         token = m.group(0).replace(' ', '')
+        # Normalize trailing currency (e.g. "215€") to leading ("€215")
+        if token and token[-1] not in '0123456789' and (token[0].isdigit() or token[0] == '.'):
+            token = token[-1] + token[:-1]
         tokens.append(token)
     return tokens
 
