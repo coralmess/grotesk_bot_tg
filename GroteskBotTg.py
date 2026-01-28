@@ -16,6 +16,20 @@ import aiosqlite
 from olx_scraper import run_olx_scraper
 from shafa_scraper import run_shafa_scraper
 
+# Basic anti-bot headers & stealth tweaks (best-effort for Cloudflare)
+STEALTH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+STEALTH_HEADERS = {
+    "Accept-Language": "en-US,en;q=0.9",
+    "Upgrade-Insecure-Requests": "1",
+    "DNT": "1",
+}
+STEALTH_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+window.chrome = { runtime: {} };
+"""
+
 # Initialize constants and globals
 colorama.init(autoreset=True)
 BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
@@ -35,6 +49,7 @@ SKIPPED_ITEMS = set()
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 LAST_OLX_RUN_UTC = None
 LAST_SHAFA_RUN_UTC = None
+LAST_RUNS_FILE = Path(__file__).with_name("last_runs.json")
 NEXT_OLX_RUN_TS = 0.0
 NEXT_SHAFA_RUN_TS = 0.0
 
@@ -150,7 +165,14 @@ class BrowserPool:
     async def get_browser(self):
         await self.init()
         await self._semaphore.acquire()
-        browser = await self._browser_type.launch(headless=not LIVE_MODE)
+        browser = await self._browser_type.launch(
+            headless=not LIVE_MODE,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
         return BrowserWrapper(browser, self._semaphore)
 
 class BrowserWrapper:
@@ -351,7 +373,13 @@ async def scroll_page(page, max_attempts=None):
 
 async def get_page_content(url, country, max_scroll_attempts=None):
     async with (await browser_pool.get_browser()) as browser:
-        context = await browser.new_context()
+        context = await browser.new_context(
+            user_agent=STEALTH_UA,
+            locale="en-US",
+            timezone_id="Europe/Kyiv",
+            extra_http_headers=STEALTH_HEADERS,
+        )
+        await context.add_init_script(STEALTH_SCRIPT)
         await context.add_cookies([{'name': 'country', 'value': country, 'domain': '.lyst.com', 'path': '/'}])
         page = await context.new_page()
         if BLOCK_RESOURCES:
@@ -447,34 +475,51 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
             await context.close()
 
 # Data extraction and processing
+PRICE_TOKEN_RE = re.compile(r'[$€£]\s?[\d.,]+')
+
 def extract_price(price_str):
     price_num = re.sub(r'[^\d.]', '', price_str)
     try: return float(price_num)
     except ValueError: return 0
 
-def find_price_elements_by_value(root):
+def extract_price_tokens(text):
+    if not text:
+        return []
+    tokens = []
+    for m in PRICE_TOKEN_RE.finditer(text.replace('\xa0', ' ')):
+        token = m.group(0).replace(' ', '')
+        tokens.append(token)
+    return tokens
+
+def _dedupe_preserve(items):
+    seen = set()
+    deduped = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+def find_price_strings(root):
     if not root:
         return None, None
-    candidates = []
-    for el in root.find_all(['div', 'span', 'p']):
-        text = el.get_text(" ", strip=True)
-        if not text:
-            continue
-        price_val = extract_price(text)
-        if price_val > 0:
-            candidates.append((price_val, el))
-    if len(candidates) < 2:
+    # Prefer explicit strike-through price for original
+    del_el = root.find(['del', 's', 'strike'])
+    del_tokens = extract_price_tokens(del_el.get_text(" ", strip=True)) if del_el else []
+    tokens = _dedupe_preserve(extract_price_tokens(root.get_text(" ", strip=True)))
+    if not tokens:
         return None, None
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    original = candidates[0]
-    sale = None
-    for item in candidates[1:]:
-        if item[0] != original[0]:
-            sale = item
-            break
-    if not sale:
-        return None, None
-    return original[1], sale[1]
+    if del_tokens:
+        original = del_tokens[0]
+        others = [t for t in tokens if t != original]
+        sale = min(others, key=extract_price) if others else original
+        return original, sale
+    if len(tokens) >= 2:
+        original = max(tokens, key=extract_price)
+        sale = min(tokens, key=extract_price)
+        return original, sale
+    return tokens[0], tokens[0]
 
 def extract_shoe_data(card, country):
     if not card:
@@ -494,12 +539,24 @@ def extract_shoe_data(card, country):
             name_elements = fn()
             if name_elements: break
         if not name_elements:
-            logger.warning(f"No name elements found. Card HTML structure:")
-            debug_spans = card.find_all('span', class_=re.compile(r'.*vjlibs.*'))
-            for i, span in enumerate(debug_spans[:5]):
-                logger.warning(f"  Debug span {i}: class='{span.get('class')}', text='{span.text.strip()[:50]}'")
-            return None
-        full_name = ' '.join(e.text.strip() for e in name_elements if e and e.text)
+            # Fallback to image alt or link text
+            img_alt = None
+            img_tag = card.find('img', alt=True)
+            if img_tag:
+                img_alt = (img_tag.get('alt') or '').strip()
+            link_text = None
+            link_tag = card.find('a', href=True)
+            if link_tag:
+                link_text = link_tag.get_text(" ", strip=True)
+            full_name = (img_alt or link_text or "").strip()
+            if not full_name:
+                logger.warning(f"No name elements found. Card HTML structure:")
+                debug_spans = card.find_all('span', class_=re.compile(r'.*vjlibs.*'))
+                for i, span in enumerate(debug_spans[:5]):
+                    logger.warning(f"  Debug span {i}: class='{span.get('class')}', text='{span.text.strip()[:50]}'")
+                return None
+        else:
+            full_name = ' '.join(e.text.strip() for e in name_elements if e and e.text)
         if 'Giuseppe Zanotti' in full_name: return None
         
         # Extract price elements (prefer data-testid, fallback to class heuristics)
@@ -507,8 +564,8 @@ def extract_shoe_data(card, country):
         if not price_container:
             logger.warning("Price container not found")
             return None
-        original_price_elem, sale_price_elem = find_price_elements_by_value(price_container)
-        if not original_price_elem or not sale_price_elem:
+        original_price, sale_price = find_price_strings(price_container)
+        if not original_price or not sale_price:
             # Legacy class-based fallbacks
             price_div = card.find('div', class_='ducdwf0') or price_container
             strategies = [
@@ -533,13 +590,14 @@ def extract_shoe_data(card, country):
             for strat in strategies:
                 o, s = strat()
                 if o and s and o != s:
-                    original_price_elem, sale_price_elem = o, s
+                    o_tokens = extract_price_tokens(o.get_text(" ", strip=True))
+                    s_tokens = extract_price_tokens(s.get_text(" ", strip=True))
+                    if o_tokens and s_tokens:
+                        original_price, sale_price = o_tokens[0], s_tokens[0]
                     break
-            if not original_price_elem or not sale_price_elem:
+            if not original_price or not sale_price:
                 logger.warning("Price elements not found")
                 return None
-        original_price = original_price_elem.text.strip() if original_price_elem.text else "N/A"
-        sale_price = sale_price_elem.text.strip() if sale_price_elem.text else "N/A"
         if extract_price(original_price) < 80:
             logger.info(f"Skipping item '{full_name}' with original price {original_price}")
             return None
@@ -576,6 +634,8 @@ def extract_shoe_data(card, country):
             link_elem = card.find('a', href=True)
         href = link_elem['href'] if link_elem and 'href' in link_elem.attrs else None
         full_url = f"https://www.lyst.com{href}" if href and href.startswith('/') else href if href and href.startswith('http') else None
+        if not unique_id and full_url:
+            unique_id = str(uuid.uuid5(uuid.NAMESPACE_URL, full_url))
         
         # Validate required fields
         required_fields = {
@@ -866,12 +926,14 @@ async def _run_olx_and_mark():
     global LAST_OLX_RUN_UTC, NEXT_OLX_RUN_TS
     await run_olx_scraper()
     LAST_OLX_RUN_UTC = datetime.now(timezone.utc)
+    _save_last_runs_to_file()
     NEXT_OLX_RUN_TS = _schedule_next_run(900, 3600)
 
 async def _run_shafa_and_mark():
     global LAST_SHAFA_RUN_UTC, NEXT_SHAFA_RUN_TS
     await run_shafa_scraper()
     LAST_SHAFA_RUN_UTC = datetime.now(timezone.utc)
+    _save_last_runs_to_file()
     NEXT_SHAFA_RUN_TS = _schedule_next_run(900, 3600)
 
 async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600):
@@ -1071,6 +1133,31 @@ def _schedule_next_run(min_sec: int, max_sec: int) -> float:
         min_sec, max_sec = 900, 3600
     return time.time() + random.randint(min_sec, max_sec)
 
+def _load_last_runs_from_file():
+    global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC
+    if not LAST_RUNS_FILE.exists():
+        return
+    try:
+        data = json.loads(LAST_RUNS_FILE.read_text(encoding="utf-8"))
+        olx_raw = data.get("last_olx_run_utc")
+        shafa_raw = data.get("last_shafa_run_utc")
+        if olx_raw:
+            LAST_OLX_RUN_UTC = datetime.fromisoformat(olx_raw)
+        if shafa_raw:
+            LAST_SHAFA_RUN_UTC = datetime.fromisoformat(shafa_raw)
+    except Exception:
+        pass
+
+def _save_last_runs_to_file():
+    try:
+        payload = {
+            "last_olx_run_utc": LAST_OLX_RUN_UTC.isoformat() if LAST_OLX_RUN_UTC else None,
+            "last_shafa_run_utc": LAST_SHAFA_RUN_UTC.isoformat() if LAST_SHAFA_RUN_UTC else None,
+        }
+        LAST_RUNS_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
 def _db_maintenance_sync():
     db_files = [SHOES_DB_FILE, OLX_DB_FILE, SHAFA_DB_FILE]
     for db_path in db_files:
@@ -1114,6 +1201,7 @@ async def maintenance_loop(interval_s: int):
 async def main():
     global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC, NEXT_OLX_RUN_TS, NEXT_SHAFA_RUN_TS
     global LIVE_MODE
+    _load_last_runs_from_file()
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
     asyncio.create_task(message_queue.process_queue())
