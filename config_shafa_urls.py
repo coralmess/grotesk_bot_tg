@@ -1,0 +1,224 @@
+from config import DANYLO_DEFAULT_CHAT_ID
+
+SHAFA_URLS = [
+    {
+        "url": "https://shafa.ua/uk/men?search_text=sunspel&sort=4",
+        "url_name": "Sunspel"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=riri&sort=4",
+        "url_name": "Riri"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Derek%20Rose&sort=4",
+        "url_name": "Derek Rose"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Our%20Legacy&sort=4",
+        "url_name": "Our Legacy"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Whitesville&sort=4",
+        "url_name": "Whitesville"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Flat%20Head&sort=4",
+        "url_name": "Flat Head"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Loopwheeler&sort=4",
+        "url_name": "Loopwheeler"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Lady%20White&sort=4",
+        "url_name": "Lady White"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Wonder%20Looper&sort=4",
+        "url_name": "Wonder Looper"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Zimmerli&sort=4",
+        "url_name": "Zimmerli"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=james%20perse&sort=4",
+        "url_name": "James Perse"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=John%20Smedley&sort=4",
+        "url_name": "John Smedley"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Agnona&sort=4",
+        "url_name": "Agnona"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Ann%20Demeulemeester&sort=4",
+        "url_name": "Ann Demeulemeester"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Carol%20Christian%20Poell&sort=4",
+        "url_name": "Carol Christian Poell"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Hender%20Scheme&sort=4",
+        "url_name": "Hender Scheme"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Officine%20Creative&sizes=174&sizes=239&sizes=176&sizes=240&sizes=175&sort=4",
+        "url_name": "Officine Creative"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Schwanen&sort=4",
+        "url_name": "Schwanen"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=45rpm&sort=4",
+        "url_name": "45rpm"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?price_to=10000&search_text=dries%20van&sort=4",
+        "url_name": "Dries Van Noten"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Moorer&sort=4",
+        "url_name": "Moorer"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Artilect&sort=4",
+        "url_name": "Artilect"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Nuyarn&sort=4",
+        "url_name": "Nuyarn"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Vollebak&sort=4",
+        "url_name": "Vollebak"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=visvim&sort=4",
+        "url_name": "Visvim"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=allterain&sort=4",
+        "url_name": "Allterrain"
+    },
+    {
+        "url": "https://shafa.ua/clothes?search_text=Veilance&sort=4",
+        "url_name": "Veilance"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=ten%20c&sort=4",
+        "url_name": "Ten C"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Agnona&sort=4",
+        "url_name": "Agnona"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?price_to=10000&search_text=Fedeli&sort=4",
+        "url_name": "Fedeli"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?conditions=3&conditions=2&search_text=maison%20margiela&sort=4",
+        "url_name": "Maison Margiela (M)"
+    },
+    # {
+    #     "url": "https://shafa.ua/uk/women?conditions=3&conditions=2&search_text=maison%20margiela&sort=4",
+    #     "url_name": "Maison Margiela (W)"
+    # },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Helmut%20Lang&sort=4",
+        "url_name": "Helmut Lang"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?conditions=3&conditions=2&search_text=ambush&sort=4",
+        "url_name": "Ambush"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Herno%20Laminar&sort=4",
+        "url_name": "Herno Laminar"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=tilak&sort=4",
+        "url_name": "Tilak"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?price_to=10000&search_text=grenoble&sort=4",
+        "url_name": "Moncler Grenoble"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Drumohr&sort=4",
+        "url_name": "Drumohr"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Zanone&sort=4",
+        "url_name": "Zanone"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Avon%20Celli&sort=4",
+        "url_name": "Avon Celli"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=devoa&sort=4",
+        "url_name": "Devoa"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Ziggy%20Chen&sort=4",
+        "url_name": "Ziggy Chen"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?price_to=5000&search_text=Barena%20Venezia&sort=4",
+        "url_name": "Barena Venezia"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Cornelian%20Taurus&sort=4",
+        "url_name": "Cornelian Taurus"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Attachment%20&sort=4",
+        "url_name": "Attachment"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Margaret%20Howell%20&sort=4",
+        "url_name": "Margaret Howell"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Masnada%20&sort=4",
+        "url_name": "Masnada"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Majestic%20Filatures%20&sort=4",
+        "url_name": "Majestic Filatures"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Facetasm&sort=4",
+        "url_name": "Facetasm"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Jackman%20&sizes=148&sizes=151&sizes=150&sizes=149",
+        "url_name": "Jackman"
+    },
+    # {
+    #     "url": "https://shafa.ua/uk/men?price_to=3000&search_text=Malo%20&sort=4",
+    #     "url_name": "Malo"
+    # },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Outlier&sort=4",
+        "url_name": "Outlier"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Blurhms&sort=4",
+        "url_name": "Blurhms"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Graphpaper&sort=4",
+        "url_name": "Graphpaper"    
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Van%20Essche&sort=4",
+        "url_name": "Van Essche"    
+    }
+]

@@ -9,7 +9,8 @@ from PIL import Image
 import io, asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
 from functools import wraps
-from config import SHAFA_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE
+from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
+from config_shafa_urls import SHAFA_URLS
 
 try:
     from playwright.async_api import async_playwright, Browser, BrowserContext
@@ -33,9 +34,9 @@ if not PLAYWRIGHT_AVAILABLE:
 
 BASE_SHAFA = "https://shafa.ua"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
-_HTTP_SEMAPHORE = asyncio.Semaphore(10)
-_SEND_SEMAPHORE = asyncio.Semaphore(3)
-_PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(2)  # Limit concurrent browser instances
+_HTTP_SEMAPHORE = asyncio.Semaphore(SHAFA_HTTP_CONCURRENCY)
+_SEND_SEMAPHORE = asyncio.Semaphore(SHAFA_SEND_CONCURRENCY)
+_PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(SHAFA_PLAYWRIGHT_CONCURRENCY)  # Limit concurrent browser instances
 _http_session: Optional[aiohttp.ClientSession] = None
 _playwright_browser: Optional[Browser] = None
 _playwright_context: Optional[BrowserContext] = None
@@ -50,7 +51,7 @@ if not _LXML_AVAILABLE:
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if (_http_session is None) or _http_session.closed:
-        _http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), connector=aiohttp.TCPConnector(limit=20))
+        _http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), connector=aiohttp.TCPConnector(limit=SHAFA_HTTP_CONNECTOR_LIMIT))
     return _http_session
 
 def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
@@ -550,7 +551,7 @@ async def run_shafa_scraper():
         except Exception as e:
             logger.error(f"Processing error: {e}")
     try:
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(SHAFA_TASK_CONCURRENCY)
         async def _guarded_process(entry: Dict[str, Any]):
             async with sem:
                 await _process_entry(entry)

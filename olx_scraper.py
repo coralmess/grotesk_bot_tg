@@ -9,15 +9,16 @@ from PIL import Image
 import io, asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
 from functools import wraps
-from config import OLX_URLS, TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE
+from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, OLX_TASK_CONCURRENCY, OLX_HTTP_HTML_CONCURRENCY, OLX_HTTP_IMAGE_CONCURRENCY, OLX_UPSCALE_CONCURRENCY, OLX_SEND_CONCURRENCY, OLX_HTTP_CONNECTOR_LIMIT
+from config_olx_urls import OLX_URLS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 BASE_OLX = "https://www.olx.ua"
-_HTTP_HTML_SEMAPHORE = asyncio.Semaphore(10)
-_HTTP_IMAGE_SEMAPHORE = asyncio.Semaphore(6)
-_SEND_SEMAPHORE = asyncio.Semaphore(3)
-_UPSCALE_SEMAPHORE = asyncio.Semaphore(2)
+_HTTP_HTML_SEMAPHORE = asyncio.Semaphore(OLX_HTTP_HTML_CONCURRENCY)
+_HTTP_IMAGE_SEMAPHORE = asyncio.Semaphore(OLX_HTTP_IMAGE_CONCURRENCY)
+_SEND_SEMAPHORE = asyncio.Semaphore(OLX_SEND_CONCURRENCY)
+_UPSCALE_SEMAPHORE = asyncio.Semaphore(OLX_UPSCALE_CONCURRENCY)
 _http_session: Optional[aiohttp.ClientSession] = None
 MIN_PRICE_DIFF = 50
 MIN_PRICE_DIFF_PERCENT = 12.0
@@ -26,7 +27,7 @@ NO_LISTINGS_TEXT = "Ми знайшли 0 оголошень"
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if (_http_session is None) or _http_session.closed:
-        _http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), connector=aiohttp.TCPConnector(limit=20))
+        _http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), connector=aiohttp.TCPConnector(limit=OLX_HTTP_CONNECTOR_LIMIT))
     return _http_session
 
 def _clean_token(value: Optional[str]) -> str:
@@ -640,7 +641,7 @@ async def run_olx_scraper():
         except Exception as e:
             logger.error(f"❌ Failed to process {source_name}: {e}")
     
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(OLX_TASK_CONCURRENCY)
     async def _guarded_process(entry: Dict[str, Any]):
         async with sem:
             await _process_entry(entry)

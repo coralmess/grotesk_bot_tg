@@ -8,7 +8,20 @@ from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, BASE_URLS, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS
+from GroteskBotStatus import (
+    status_heartbeat,
+    load_last_runs_from_file,
+    LAST_OLX_RUN_UTC,
+    LAST_SHAFA_RUN_UTC,
+    begin_lyst_cycle,
+    mark_olx_run,
+    mark_shafa_run,
+    mark_lyst_start,
+    mark_lyst_issue,
+    finalize_lyst_run,
+)
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY
+from config_lyst_urls import BASE_URLS
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
@@ -37,7 +50,6 @@ LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
 PAGE_SCRAPE = True
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 BOT_LOG_FILE = Path(__file__).with_name("python.log")
-STATUS_MSG_FILE = Path(__file__).with_name("status_message_id.txt")
 SHOES_DB_FILE = Path(__file__).with_name("shoes.db")
 OLX_DB_FILE = Path(__file__).with_name("olx_items.db")
 SHAFA_DB_FILE = Path(__file__).with_name("shafa_items.db")
@@ -47,16 +59,9 @@ BLOCK_RESOURCES = False
 RESOLVE_REDIRECTS = False
 SKIPPED_ITEMS = set()
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
-LAST_OLX_RUN_UTC = None
-LAST_SHAFA_RUN_UTC = None
-LAST_LYST_RUN_START_UTC = None
-LAST_LYST_RUN_OK = None
-LAST_LYST_RUN_NOTE = ""
-LYST_RUN_HAD_ERRORS = False
-LYST_RUN_NOTES = []
-LAST_RUNS_FILE = Path(__file__).with_name("last_runs.json")
 NEXT_OLX_RUN_TS = 0.0
 NEXT_SHAFA_RUN_TS = 0.0
+NEXT_LYST_RUN_TS = 0.0
 
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
@@ -191,7 +196,7 @@ class BrowserWrapper:
         await self.browser.close()
         self._semaphore.release()
 
-browser_pool = BrowserPool(max_browsers=6)
+browser_pool = BrowserPool(max_browsers=LYST_MAX_BROWSERS)
 
 # Helper functions
 def clean_link_for_display(link):
@@ -392,17 +397,21 @@ async def get_page_content(url, country, max_scroll_attempts=None):
         await page.goto(url)
         await scroll_page(page, max_scroll_attempts)
         try:
-            await page.wait_for_selector('._693owt3', timeout=10000)
+            await page.wait_for_selector('._693owt3', timeout=20000)
+        except Exception:
+            # If selector wait fails, still return content for parsing
+            pass
+        try:
             return await page.content()
-        except: return None
-        finally: await context.close()
+        finally:
+            await context.close()
 
 async def get_soup(url, country, max_retries=3, max_scroll_attempts=None):
     for attempt in range(max_retries):
         try:
             content = await get_page_content(url, country, max_scroll_attempts)
             if not content:
-                _mark_lyst_issue("Failed to get soup")
+                mark_lyst_issue("Failed to get soup")
                 return None
             try:
                 return BeautifulSoup(content, 'lxml')
@@ -414,7 +423,7 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None):
                 await asyncio.sleep(5)
             else:
                 logger.error(f"Failed to get soup for {url}")
-                _mark_lyst_issue("Failed to get soup")
+                mark_lyst_issue("Failed to get soup")
                 raise
 
 def is_lyst_domain(url):
@@ -666,7 +675,7 @@ def extract_shoe_data(card, country):
 async def scrape_page(url, country, max_scroll_attempts=None):
     soup = await get_soup(url, country, max_scroll_attempts=max_scroll_attempts)
     if not soup:
-        _mark_lyst_issue("Failed to get soup")
+        mark_lyst_issue("Failed to get soup")
         return []
     
     shoe_cards = soup.find_all('div', class_='_693owt3')
@@ -691,7 +700,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
         if not shoes:
             if use_pagination and page < 3:
                 logger.error(f"{base_url['url_name']} for {country} Stopped too early. Please check for errors")
-                _mark_lyst_issue("Stopped too early")
+                mark_lyst_issue("Stopped too early")
                 if use_pagination == PAGE_SCRAPE:
                     logger.info(f"Retrying {base_url['url_name']} for {country} with PAGE_SCRAPE={not use_pagination}")
                     return await scrape_all_pages(base_url, country, use_pagination=not use_pagination)
@@ -901,78 +910,17 @@ async def command_listener(bot_token, allowed_chat_ids, log_path):
             logger.error(f"Command listener error: {exc}")
             await asyncio.sleep(5)
 
-async def _ensure_status_message(bot: Bot, chat_id: int) -> int:
-    """Get or create the status message and persist its message_id."""
-    if STATUS_MSG_FILE.exists():
-        try:
-            stored = STATUS_MSG_FILE.read_text(encoding="utf-8").strip()
-            if stored.isdigit():
-                return int(stored)
-        except Exception:
-            pass
-    msg = await bot.send_message(chat_id=chat_id, text="🟢 Bot status: starting...", parse_mode=ParseMode.HTML)
-    try:
-        STATUS_MSG_FILE.write_text(str(msg.message_id), encoding="utf-8")
-    except Exception:
-        pass
-    return msg.message_id
-
-def _format_status_text(start_ts: float) -> str:
-    now = datetime.now(KYIV_TZ)
-    uptime_sec = int(time.time() - start_ts)
-    hours = uptime_sec // 3600
-    minutes = (uptime_sec % 3600) // 60
-    olx_str = LAST_OLX_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_OLX_RUN_UTC else "never"
-    shafa_str = LAST_SHAFA_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_SHAFA_RUN_UTC else "never"
-    lyst_time = LAST_LYST_RUN_START_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_LYST_RUN_START_UTC else "never"
-    lyst_ok = (LAST_LYST_RUN_OK is True)
-    lyst_icon = "🟢" if lyst_ok else "🔴"
-    lyst_note = f" ({LAST_LYST_RUN_NOTE})" if LAST_LYST_RUN_NOTE else ""
-    return (
-        "✅ <b>Grotesk Bot OK</b>\n"
-        f"⏱ Uptime: {hours}h {minutes}m\n"
-        f"🕒 Last update (Kyiv): {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"🧾 Last OLX run: {olx_str}\n"
-        f"🧾 Last SHAFA run: {shafa_str}\n"
-        f"{lyst_icon} Last LYST run: {lyst_time}{lyst_note}"
-    )
-
 async def _run_olx_and_mark():
-    global LAST_OLX_RUN_UTC, NEXT_OLX_RUN_TS
+    global NEXT_OLX_RUN_TS
     await run_olx_scraper()
-    LAST_OLX_RUN_UTC = datetime.now(timezone.utc)
-    _save_last_runs_to_file()
+    mark_olx_run()
     NEXT_OLX_RUN_TS = _schedule_next_run(900, 3600)
 
 async def _run_shafa_and_mark():
-    global LAST_SHAFA_RUN_UTC, NEXT_SHAFA_RUN_TS
+    global NEXT_SHAFA_RUN_TS
     await run_shafa_scraper()
-    LAST_SHAFA_RUN_UTC = datetime.now(timezone.utc)
-    _save_last_runs_to_file()
+    mark_shafa_run()
     NEXT_SHAFA_RUN_TS = _schedule_next_run(900, 3600)
-
-async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600):
-    if not bot_token or not chat_id:
-        return
-    bot = Bot(token=bot_token)
-    start_ts = time.time()
-    message_id = await _ensure_status_message(bot, chat_id)
-    while True:
-        text = _format_status_text(start_ts)
-        try:
-            await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=ParseMode.HTML)
-        except Exception:
-            # If edit fails (message deleted or not found), send a new one and persist its id
-            try:
-                msg = await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
-                message_id = msg.message_id
-                try:
-                    STATUS_MSG_FILE.write_text(str(message_id), encoding="utf-8")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-        await asyncio.sleep(interval_s)
 
 # Processing functions
 def filter_duplicates(shoes, exchange_rates):
@@ -1058,7 +1006,7 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
 
 async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     new_shoe_count = 0
-    semaphore = asyncio.Semaphore(9)  # Reduce concurrency to prevent database locks
+    semaphore = asyncio.Semaphore(LYST_SHOE_CONCURRENCY)  # Reduce concurrency to prevent database locks
     total_items = len(all_shoes)
 
     async def process_single_shoe(i, shoe):
@@ -1104,6 +1052,7 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
         await save_shoe_data_bulk(removed_shoes)
 
 async def process_url(base_url, countries, exchange_rates):
+    mark_lyst_start()
     all_shoes = []
     country_results = await asyncio.gather(*(scrape_all_pages(base_url, c) for c in countries))
     for country, result in zip(countries, country_results):
@@ -1148,43 +1097,7 @@ def _schedule_next_run(min_sec: int, max_sec: int) -> float:
         min_sec, max_sec = 900, 3600
     return time.time() + random.randint(min_sec, max_sec)
 
-def _reset_lyst_run_status():
-    global LYST_RUN_HAD_ERRORS, LYST_RUN_NOTES, LAST_LYST_RUN_NOTE
-    LYST_RUN_HAD_ERRORS = False
-    LYST_RUN_NOTES = []
-    LAST_LYST_RUN_NOTE = ""
 
-def _mark_lyst_issue(note: str):
-    global LYST_RUN_HAD_ERRORS, LYST_RUN_NOTES, LAST_LYST_RUN_NOTE
-    if note:
-        LYST_RUN_NOTES.append(note)
-        LAST_LYST_RUN_NOTE = note
-    LYST_RUN_HAD_ERRORS = True
-
-def _load_last_runs_from_file():
-    global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC
-    if not LAST_RUNS_FILE.exists():
-        return
-    try:
-        data = json.loads(LAST_RUNS_FILE.read_text(encoding="utf-8"))
-        olx_raw = data.get("last_olx_run_utc")
-        shafa_raw = data.get("last_shafa_run_utc")
-        if olx_raw:
-            LAST_OLX_RUN_UTC = datetime.fromisoformat(olx_raw)
-        if shafa_raw:
-            LAST_SHAFA_RUN_UTC = datetime.fromisoformat(shafa_raw)
-    except Exception:
-        pass
-
-def _save_last_runs_to_file():
-    try:
-        payload = {
-            "last_olx_run_utc": LAST_OLX_RUN_UTC.isoformat() if LAST_OLX_RUN_UTC else None,
-            "last_shafa_run_utc": LAST_SHAFA_RUN_UTC.isoformat() if LAST_SHAFA_RUN_UTC else None,
-        }
-        LAST_RUNS_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
 
 def _db_maintenance_sync():
     db_files = [SHOES_DB_FILE, OLX_DB_FILE, SHAFA_DB_FILE]
@@ -1227,9 +1140,9 @@ async def maintenance_loop(interval_s: int):
 
 # Main application
 async def main():
-    global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC, NEXT_OLX_RUN_TS, NEXT_SHAFA_RUN_TS
+    global NEXT_OLX_RUN_TS, NEXT_SHAFA_RUN_TS, NEXT_LYST_RUN_TS
     global LIVE_MODE
-    _load_last_runs_from_file()
+    load_last_runs_from_file()
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
     asyncio.create_task(message_queue.process_queue())
@@ -1247,6 +1160,8 @@ async def main():
         NEXT_OLX_RUN_TS = _schedule_next_run(900, 3600)
     if NEXT_SHAFA_RUN_TS == 0:
         NEXT_SHAFA_RUN_TS = _schedule_next_run(900, 3600)
+    if NEXT_LYST_RUN_TS == 0:
+        NEXT_LYST_RUN_TS = time.time()
     # Run once shortly after startup to avoid "never" status
     if LAST_OLX_RUN_UTC is None:
         NEXT_OLX_RUN_TS = time.time()
@@ -1277,10 +1192,8 @@ async def main():
                 if now_ts >= NEXT_SHAFA_RUN_TS:
                     await _run_shafa_and_mark()
 
-                if IS_RUNNING_LYST:
-                    global LAST_LYST_RUN_START_UTC, LAST_LYST_RUN_OK, LAST_LYST_RUN_NOTE
-                    _reset_lyst_run_status()
-                    LAST_LYST_RUN_START_UTC = datetime.now(timezone.utc)
+                if IS_RUNNING_LYST and now_ts >= NEXT_LYST_RUN_TS:
+                    begin_lyst_cycle()
                     # Load data and exchange rates
                     old_data = await load_shoe_data()
                     exchange_rates = load_exchange_rates()
@@ -1294,7 +1207,7 @@ async def main():
                     for result in url_results:
                         all_shoes.extend(result)
                     if not all_shoes:
-                        _mark_lyst_issue("0 items scraped")
+                        mark_lyst_issue("0 items scraped")
 
                     # Check skipped items statistics
                     collected_ids = {shoe['unique_id'] for shoe in all_shoes}
@@ -1307,16 +1220,18 @@ async def main():
 
                     # Process all shoes
                     await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
-                    LAST_LYST_RUN_OK = not LYST_RUN_HAD_ERRORS
-                    if not LAST_LYST_RUN_OK and LYST_RUN_NOTES:
-                        LAST_LYST_RUN_NOTE = "; ".join(sorted(set(LYST_RUN_NOTES)))
+                    finalize_lyst_run()
+                    NEXT_LYST_RUN_TS = time.time() + _sleep_interval_with_jitter(CHECK_INTERVAL_SEC, CHECK_JITTER_SEC)
 
                     # Print statistics
                     print_statistics()
                     print_link_statistics()
-                else:
+                elif not IS_RUNNING_LYST:
                     logger.info("Lyst scraping disabled (IsRunningLyst=false)")
-                sleep_for = _sleep_interval_with_jitter(CHECK_INTERVAL_SEC, CHECK_JITTER_SEC)
+                # Sleep until the next scheduled task (Lyst/OLX/SHAFA)
+                now_ts = time.time()
+                next_wake = min(NEXT_OLX_RUN_TS, NEXT_SHAFA_RUN_TS, NEXT_LYST_RUN_TS or now_ts)
+                sleep_for = max(5, int(next_wake - now_ts))
                 logger.info(f"Sleeping for {sleep_for} seconds before next check")
                 await asyncio.sleep(sleep_for)
                 
