@@ -220,5 +220,45 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Van%20Essche&sort=4",
         "url_name": "Van Essche"    
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Nanamica&sort=4",
+        "url_name": "Nanamica"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Bergfabel&sort=4",
+        "url_name": "Bergfabel"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Isaac%20Sellam%20Experience&sort=4",
+        "url_name": "Isaac Sellam Experience"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Namacheko&sort=4",
+        "url_name": "Namacheko"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Geoffrey%20Small&sort=4",
+        "url_name": "Geoffrey Small"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Inis%20Meain&sort=4",
+        "url_name": "Inis Meain"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Roberto%20Collina&sort=4",
+        "url_name": "Roberto Collina"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=begg%20co&sort=4",
+        "url_name": "Begg & Co"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Norwegian%20Rain&sort=4",
+        "url_name": "Norwegian Rain"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=isaora&sort=4",
+        "url_name": "Isaora"
     }
 ]

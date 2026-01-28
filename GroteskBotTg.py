@@ -412,6 +412,9 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None):
             content = await get_page_content(url, country, max_scroll_attempts)
             if not content:
                 mark_lyst_issue("Failed to get soup")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5)
+                    continue
                 return None
             try:
                 return BeautifulSoup(content, 'lxml')
@@ -425,6 +428,29 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None):
                 logger.error(f"Failed to get soup for {url}")
                 mark_lyst_issue("Failed to get soup")
                 raise
+
+async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=None):
+    for attempt in range(max_retries):
+        try:
+            content = await get_page_content(url, country, max_scroll_attempts)
+            if not content:
+                mark_lyst_issue("Failed to get soup")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                return None, None
+            try:
+                return BeautifulSoup(content, 'lxml'), content
+            except Exception:
+                return BeautifulSoup(content, 'html.parser'), content
+        except Exception:
+            if attempt < max_retries - 1:
+                logger.warning(f"Failed to get soup (attempt {attempt + 1}/{max_retries}). Retrying...")
+                await asyncio.sleep(5)
+            else:
+                logger.error(f"Failed to get soup for {url}")
+                mark_lyst_issue("Failed to get soup")
+                return None, None
 
 def is_lyst_domain(url):
     return 'lyst.com' in urllib.parse.urlparse(url).netloc
@@ -578,9 +604,18 @@ def extract_shoe_data(card, country):
         # Extract price elements (prefer data-testid, fallback to class heuristics)
         price_container = card.find('div', attrs={'data-testid': 'product-price'}) or card.find('div', class_='ducdwf0')
         if not price_container:
-            logger.warning("Price container not found")
-            return None
-        original_price, sale_price = find_price_strings(price_container)
+            # Fallback: try extracting prices from the whole card text
+            tokens = extract_price_tokens(card.get_text(" ", strip=True))
+            if len(tokens) >= 2:
+                original_price = max(tokens, key=extract_price)
+                sale_price = min(tokens, key=extract_price)
+            elif len(tokens) == 1:
+                original_price = sale_price = tokens[0]
+            else:
+                logger.warning("Price container not found")
+                return None
+        else:
+            original_price, sale_price = find_price_strings(price_container)
         if not original_price or not sale_price:
             # Legacy class-based fallbacks
             price_div = card.find('div', class_='ducdwf0') or price_container
@@ -634,8 +669,17 @@ def extract_shoe_data(card, country):
             return None
         
         # Extract store
-        store_elem = card.find('div', attrs={'data-testid': 'retailer'}) or card.find('span', class_='_1fcx6l24')
-        store = store_elem.get_text(strip=True) if store_elem else "Unknown Store"
+        store = "Unknown Store"
+        retailer_name = card.find('span', attrs={'data-testid': 'retailer-name'})
+        if retailer_name:
+            store_span = retailer_name.find('span', class_='_1fcx6l24')
+            store_text = store_span.get_text(" ", strip=True) if store_span else retailer_name.get_text(" ", strip=True)
+            store = store_text if store_text else store
+        else:
+            store_elem = card.find('div', attrs={'data-testid': 'retailer'}) or card.find('span', class_='_1fcx6l24')
+            if store_elem:
+                store_text = store_elem.get_text(" ", strip=True)
+                store = store_text if store_text else store
         
         # Extract link
         link_elem = None
@@ -672,14 +716,35 @@ def extract_shoe_data(card, country):
         logger.error(f"Error extracting shoe data: {e}")
         return None
 
+def _write_lyst_stop_too_early_dump(reason, url, country, url_name, content):
+    try:
+        html_path = Path(__file__).with_name("lyst_stop_too_early.html")
+        meta_path = Path(__file__).with_name("lyst_stop_too_early_meta.txt")
+        html_path.write_text(content or "", encoding="utf-8", errors="replace")
+        now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+        log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+        meta_lines = [
+            f"timestamp_kyiv: {now_kyiv}",
+            f"reason: {reason}",
+            f"url_name: {url_name}",
+            f"country: {country}",
+            f"url: {url}",
+            "",
+            "last_200_log_lines:",
+            *log_lines,
+        ]
+        meta_path.write_text("\n".join(meta_lines), encoding="utf-8", errors="replace")
+    except Exception as exc:
+        logger.error(f"Failed to write LYST stop-too-early dump: {exc}")
+
 async def scrape_page(url, country, max_scroll_attempts=None):
-    soup = await get_soup(url, country, max_scroll_attempts=max_scroll_attempts)
+    soup, content = await get_soup_and_content(url, country, max_scroll_attempts=max_scroll_attempts)
     if not soup:
         mark_lyst_issue("Failed to get soup")
-        return []
+        return [], content
     
     shoe_cards = soup.find_all('div', class_='_693owt3')
-    return [data for card in shoe_cards if (data := extract_shoe_data(card, country))]
+    return [data for card in shoe_cards if (data := extract_shoe_data(card, country))], content
 
 async def scrape_all_pages(base_url, country, use_pagination=None):
     if use_pagination is None:
@@ -696,11 +761,18 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             url = base_url['url']
             logger.info(f"Scraping single page for country {country} - {base_url['url_name']}")
 
-        shoes = await scrape_page(url, country, max_scroll_attempts=max_scroll_attempts)
+        shoes, content = await scrape_page(url, country, max_scroll_attempts=max_scroll_attempts)
         if not shoes:
             if use_pagination and page < 3:
                 logger.error(f"{base_url['url_name']} for {country} Stopped too early. Please check for errors")
                 mark_lyst_issue("Stopped too early")
+                _write_lyst_stop_too_early_dump(
+                    "Stopped too early",
+                    url,
+                    country,
+                    base_url['url_name'],
+                    content,
+                )
                 if use_pagination == PAGE_SCRAPE:
                     logger.info(f"Retrying {base_url['url_name']} for {country} with PAGE_SCRAPE={not use_pagination}")
                     return await scrape_all_pages(base_url, country, use_pagination=not use_pagination)
@@ -864,7 +936,7 @@ async def send_log_tail(bot, chat_id, log_path, line_count=LOG_TAIL_LINES):
     payload = "\n".join(lines) + "\n"
     log_bytes = payload.encode("utf-8", errors="replace")
     bio = io.BytesIO(log_bytes)
-    bio.name = f"python_last_{line_count}.ansi"
+    bio.name = f"python_last_{line_count}.log"
     await bot.send_document(
         chat_id=chat_id,
         document=bio,

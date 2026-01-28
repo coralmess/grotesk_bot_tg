@@ -138,9 +138,15 @@ def _format_status_text(start_ts: float) -> str:
     olx_str = LAST_OLX_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_OLX_RUN_UTC else "never"
     shafa_str = LAST_SHAFA_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_SHAFA_RUN_UTC else "never"
     lyst_time = LAST_LYST_RUN_START_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_LYST_RUN_START_UTC else "never"
-    lyst_ok = (LAST_LYST_RUN_OK is True)
-    lyst_icon = "🟢" if lyst_ok else "🔴"
-    lyst_note = f" ({LAST_LYST_RUN_NOTE})" if LAST_LYST_RUN_NOTE else ""
+    if LAST_LYST_RUN_OK is True:
+        lyst_icon = "🟢"
+        lyst_note = f" ({LAST_LYST_RUN_NOTE})" if LAST_LYST_RUN_NOTE else ""
+    elif LAST_LYST_RUN_OK is False:
+        lyst_icon = "🔴"
+        lyst_note = f" ({LAST_LYST_RUN_NOTE})" if LAST_LYST_RUN_NOTE else " (Unknown error)"
+    else:
+        lyst_icon = "🟡"
+        lyst_note = " (running)"
     return (
         "✅ <b>Grotesk Bot OK</b>\n"
         f"⏱ Uptime: {hours}h {minutes}m\n"

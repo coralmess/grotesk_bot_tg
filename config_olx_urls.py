@@ -532,5 +532,37 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/list/user/2hwtHL/#912656074",
         "url_name": "Олег"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Bergfabel/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Bergfabel"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Isaac-Sellam-Experience/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Isaac Sellam Experience"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Forme-d'Expression/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Forme d'Expression"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Geoffrey-Small/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Geoffrey Small"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Namacheko/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Namacheko"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Roberto-Collina/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Roberto Collina"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Norwegian-Rain/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Norwegian Rain"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Isaora/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Isaora"
     }
 ]
