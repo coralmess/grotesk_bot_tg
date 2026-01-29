@@ -1,4 +1,4 @@
-import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, random
+import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3
 from pathlib import Path
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple, deque
@@ -21,7 +21,8 @@ from GroteskBotStatus import (
     finalize_lyst_run,
 )
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY
-from config_lyst_urls import BASE_URLS
+from config_lyst import BASE_URLS, LYST_COUNTRIES, LYST_PAGE_SCRAPE, LYST_URL_TIMEOUT_SEC as LYST_URL_TIMEOUT_DEFAULT, LYST_STALL_TIMEOUT_SEC as LYST_STALL_TIMEOUT_DEFAULT
+from scheduler import run_scheduler
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
@@ -47,21 +48,23 @@ window.chrome = { runtime: {} };
 colorama.init(autoreset=True)
 BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
 LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
-PAGE_SCRAPE = True
+PAGE_SCRAPE = LYST_PAGE_SCRAPE
 SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
 BOT_LOG_FILE = Path(__file__).with_name("python.log")
 SHOES_DB_FILE = Path(__file__).with_name("shoes.db")
 OLX_DB_FILE = Path(__file__).with_name("olx_items.db")
 SHAFA_DB_FILE = Path(__file__).with_name("shafa_items.db")
 LOG_TAIL_LINES = 500
-COUNTRIES = ['IT', 'PL', 'US', 'GB']
+COUNTRIES = LYST_COUNTRIES
 BLOCK_RESOURCES = False
 RESOLVE_REDIRECTS = False
 SKIPPED_ITEMS = set()
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
-NEXT_OLX_RUN_TS = 0.0
-NEXT_SHAFA_RUN_TS = 0.0
-NEXT_LYST_RUN_TS = 0.0
+LYST_URL_TIMEOUT_SEC = LYST_URL_TIMEOUT_DEFAULT
+LYST_LAST_PROGRESS_TS = 0.0
+LYST_STALL_TIMEOUT_SEC = LYST_STALL_TIMEOUT_DEFAULT
+OLX_TIMEOUT_SEC = 1800
+SHAFA_TIMEOUT_SEC = 1800
 
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
@@ -461,6 +464,10 @@ def extract_embedded_url(url):
         v = qs.get(p)
         if v: return urllib.parse.unquote(v[0])
     return url
+
+def _touch_lyst_progress():
+    global LYST_LAST_PROGRESS_TS
+    LYST_LAST_PROGRESS_TS = time.time()
 
 async def get_final_clear_link(initial_url, semaphore, item_name, country, current_item, total_items):
     logger.info(f"Processing final link for {item_name} | Country: {country} | Progress: {current_item}/{total_items}")
@@ -986,16 +993,12 @@ async def command_listener(bot_token, allowed_chat_ids, log_path):
             await asyncio.sleep(5)
 
 async def _run_olx_and_mark():
-    global NEXT_OLX_RUN_TS
     await run_olx_scraper()
     mark_olx_run()
-    NEXT_OLX_RUN_TS = _schedule_next_run(900, 3600)
 
 async def _run_shafa_and_mark():
-    global NEXT_SHAFA_RUN_TS
     await run_shafa_scraper()
     mark_shafa_run()
-    NEXT_SHAFA_RUN_TS = _schedule_next_run(900, 3600)
 
 # Processing functions
 def filter_duplicates(shoes, exchange_rates):
@@ -1127,6 +1130,7 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
         await save_shoe_data_bulk(removed_shoes)
 
 async def process_url(base_url, countries, exchange_rates):
+    _touch_lyst_progress()
     mark_lyst_start()
     all_shoes = []
     country_results = await asyncio.gather(*(scrape_all_pages(base_url, c) for c in countries))
@@ -1158,19 +1162,51 @@ def print_link_statistics():
                     
 def center_text(text, width, fill_char=' '): return text.center(width, fill_char)
 
-def _sleep_interval_with_jitter(base_sec: int, jitter_sec: int) -> int:
-    if base_sec <= 0:
-        return 60
-    if jitter_sec <= 0:
-        return base_sec
-    low = max(1, base_sec - jitter_sec)
-    high = base_sec + jitter_sec
-    return random.randint(low, high)
+async def run_lyst_cycle_impl(message_queue):
+    global LYST_LAST_PROGRESS_TS
+    SKIPPED_ITEMS.clear()
+    begin_lyst_cycle()
+    _touch_lyst_progress()
+    try:
+        old_data = await load_shoe_data()
+        exchange_rates = load_exchange_rates()
+        url_tasks = [
+            asyncio.wait_for(process_url(base_url, COUNTRIES, exchange_rates), timeout=LYST_URL_TIMEOUT_SEC)
+            for base_url in BASE_URLS
+        ]
+        url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
 
-def _schedule_next_run(min_sec: int, max_sec: int) -> float:
-    if min_sec < 1 or max_sec < min_sec:
-        min_sec, max_sec = 900, 3600
-    return time.time() + random.randint(min_sec, max_sec)
+        all_shoes = []
+        for result in url_results:
+            if isinstance(result, Exception):
+                logger.error(f"Lyst task failed: {result}")
+                continue
+            all_shoes.extend(result)
+        if not all_shoes:
+            mark_lyst_issue("0 items scraped")
+
+        collected_ids = {shoe['unique_id'] for shoe in all_shoes}
+        recovered_count = sum(1 for uid in SKIPPED_ITEMS if uid in collected_ids)
+        special_logger.stat(f"Items skipped due to image but present in final list: {recovered_count}/{len(SKIPPED_ITEMS)}")
+
+        unfiltered_len = len(all_shoes)
+        all_shoes = filter_duplicates(all_shoes, exchange_rates)
+        special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
+
+        await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
+        finalize_lyst_run()
+
+        print_statistics()
+        print_link_statistics()
+    except asyncio.CancelledError:
+        mark_lyst_issue("stalled")
+        finalize_lyst_run()
+        raise
+    except Exception as exc:
+        logger.error(f"Lyst run failed: {exc}")
+        mark_lyst_issue("failed")
+        finalize_lyst_run()
+        raise
 
 
 
@@ -1215,7 +1251,6 @@ async def maintenance_loop(interval_s: int):
 
 # Main application
 async def main():
-    global NEXT_OLX_RUN_TS, NEXT_SHAFA_RUN_TS, NEXT_LYST_RUN_TS
     global LIVE_MODE
     load_last_runs_from_file()
     # Initialize and start message queue
@@ -1230,19 +1265,6 @@ async def main():
         asyncio.create_task(status_heartbeat(TELEGRAM_BOT_TOKEN, chat_id, interval_s=600))
     if MAINTENANCE_INTERVAL_SEC > 0:
         asyncio.create_task(maintenance_loop(MAINTENANCE_INTERVAL_SEC))
-    # Initialize flowy schedules for OLX/SHAFA (15–60 minutes)
-    if NEXT_OLX_RUN_TS == 0:
-        NEXT_OLX_RUN_TS = _schedule_next_run(900, 3600)
-    if NEXT_SHAFA_RUN_TS == 0:
-        NEXT_SHAFA_RUN_TS = _schedule_next_run(900, 3600)
-    if NEXT_LYST_RUN_TS == 0:
-        NEXT_LYST_RUN_TS = time.time()
-    # Run once shortly after startup to avoid "never" status
-    if LAST_OLX_RUN_UTC is None:
-        NEXT_OLX_RUN_TS = time.time()
-    if LAST_SHAFA_RUN_UTC is None:
-        NEXT_SHAFA_RUN_TS = time.time()
-
     terminal_width = shutil.get_terminal_size().columns
     bot_version = f"Grotesk bot v.{BOT_VERSION}"
     print(
@@ -1256,69 +1278,67 @@ async def main():
     if LIVE_MODE:
         special_logger.good("Live mode enabled")
 
+    async def run_lyst_cycle():
+        global LYST_LAST_PROGRESS_TS
+        begin_lyst_cycle()
+        _touch_lyst_progress()
+        try:
+            old_data = await load_shoe_data()
+            exchange_rates = load_exchange_rates()
+            url_tasks = [
+                asyncio.wait_for(process_url(base_url, COUNTRIES, exchange_rates), timeout=LYST_URL_TIMEOUT_SEC)
+                for base_url in BASE_URLS
+            ]
+            url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
+
+            all_shoes = []
+            for result in url_results:
+                if isinstance(result, Exception):
+                    logger.error(f"Lyst task failed: {result}")
+                    continue
+                all_shoes.extend(result)
+            if not all_shoes:
+                mark_lyst_issue("0 items scraped")
+
+            collected_ids = {shoe['unique_id'] for shoe in all_shoes}
+            recovered_count = sum(1 for uid in SKIPPED_ITEMS if uid in collected_ids)
+            special_logger.stat(f"Items skipped due to image but present in final list: {recovered_count}/{len(SKIPPED_ITEMS)}")
+
+            unfiltered_len = len(all_shoes)
+            all_shoes = filter_duplicates(all_shoes, exchange_rates)
+            special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
+
+            await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
+            finalize_lyst_run()
+
+            print_statistics()
+            print_link_statistics()
+        except asyncio.CancelledError:
+            mark_lyst_issue("stalled")
+            finalize_lyst_run()
+            raise
+        except Exception as exc:
+            logger.error(f"Lyst run failed: {exc}")
+            mark_lyst_issue("failed")
+            finalize_lyst_run()
+            raise
+
     try:
-        while True:
-            try:
-                SKIPPED_ITEMS.clear()
-                # Also run OLX and SHAFA scrapers on flowy 15–60 min schedule
-                now_ts = time.time()
-                if now_ts >= NEXT_OLX_RUN_TS:
-                    await _run_olx_and_mark()
-                if now_ts >= NEXT_SHAFA_RUN_TS:
-                    await _run_shafa_and_mark()
-
-                if IS_RUNNING_LYST and now_ts >= NEXT_LYST_RUN_TS:
-                    begin_lyst_cycle()
-                    # Load data and exchange rates
-                    old_data = await load_shoe_data()
-                    exchange_rates = load_exchange_rates()
-
-                    # Process all URLs concurrently
-                    url_tasks = [process_url(base_url, COUNTRIES, exchange_rates) for base_url in BASE_URLS]
-                    url_results = await asyncio.gather(*url_tasks)
-
-                    # Combine results and filter duplicates
-                    all_shoes = []
-                    for result in url_results:
-                        all_shoes.extend(result)
-                    if not all_shoes:
-                        mark_lyst_issue("0 items scraped")
-
-                    # Check skipped items statistics
-                    collected_ids = {shoe['unique_id'] for shoe in all_shoes}
-                    recovered_count = sum(1 for uid in SKIPPED_ITEMS if uid in collected_ids)
-                    special_logger.stat(f"Items skipped due to image but present in final list: {recovered_count}/{len(SKIPPED_ITEMS)}")
-
-                    unfiltered_len = len(all_shoes)
-                    all_shoes = filter_duplicates(all_shoes, exchange_rates)
-                    special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
-
-                    # Process all shoes
-                    await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
-                    finalize_lyst_run()
-                    NEXT_LYST_RUN_TS = time.time() + _sleep_interval_with_jitter(CHECK_INTERVAL_SEC, CHECK_JITTER_SEC)
-
-                    # Print statistics
-                    print_statistics()
-                    print_link_statistics()
-                elif not IS_RUNNING_LYST:
-                    logger.info("Lyst scraping disabled (IsRunningLyst=false)")
-                # Sleep until the next scheduled task (Lyst/OLX/SHAFA)
-                now_ts = time.time()
-                next_wake = min(NEXT_OLX_RUN_TS, NEXT_SHAFA_RUN_TS, NEXT_LYST_RUN_TS or now_ts)
-                sleep_for = max(5, int(next_wake - now_ts))
-                logger.info(f"Sleeping for {sleep_for} seconds before next check")
-                await asyncio.sleep(sleep_for)
-                
-            except KeyboardInterrupt:
-                logger.info("Script terminated by user")
-                break
-            except Exception as e:
-                logger.error(f"An unexpected error occurred in main loop: {e}")
-                logger.error(traceback.format_exc())
-                sleep_for = _sleep_interval_with_jitter(CHECK_INTERVAL_SEC, CHECK_JITTER_SEC)
-                logger.info(f"Waiting for {sleep_for} seconds before retrying")
-                await asyncio.sleep(sleep_for)
+        await run_scheduler(
+            run_olx=_run_olx_and_mark,
+            run_shafa=_run_shafa_and_mark,
+            run_lyst=lambda: run_lyst_cycle_impl(message_queue),
+            is_running_lyst=lambda: IS_RUNNING_LYST,
+            get_lyst_progress_ts=lambda: LYST_LAST_PROGRESS_TS,
+            check_interval_sec=CHECK_INTERVAL_SEC,
+            check_jitter_sec=CHECK_JITTER_SEC,
+            logger=logger,
+            last_olx_run_exists=LAST_OLX_RUN_UTC is not None,
+            last_shafa_run_exists=LAST_SHAFA_RUN_UTC is not None,
+            olx_timeout_sec=OLX_TIMEOUT_SEC,
+            shafa_timeout_sec=SHAFA_TIMEOUT_SEC,
+            lyst_stall_timeout_sec=LYST_STALL_TIMEOUT_SEC,
+        )
     finally:
         pass  # Removed application.stop() as we're no longer using telegram.ext.Application
 

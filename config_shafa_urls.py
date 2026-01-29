@@ -262,11 +262,47 @@ SHAFA_URLS = [
         "url_name": "Isaora"
     },
     {
-        "url": "https://shafa.ua/uk/men?search_text=Shoto&sort=4",
+        "url": "https://shafa.ua/uk/men/obuv?search_text=shoto&sort=4",
         "url_name": "Shoto"
     },
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Thom%20Krom&sort=4",
         "url_name": "Thom Krom"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Haider%20Ackermann&sort=4",
+        "url_name": "Haider Ackermann"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Isabel%20Benenato&sort=4",
+        "url_name": "Isabel Benenato"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Last%20Conspiracy&sizes=176&sizes=174&sizes=239&sizes=175&sizes=240&sort=4",
+        "url_name": "Last Conspiracy"   
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Hannes%20Roether&sort=4",
+        "url_name": "Hannes Roether"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Poeme%20Bohemien&sort=4",
+        "url_name": "Poeme Bohemien"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Kazuyuki%20Kumagai&sort=4",
+        "url_name": "Kazuyuki Kumagai"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Barbara%20Gongini&sort=4",
+        "url_name": "Barbara Gongini"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Ripvanwinkle&sort=4",
+        "url_name": "Ripvanwinkle"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Piacenza&sort=4",
+        "url_name": "Piacenza"
     }
 ]

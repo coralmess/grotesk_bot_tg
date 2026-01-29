@@ -592,5 +592,45 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Thom-Krom/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Thom Krom"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Haider-Ackermann/?search%5Border%5D=created_at:desc",
+        "url_name": "Haider Ackermann"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Inis-Me%C3%A1in/?search%5Border%5D=created_at:desc",
+        "url_name": "Inis Meáin"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/predmety-interera/q-Vibia/?search%5Border%5D=created_at%3Adesc",
+        "url_name": "Vibia"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Isabel-Benenato/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Isabel Benenato"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Last-Conspiracy/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_enum_size%5D%5B0%5D=39&search%5Bfilter_enum_size%5D%5B1%5D=39_5&search%5Bfilter_enum_size%5D%5B2%5D=40&search%5Bfilter_enum_size%5D%5B3%5D=40_5&search%5Bfilter_enum_size%5D%5B4%5D=41",
+        "url_name": "Last Conspiracy"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Poeme-Bohemien/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Poeme Bohemien"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Kazuyuki-Kumagai/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Kazuyuki Kumagai"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Barbara-Gongini/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Barbara Gongini"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Ripvanwinkle/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Ripvanwinkle"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Piacenza/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Piacenza"
     }
 ]
