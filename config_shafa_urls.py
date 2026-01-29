@@ -304,5 +304,41 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Piacenza&sort=4",
         "url_name": "Piacenza"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Batoner&sort=4",
+        "url_name": "Batoner"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Extreme%20Cashmere&sort=4",
+        "url_name": "Extreme Cashmere"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Alk%20Phenix&sort=4",
+        "url_name": "Alk Phenix"    
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Teatora&sort=4",
+        "url_name": "Teatora"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Meanswhile&sort=4",
+        "url_name": "Meanswhile"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Byborre&sort=4",
+        "url_name": "Byborre"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Enfin%20Leve&sort=4",
+        "url_name": "Enfin Leve"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Hamcus&sort=4",
+        "url_name": "Hamcus"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Portaille&sort=4",
+        "url_name": "Portaille"
     }
 ]

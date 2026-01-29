@@ -632,5 +632,53 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Piacenza/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Piacenza"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Barazza/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Barazza"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/stroitelstvo-remont/santehnika/q-Foster/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Foster"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Batoner/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Batoner"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Meanswhile/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Meanswhile"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Extreme-Cashmere/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Extreme Cashmere"
+    },
+    { 
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Auralee/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Auralee"
+    }, 
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Alk-Phenix/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Alk Phenix"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Teatora/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Teatora"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Byborre/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Byborre"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Enfin-Lev%C3%A9/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Enfin Levé"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Hamcus/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Hamcus"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Portaille/?currency=UAH&search%5Border%5D=created_at:desc", 
+        "url_name": "Portaille"
     }
 ]

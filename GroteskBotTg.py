@@ -21,7 +21,19 @@ from GroteskBotStatus import (
     finalize_lyst_run,
 )
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY
-from config_lyst import BASE_URLS, LYST_COUNTRIES, LYST_PAGE_SCRAPE, LYST_URL_TIMEOUT_SEC as LYST_URL_TIMEOUT_DEFAULT, LYST_STALL_TIMEOUT_SEC as LYST_STALL_TIMEOUT_DEFAULT
+from config_lyst import (
+    BASE_URLS,
+    LYST_COUNTRIES,
+    LYST_PAGE_SCRAPE,
+    LYST_URL_TIMEOUT_SEC as LYST_URL_TIMEOUT_DEFAULT,
+    LYST_STALL_TIMEOUT_SEC as LYST_STALL_TIMEOUT_DEFAULT,
+    LYST_PAGE_TIMEOUT_SEC,
+)
+from lyst_debug import (
+    attach_lyst_debug_listeners,
+    dump_lyst_debug_event,
+    write_stop_too_early_dump,
+)
 from scheduler import run_scheduler
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
@@ -384,7 +396,7 @@ async def scroll_page(page, max_attempts=None):
 
         last_height = new_height
 
-async def get_page_content(url, country, max_scroll_attempts=None):
+async def get_page_content(url, country, max_scroll_attempts=None, url_name=None, page_num=None):
     async with (await browser_pool.get_browser()) as browser:
         context = await browser.new_context(
             user_agent=STEALTH_UA,
@@ -395,24 +407,101 @@ async def get_page_content(url, country, max_scroll_attempts=None):
         await context.add_init_script(STEALTH_SCRIPT)
         await context.add_cookies([{'name': 'country', 'value': country, 'domain': '.lyst.com', 'path': '/'}])
         page = await context.new_page()
+        debug_events = []
+        attach_lyst_debug_listeners(page, debug_events)
         if BLOCK_RESOURCES:
             await page.route("**/*", handle_route)
-        await page.goto(url)
-        await scroll_page(page, max_scroll_attempts)
+        step = "goto"
         try:
-            await page.wait_for_selector('._693owt3', timeout=20000)
-        except Exception:
-            # If selector wait fails, still return content for parsing
-            pass
-        try:
+            logger.info(f"LYST step=goto url={url}")
+            await page.goto(url)
+            step = "scroll"
+            logger.info(f"LYST step=scroll url={url}")
+            await scroll_page(page, max_scroll_attempts)
+            step = "wait_selector"
+            try:
+                logger.info(f"LYST step=wait_selector url={url}")
+                await page.wait_for_selector('._693owt3', timeout=20000)
+            except Exception:
+                # If selector wait fails, still return content for parsing
+                pass
+            step = "content"
+            logger.info(f"LYST step=content url={url}")
             return await page.content()
+        except asyncio.CancelledError:
+            now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+            final_url = None
+            try:
+                final_url = page.url
+            except Exception:
+                final_url = None
+            try:
+                await asyncio.shield(
+                    dump_lyst_debug_event(
+                        "lyst_timeout",
+                        reason="page timeout",
+                        url=url,
+                        country=country,
+                        url_name=url_name,
+                        page_num=page_num,
+                        step=step,
+                        page=page,
+                        now_kyiv=now_kyiv,
+                        log_lines=log_lines,
+                        extra_lines=debug_events,
+                        final_url=final_url,
+                    )
+                )
+            except Exception:
+                pass
+            raise
+        except Exception as exc:
+            reason = "target closed" if "Target page, context or browser has been closed" in str(exc) else f"exception: {exc}"
+            prefix = "lyst_target_closed" if reason == "target closed" else "lyst_error"
+            now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+            final_url = None
+            try:
+                final_url = page.url
+            except Exception:
+                final_url = None
+            try:
+                await dump_lyst_debug_event(
+                    prefix,
+                    reason=reason,
+                    url=url,
+                    country=country,
+                    url_name=url_name,
+                    page_num=page_num,
+                    step=step,
+                    page=page,
+                    now_kyiv=now_kyiv,
+                    log_lines=log_lines,
+                    extra_lines=debug_events,
+                    final_url=final_url,
+                )
+            except Exception:
+                pass
+            raise
         finally:
             await context.close()
 
-async def get_soup(url, country, max_retries=3, max_scroll_attempts=None):
+async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None):
     for attempt in range(max_retries):
         try:
-            content = await get_page_content(url, country, max_scroll_attempts)
+            try:
+                content = await asyncio.wait_for(
+                    get_page_content(url, country, max_scroll_attempts, url_name=url_name, page_num=page_num),
+                    timeout=LYST_PAGE_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                suffix = ""
+                if url_name or page_num is not None:
+                    suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+                logger.error(f"LYST timeout fetching page content for {url}{suffix}")
+                mark_lyst_issue("page timeout")
+                content = None
             if not content:
                 mark_lyst_issue("Failed to get soup")
                 if attempt < max_retries - 1:
@@ -432,10 +521,21 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None):
                 mark_lyst_issue("Failed to get soup")
                 raise
 
-async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=None):
+async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None):
     for attempt in range(max_retries):
         try:
-            content = await get_page_content(url, country, max_scroll_attempts)
+            try:
+                content = await asyncio.wait_for(
+                    get_page_content(url, country, max_scroll_attempts, url_name=url_name, page_num=page_num),
+                    timeout=LYST_PAGE_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                suffix = ""
+                if url_name or page_num is not None:
+                    suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+                logger.error(f"LYST timeout fetching page content for {url}{suffix}")
+                mark_lyst_issue("page timeout")
+                content = None
             if not content:
                 mark_lyst_issue("Failed to get soup")
                 if attempt < max_retries - 1:
@@ -726,29 +826,14 @@ def extract_shoe_data(card, country):
         logger.error(f"Error extracting shoe data: {e}")
         return None
 
-def _write_lyst_stop_too_early_dump(reason, url, country, url_name, content):
-    try:
-        html_path = Path(__file__).with_name("lyst_stop_too_early.html")
-        meta_path = Path(__file__).with_name("lyst_stop_too_early_meta.txt")
-        html_path.write_text(content or "", encoding="utf-8", errors="replace")
-        now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
-        log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
-        meta_lines = [
-            f"timestamp_kyiv: {now_kyiv}",
-            f"reason: {reason}",
-            f"url_name: {url_name}",
-            f"country: {country}",
-            f"url: {url}",
-            "",
-            "last_200_log_lines:",
-            *log_lines,
-        ]
-        meta_path.write_text("\n".join(meta_lines), encoding="utf-8", errors="replace")
-    except Exception as exc:
-        logger.error(f"Failed to write LYST stop-too-early dump: {exc}")
-
-async def scrape_page(url, country, max_scroll_attempts=None):
-    soup, content = await get_soup_and_content(url, country, max_scroll_attempts=max_scroll_attempts)
+async def scrape_page(url, country, max_scroll_attempts=None, url_name=None, page_num=None):
+    soup, content = await get_soup_and_content(
+        url,
+        country,
+        max_scroll_attempts=max_scroll_attempts,
+        url_name=url_name,
+        page_num=page_num,
+    )
     if not soup:
         mark_lyst_issue("Failed to get soup")
         return [], content
@@ -764,6 +849,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
     all_shoes, page = [], 1
     
     while True:
+        _touch_lyst_progress()
         if use_pagination:
             url = base_url['url'] if page == 1 else f"{base_url['url']}&page={page}"
             logger.info(f"Scraping page {page} for country {country} - {base_url['url_name']}")
@@ -771,17 +857,28 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             url = base_url['url']
             logger.info(f"Scraping single page for country {country} - {base_url['url_name']}")
 
-        shoes, content = await scrape_page(url, country, max_scroll_attempts=max_scroll_attempts)
+        shoes, content = await scrape_page(
+            url,
+            country,
+            max_scroll_attempts=max_scroll_attempts,
+            url_name=base_url["url_name"],
+            page_num=page if use_pagination else None,
+        )
         if not shoes:
             if use_pagination and page < 3:
                 logger.error(f"{base_url['url_name']} for {country} Stopped too early. Please check for errors")
                 mark_lyst_issue("Stopped too early")
-                _write_lyst_stop_too_early_dump(
-                    "Stopped too early",
-                    url,
-                    country,
-                    base_url['url_name'],
-                    content,
+                now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+                log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+                write_stop_too_early_dump(
+                    reason="Stopped too early",
+                    url=url,
+                    country=country,
+                    url_name=base_url['url_name'],
+                    page_num=page,
+                    content=content,
+                    now_kyiv=now_kyiv,
+                    log_lines=log_lines,
                 )
                 if use_pagination == PAGE_SCRAPE:
                     logger.info(f"Retrying {base_url['url_name']} for {country} with PAGE_SCRAPE={not use_pagination}")

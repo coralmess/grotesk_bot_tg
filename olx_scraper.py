@@ -70,9 +70,27 @@ class OlxItem:
     first_image_url: Optional[str] = None
 
 def normalize_price(text: str) -> Tuple[str, int]:
-    digits = re.sub(r"[^\d]", "", text or "")
-    price_int = int(digits) if digits else 0
-    return (f"{price_int} грн" if price_int else (text or "").strip()), price_int
+    raw = (text or "").replace(" ", " ").strip()
+    if not raw:
+        return "", 0
+    match = re.search(r"([\d\s]+[.,]?\d*)", raw)
+    if not match:
+        return raw, 0
+    num = match.group(1).replace(" ", "")
+    if "." in num and "," in num:
+        if num.rfind(".") > num.rfind(","):
+            num = num.replace(",", "")
+        else:
+            num = num.replace(".", "").replace(",", ".")
+    elif "," in num:
+        num = num.replace(",", ".")
+    try:
+        value = float(num)
+    except ValueError:
+        return raw, 0
+    price_int = int(round(value))
+    price_text = f"{value:.2f} грн" if "." in num else f"{price_int} грн"
+    return price_text, price_int
 
 def extract_id_from_link(link: str) -> str:
     slug = link.rstrip("/").split("/")[-1].split("?", 1)[0]

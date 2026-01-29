@@ -78,19 +78,37 @@ async def run_scheduler(
                     next_lyst_ts = time.time() + _sleep_interval_with_jitter(check_interval_sec, check_jitter_sec)
 
             if lyst_task is not None and lyst_task.done():
-                exc = lyst_task.exception()
-                if exc:
-                    logger.error(f"Lyst task crashed: {exc}")
+                if lyst_task.cancelled():
+                    logger.warning("Lyst task cancelled")
+                else:
+                    try:
+                        exc = lyst_task.exception()
+                    except asyncio.CancelledError:
+                        exc = None
+                    if exc:
+                        logger.error(f"Lyst task crashed: {exc}")
                 lyst_task = None
             if olx_task is not None and olx_task.done():
-                exc = olx_task.exception()
-                if exc:
-                    logger.error(f"OLX task crashed: {exc}")
+                if olx_task.cancelled():
+                    logger.warning("OLX task cancelled")
+                else:
+                    try:
+                        exc = olx_task.exception()
+                    except asyncio.CancelledError:
+                        exc = None
+                    if exc:
+                        logger.error(f"OLX task crashed: {exc}")
                 olx_task = None
             if shafa_task is not None and shafa_task.done():
-                exc = shafa_task.exception()
-                if exc:
-                    logger.error(f"SHAFA task crashed: {exc}")
+                if shafa_task.cancelled():
+                    logger.warning("SHAFA task cancelled")
+                else:
+                    try:
+                        exc = shafa_task.exception()
+                    except asyncio.CancelledError:
+                        exc = None
+                    if exc:
+                        logger.error(f"SHAFA task crashed: {exc}")
                 shafa_task = None
 
             next_wake = min(next_olx_ts, next_shafa_ts, next_lyst_ts or now_ts)
