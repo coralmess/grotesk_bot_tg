@@ -223,11 +223,19 @@ def clean_link_for_display(link):
     cleaned_link = re.sub(r'^(https?://)?(www\.)?', '', link)
     return (cleaned_link[:22] + '...') if len(cleaned_link) > 25 else cleaned_link
 
-def load_font(font_size):
+def load_font(font_size, prefer_heavy=False):
     font_dir = Path(__file__).with_name("fonts")
-    font_candidates = [
-        font_dir / "SFPro-Heavy.ttf",
-        font_dir / "SFPro-Bold.ttf",
+    if prefer_heavy:
+        font_candidates = [
+            font_dir / "SFPro-Heavy.ttf",
+            font_dir / "SFPro-Bold.ttf",
+        ]
+    else:
+        font_candidates = [
+            font_dir / "SFPro-Bold.ttf",
+            font_dir / "SFPro-Heavy.ttf",
+        ]
+    font_candidates += [
         "SFPro-Heavy.ttf",
         "SFPro-Bold.ttf",
         "arialbd.ttf",
@@ -259,18 +267,18 @@ def process_image(image_url, uah_price, sale_percentage):
             width, height = img.size
 
         price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
-        padding = 12
+        padding = max(12, int(width * 0.03))
         text_margin = max(20, int(width * 0.1))
         text_margin = min(text_margin, int(width * 0.14))
 
         # Choose base font size and adjust if needed to fit width
         base_scale = 0.06 if width > height else 0.055
         font_size = max(24, int(width * base_scale))
-        font = load_font(font_size)
+        font = load_font(font_size, prefer_heavy=False)
 
         def _fit_font(font_size):
             while font_size > 12:
-                font = load_font(font_size)
+                font = load_font(font_size, prefer_heavy=False)
                 dummy = Image.new('RGB', (width, width), (255, 255, 255))
                 d = ImageDraw.Draw(dummy)
                 price_bbox = d.textbbox((0, 0), price_text, font=font)
@@ -280,9 +288,12 @@ def process_image(image_url, uah_price, sale_percentage):
                 if max(price_w, sale_w) <= (width - (text_margin * 2)):
                     return font
                 font_size -= 2
-            return load_font(font_size)
+            return load_font(font_size, prefer_heavy=False)
 
         font = _fit_font(font_size)
+        ascent, descent = font.getmetrics()
+        text_height = ascent + descent
+        line_padding = max(2, int(font_size * 0.15))
 
         if width > height:
             # Make square by adding white space ABOVE the image (not below the prices)
@@ -291,30 +302,23 @@ def process_image(image_url, uah_price, sale_percentage):
             square_img.paste(img, (0, top_pad))
 
             draw = ImageDraw.Draw(square_img)
-            price_bbox = draw.textbbox((0, 0), price_text, font=font)
-            sale_bbox = draw.textbbox((0, 0), sale_text, font=font)
-            text_height = max(price_bbox[3] - price_bbox[1], sale_bbox[3] - sale_bbox[1])
-            bottom_area = text_height + (padding * 2)
+            bottom_area = text_height + (padding * 2) + line_padding
 
             new_img = Image.new('RGB', (width, width + bottom_area), (255, 255, 255))
             new_img.paste(square_img, (0, 0))
             draw = ImageDraw.Draw(new_img)
-            text_y = width + padding + (text_height // 2)
-            draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="lm")
-            draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rm")
+            text_y = width + padding + ascent + (line_padding // 2)
+            draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
+            draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
         else:
             # Default: add a bottom bar for text
-            draw = ImageDraw.Draw(img)
-            price_bbox = draw.textbbox((0, 0), price_text, font=font)
-            sale_bbox = draw.textbbox((0, 0), sale_text, font=font)
-            text_height = max(price_bbox[3] - price_bbox[1], sale_bbox[3] - sale_bbox[1])
-            bottom_area = text_height + (padding * 2)
+            bottom_area = text_height + (padding * 2) + line_padding
             new_img = Image.new('RGB', (width, height + bottom_area), (255, 255, 255))
             new_img.paste(img, (0, 0))
             draw = ImageDraw.Draw(new_img)
-            text_y = height + padding + (text_height // 2)
-            draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="lm")
-            draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rm")
+            text_y = height + padding + ascent + (line_padding // 2)
+            draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
+            draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
 
         img_byte_arr = io.BytesIO()
         if UPSCALE_IMAGES:
