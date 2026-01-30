@@ -19,6 +19,7 @@ MAINTENANCE_INTERVAL_SEC = int(os.getenv('MAINTENANCE_INTERVAL_SEC', '21600'))
 DB_VACUUM = os.getenv('DB_VACUUM', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 OLX_RETENTION_DAYS = int(os.getenv('OLX_RETENTION_DAYS', '0'))
 SHAFA_RETENTION_DAYS = int(os.getenv('SHAFA_RETENTION_DAYS', '0'))
+UPSCALE_IMAGES = os.getenv('UPSCALE_IMAGES', 'true').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 
 # Concurrency tuning (lower on instance to reduce CPU spikes)
 LYST_MAX_BROWSERS = int(os.getenv('LYST_MAX_BROWSERS', '3' if IS_INSTANCE else '6'))

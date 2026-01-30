@@ -20,7 +20,7 @@ from GroteskBotStatus import (
     mark_lyst_issue,
     finalize_lyst_run,
 )
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, UPSCALE_IMAGES
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -28,6 +28,7 @@ from config_lyst import (
     LYST_URL_TIMEOUT_SEC as LYST_URL_TIMEOUT_DEFAULT,
     LYST_STALL_TIMEOUT_SEC as LYST_STALL_TIMEOUT_DEFAULT,
     LYST_PAGE_TIMEOUT_SEC,
+    LYST_MAX_SCROLL_ATTEMPTS,
 )
 from lyst_debug import (
     attach_lyst_debug_listeners,
@@ -232,8 +233,19 @@ def process_image(image_url, uah_price, sale_percentage):
     response = requests.get(image_url)
     try:
         img = Image.open(io.BytesIO(response.content))
-        width, height = [dim * 2 for dim in img.size]
-        img = img.resize((width, height), Image.LANCZOS)
+        # If upscaling is disabled, downscale large sources to keep file size under Telegram limit
+        if not UPSCALE_IMAGES:
+            max_edge = 1280
+            w, h = img.size
+            scale = min(1.0, max_edge / max(w, h)) if max(w, h) else 1.0
+            if scale < 1.0:
+                new_size = (int(w * scale), int(h * scale))
+                img = img.resize(new_size, Image.LANCZOS)
+        if UPSCALE_IMAGES:
+            width, height = [dim * 2 for dim in img.size]
+            img = img.resize((width, height), Image.LANCZOS)
+        else:
+            width, height = img.size
 
         font_size = int(min(width, height) * 0.055)
         font = load_font(font_size)
@@ -256,7 +268,18 @@ def process_image(image_url, uah_price, sale_percentage):
         draw.text((width - 60, text_y), sale_text, font=font, fill=(255,59,48), anchor="rm")
 
         img_byte_arr = io.BytesIO()
-        new_img.save(img_byte_arr, format='PNG', quality=95)
+        if UPSCALE_IMAGES:
+            new_img.save(img_byte_arr, format='PNG', quality=95)
+        else:
+            # JPEG is smaller and avoids Telegram size limits for large images
+            if new_img.mode != 'RGB':
+                white_bg = Image.new('RGB', new_img.size, (255, 255, 255))
+                if new_img.mode in ('RGBA', 'LA'):
+                    white_bg.paste(new_img, mask=new_img.split()[-1])
+                else:
+                    white_bg.paste(new_img)
+                new_img = white_bg
+            new_img.save(img_byte_arr, format='JPEG', quality=85, optimize=True)
         img_byte_arr.seek(0)
         return img_byte_arr
     finally:
@@ -486,9 +509,13 @@ async def get_page_content(url, country, max_scroll_attempts=None, url_name=None
                 wait_until="domcontentloaded",
                 timeout=int(LYST_PAGE_TIMEOUT_SEC * 1000),
             )
-            step = "scroll"
-            logger.info(f"LYST step=scroll url={url}")
-            await scroll_page(page, max_scroll_attempts)
+            if max_scroll_attempts is not None and max_scroll_attempts <= 0:
+                step = "scroll_skip"
+                logger.info(f"LYST step=scroll_skip url={url}")
+            else:
+                step = "scroll"
+                logger.info(f"LYST step=scroll url={url}")
+                await scroll_page(page, max_scroll_attempts)
             if LYST_IMAGE_STRATEGY == "settle":
                 step = "settle_lazy_images"
                 logger.info(f"LYST step=settle_lazy_images url={url}")
@@ -997,7 +1024,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
     if use_pagination is None:
         use_pagination = PAGE_SCRAPE
     
-    max_scroll_attempts = 10 if use_pagination else 300
+    max_scroll_attempts = LYST_MAX_SCROLL_ATTEMPTS
     all_shoes, page = [], 1
     
     while True:
