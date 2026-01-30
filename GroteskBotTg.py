@@ -224,9 +224,20 @@ def clean_link_for_display(link):
     return (cleaned_link[:22] + '...') if len(cleaned_link) > 25 else cleaned_link
 
 def load_font(font_size):
-    for font_file in ["SFPro-Heavy.ttf", "SFPro-Bold.ttf", "arialbd.ttf"]:
-        try: return ImageFont.truetype(font_file, font_size)
-        except IOError: continue
+    font_dir = Path(__file__).with_name("fonts")
+    font_candidates = [
+        font_dir / "SFPro-Heavy.ttf",
+        font_dir / "SFPro-Bold.ttf",
+        "SFPro-Heavy.ttf",
+        "SFPro-Bold.ttf",
+        "arialbd.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ]
+    for font_file in font_candidates:
+        try:
+            return ImageFont.truetype(str(font_file), font_size)
+        except IOError:
+            continue
     return ImageFont.load_default()
 
 def process_image(image_url, uah_price, sale_percentage):
@@ -249,11 +260,12 @@ def process_image(image_url, uah_price, sale_percentage):
 
         price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
         padding = 12
-        text_margin = max(12, int(width * 0.02))
+        text_margin = max(20, int(width * 0.1))
+        text_margin = min(text_margin, int(width * 0.14))
 
         # Choose base font size and adjust if needed to fit width
-        base_scale = 0.07 if width > height else 0.06
-        font_size = max(16, int(min(width, height) * base_scale))
+        base_scale = 0.06 if width > height else 0.055
+        font_size = max(24, int(width * base_scale))
         font = load_font(font_size)
 
         def _fit_font(font_size):
@@ -311,7 +323,7 @@ def process_image(image_url, uah_price, sale_percentage):
             # JPEG is smaller and avoids Telegram size limits for large images
             if new_img.mode != 'RGB':
                 new_img = new_img.convert('RGB')
-            new_img.save(img_byte_arr, format='JPEG', quality=85, optimize=True)
+            new_img.save(img_byte_arr, format='JPEG', quality=85, optimize=True, subsampling=0)
         img_byte_arr.seek(0)
         return img_byte_arr
     finally:
