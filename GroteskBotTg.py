@@ -224,7 +224,7 @@ def clean_link_for_display(link):
     return (cleaned_link[:22] + '...') if len(cleaned_link) > 25 else cleaned_link
 
 def load_font(font_size):
-    for font_file in ["SFPro-Bold.ttf", "arialbd.ttf"]:
+    for font_file in ["SFPro-Heavy.ttf", "SFPro-Bold.ttf", "arialbd.ttf"]:
         try: return ImageFont.truetype(font_file, font_size)
         except IOError: continue
     return ImageFont.load_default()
@@ -248,35 +248,46 @@ def process_image(image_url, uah_price, sale_percentage):
             width, height = img.size
 
         price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
-        padding = 10
-        text_margin = max(16, int(width * 0.03))
+        padding = 12
+        text_margin = max(12, int(width * 0.02))
 
-        # Choose base font size and adjust if needed for padded areas
-        font_size = int(min(width, height) * 0.055)
+        # Choose base font size and adjust if needed to fit width
+        base_scale = 0.07 if width > height else 0.06
+        font_size = max(16, int(min(width, height) * base_scale))
         font = load_font(font_size)
 
-        if width > height:
-            # Pad top/bottom to make a square canvas, keep padding proportional
-            pad_total = width - height
-            top_pad = pad_total // 2
-            bottom_pad = pad_total - top_pad
-
-            # Ensure text fits within bottom padding by shrinking font if needed
-            while font_size > 10:
+        def _fit_font(font_size):
+            while font_size > 12:
                 font = load_font(font_size)
                 dummy = Image.new('RGB', (width, width), (255, 255, 255))
                 d = ImageDraw.Draw(dummy)
                 price_bbox = d.textbbox((0, 0), price_text, font=font)
                 sale_bbox = d.textbbox((0, 0), sale_text, font=font)
-                text_height = max(price_bbox[3] - price_bbox[1], sale_bbox[3] - sale_bbox[1])
-                if text_height + (padding * 2) <= bottom_pad:
-                    break
+                price_w = price_bbox[2] - price_bbox[0]
+                sale_w = sale_bbox[2] - sale_bbox[0]
+                if max(price_w, sale_w) <= (width - (text_margin * 2)):
+                    return font
                 font_size -= 2
+            return load_font(font_size)
 
-            new_img = Image.new('RGB', (width, width), (255, 255, 255))
-            new_img.paste(img, (0, top_pad))
+        font = _fit_font(font_size)
+
+        if width > height:
+            # Make square by adding white space ABOVE the image (not below the prices)
+            top_pad = width - height
+            square_img = Image.new('RGB', (width, width), (255, 255, 255))
+            square_img.paste(img, (0, top_pad))
+
+            draw = ImageDraw.Draw(square_img)
+            price_bbox = draw.textbbox((0, 0), price_text, font=font)
+            sale_bbox = draw.textbbox((0, 0), sale_text, font=font)
+            text_height = max(price_bbox[3] - price_bbox[1], sale_bbox[3] - sale_bbox[1])
+            bottom_area = text_height + (padding * 2)
+
+            new_img = Image.new('RGB', (width, width + bottom_area), (255, 255, 255))
+            new_img.paste(square_img, (0, 0))
             draw = ImageDraw.Draw(new_img)
-            text_y = top_pad + height + (bottom_pad // 2)
+            text_y = width + padding + (text_height // 2)
             draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="lm")
             draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rm")
         else:
