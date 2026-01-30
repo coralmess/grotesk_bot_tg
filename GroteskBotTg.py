@@ -77,6 +77,10 @@ LYST_LAST_PROGRESS_TS = 0.0
 LYST_STALL_TIMEOUT_SEC = LYST_STALL_TIMEOUT_DEFAULT
 OLX_TIMEOUT_SEC = 1800
 SHAFA_TIMEOUT_SEC = 1800
+LYST_IMAGE_STRATEGY = "adaptive"  # "adaptive" or "settle"
+LYST_IMAGE_READY_TARGET = 0.6
+LYST_IMAGE_EXTRA_SCROLLS = 4
+LYST_IMAGE_SETTLE_PASSES = 2
 
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
@@ -376,6 +380,56 @@ async def handle_route(route):
     else:
         await route.continue_()
 
+async def normalize_lazy_images(page):
+    # Promote lazy-load attributes into src/srcset so HTML contains image URLs
+    await page.evaluate("""
+        () => {
+            const attrs = [
+                {from: 'data-src', to: 'src'},
+                {from: 'data-lazy-src', to: 'src'},
+                {from: 'data-srcset', to: 'srcset'},
+                {from: 'data-lazy-srcset', to: 'srcset'},
+            ];
+            document.querySelectorAll('img').forEach(img => {
+                attrs.forEach(({from, to}) => {
+                    const val = img.getAttribute(from);
+                    if (val && !img.getAttribute(to)) {
+                        img.setAttribute(to, val);
+                    }
+                });
+            });
+        }
+    """)
+
+async def count_product_images_ready(page):
+    return await page.evaluate("""
+        () => {
+            const cards = document.querySelectorAll('div._693owt3');
+            const attrList = ['src','data-src','data-lazy-src','srcset','data-srcset','data-lazy-srcset'];
+            const hasUrl = (el) => {
+                for (const attr of attrList) {
+                    const val = el.getAttribute(attr);
+                    if (val && (val.startsWith('http') || val.startsWith('//'))) return true;
+                }
+                return false;
+            };
+            let ready = 0;
+            cards.forEach(card => {
+                const media = card.querySelectorAll('img, source');
+                for (const el of media) {
+                    if (hasUrl(el)) { ready += 1; break; }
+                }
+            });
+            return { total: cards.length, ready };
+        }
+    """)
+
+async def settle_lazy_images(page, passes=2, step=600, pause=0.7):
+    for _ in range(passes):
+        await page.evaluate(f"window.scrollBy(0, {step})")
+        await asyncio.sleep(pause)
+        await normalize_lazy_images(page)
+
 async def scroll_page(page, max_attempts=None):
     SCROLL_PAUSE_TIME = 1
     SCROLL_STEP = 5000 if BLOCK_RESOURCES else 800
@@ -396,6 +450,19 @@ async def scroll_page(page, max_attempts=None):
 
         last_height = new_height
 
+    # Optional adaptive tail-scrolls if many cards still lack image URLs
+    if LYST_IMAGE_STRATEGY == "adaptive":
+        for _ in range(LYST_IMAGE_EXTRA_SCROLLS):
+            counts = await count_product_images_ready(page)
+            total = counts.get("total") or 0
+            ready = counts.get("ready") or 0
+            if total == 0:
+                break
+            if (ready / total) >= LYST_IMAGE_READY_TARGET:
+                break
+            await page.evaluate(f"window.scrollBy(0, {SCROLL_STEP})")
+            await asyncio.sleep(SCROLL_PAUSE_TIME)
+
 async def get_page_content(url, country, max_scroll_attempts=None, url_name=None, page_num=None):
     async with (await browser_pool.get_browser()) as browser:
         context = await browser.new_context(
@@ -414,10 +481,21 @@ async def get_page_content(url, country, max_scroll_attempts=None, url_name=None
         step = "goto"
         try:
             logger.info(f"LYST step=goto url={url}")
-            await page.goto(url)
+            await page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=int(LYST_PAGE_TIMEOUT_SEC * 1000),
+            )
             step = "scroll"
             logger.info(f"LYST step=scroll url={url}")
             await scroll_page(page, max_scroll_attempts)
+            if LYST_IMAGE_STRATEGY == "settle":
+                step = "settle_lazy_images"
+                logger.info(f"LYST step=settle_lazy_images url={url}")
+                await settle_lazy_images(page, passes=LYST_IMAGE_SETTLE_PASSES)
+            step = "normalize_lazy_images"
+            logger.info(f"LYST step=normalize_lazy_images url={url}")
+            await normalize_lazy_images(page)
             step = "wait_selector"
             try:
                 logger.info(f"LYST step=wait_selector url={url}")
@@ -643,6 +721,38 @@ def extract_price_tokens(text):
         tokens.append(token)
     return tokens
 
+def _pick_src_from_srcset(srcset_value):
+    if not srcset_value:
+        return None
+    candidates = []
+    for part in srcset_value.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        url = part.split(' ')[0].strip()
+        if url:
+            candidates.append(url)
+    for url in candidates:
+        if url.startswith(("http://", "https://")):
+            return url
+    return None
+
+def _extract_image_url_from_tag(tag):
+    if not tag:
+        return None
+    candidates = [
+        tag.get('src'),
+        tag.get('data-src'),
+        tag.get('data-lazy-src'),
+        _pick_src_from_srcset(tag.get('srcset')),
+        _pick_src_from_srcset(tag.get('data-srcset')),
+        _pick_src_from_srcset(tag.get('data-lazy-srcset')),
+    ]
+    for url in candidates:
+        if url and url.startswith(("http://", "https://")):
+            return url
+    return None
+
 def _dedupe_preserve(items):
     seen = set()
     deduped = []
@@ -673,7 +783,34 @@ def find_price_strings(root):
         return original, sale
     return tokens[0], tokens[0]
 
-def extract_shoe_data(card, country):
+def extract_ldjson_image_map(soup):
+    if not soup:
+        return {}
+    image_map = {}
+    for script in soup.find_all('script', type='application/ld+json'):
+        text = script.string or script.get_text(strip=True)
+        if not text or 'ItemList' not in text:
+            continue
+        try:
+            data = json.loads(text)
+        except Exception:
+            continue
+        if data.get('@type') != 'ItemList':
+            continue
+        for item in data.get('itemListElement', []):
+            product = item.get('item', {}) if isinstance(item, dict) else {}
+            url = product.get('url')
+            images = product.get('image') or []
+            if isinstance(images, str):
+                images = [images]
+            image_url = images[0] if images else None
+            if url and image_url:
+                image_map[url] = image_url
+                if url.startswith("https://www.lyst.com"):
+                    image_map[url.replace("https://www.lyst.com", "")] = image_url
+    return image_map
+
+def extract_shoe_data(card, country, image_fallback_map=None):
     if not card:
         logger.warning("Received None card in extract_shoe_data")
         return None
@@ -767,17 +904,6 @@ def extract_shoe_data(card, country):
         product_card_div = card.find('div', attrs={'data-testid': 'product-card'}) or card.find('div', class_=lambda x: x and 'kah5ce0' in x and 'kah5ce2' in x)
         unique_id = product_card_div['id'] if product_card_div and 'id' in product_card_div.attrs else None
 
-        # Extract image
-        img_elem = card.find('img', src=True) or card.find('img', attrs={'data-src': True}) or card.find('img', attrs={'data-lazy-src': True})
-        image_url = None
-        if img_elem:
-            image_url = img_elem.get('src') or img_elem.get('data-src') or img_elem.get('data-lazy-src')
-        # Ignore inline data URLs or non-external image sources
-        if not image_url or not image_url.startswith(("http://", "https://")):
-            if unique_id:
-                SKIPPED_ITEMS.add(unique_id)
-            return None
-        
         # Extract store
         store = "Unknown Store"
         retailer_name = card.find('span', attrs={'data-testid': 'retailer-name'})
@@ -806,6 +932,31 @@ def extract_shoe_data(card, country):
         full_url = f"https://www.lyst.com{href}" if href and href.startswith('/') else href if href and href.startswith('http') else None
         if not unique_id and full_url:
             unique_id = str(uuid.uuid5(uuid.NAMESPACE_URL, full_url))
+
+        # Extract image
+        img_elem = (
+            card.find('img', src=True)
+            or card.find('img', attrs={'data-src': True})
+            or card.find('img', attrs={'data-lazy-src': True})
+            or card.find('img', attrs={'data-srcset': True})
+            or card.find('img', attrs={'data-lazy-srcset': True})
+            or card.find('img', srcset=True)
+        )
+        image_url = _extract_image_url_from_tag(img_elem)
+        if not image_url:
+            source_elem = card.find('source', srcset=True) or card.find('source', attrs={'data-srcset': True})
+            image_url = _extract_image_url_from_tag(source_elem)
+        # Fallback to JSON-LD image map if lazy image isn't in DOM
+        if (not image_url or not image_url.startswith(("http://", "https://"))) and image_fallback_map:
+            if full_url and full_url in image_fallback_map:
+                image_url = image_fallback_map.get(full_url)
+            elif href and href in image_fallback_map:
+                image_url = image_fallback_map.get(href)
+        # Ignore inline data URLs or non-external image sources
+        if not image_url or not image_url.startswith(("http://", "https://")):
+            if unique_id:
+                SKIPPED_ITEMS.add(unique_id)
+            return None
         
         # Validate required fields
         required_fields = {
@@ -839,7 +990,8 @@ async def scrape_page(url, country, max_scroll_attempts=None, url_name=None, pag
         return [], content
     
     shoe_cards = soup.find_all('div', class_='_693owt3')
-    return [data for card in shoe_cards if (data := extract_shoe_data(card, country))], content
+    image_fallback_map = extract_ldjson_image_map(soup)
+    return [data for card in shoe_cards if (data := extract_shoe_data(card, country, image_fallback_map))], content
 
 async def scrape_all_pages(base_url, country, use_pagination=None):
     if use_pagination is None:

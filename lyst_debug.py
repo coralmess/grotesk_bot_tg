@@ -9,8 +9,13 @@ def attach_lyst_debug_listeners(page, collector: list[str]) -> None:
     def _safe_append(line: str) -> None:
         if line:
             collector.append(line)
+    def _get_value(val) -> str:
+        try:
+            return val() if callable(val) else val
+        except Exception:
+            return ""
 
-    page.on("console", lambda msg: _safe_append(f"console.{msg.type}: {msg.text()}"))
+    page.on("console", lambda msg: _safe_append(f"console.{_get_value(msg.type)}: {_get_value(msg.text)}"))
     page.on("pageerror", lambda exc: _safe_append(f"pageerror: {exc}"))
     page.on(
         "requestfailed",
