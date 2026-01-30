@@ -20,6 +20,7 @@ DB_VACUUM = os.getenv('DB_VACUUM', 'false').strip().lower() in ('1', 'true', 'ye
 OLX_RETENTION_DAYS = int(os.getenv('OLX_RETENTION_DAYS', '0'))
 SHAFA_RETENTION_DAYS = int(os.getenv('SHAFA_RETENTION_DAYS', '0'))
 UPSCALE_IMAGES = os.getenv('UPSCALE_IMAGES', 'true').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+BLOCK_RESOURCES = os.getenv('BLOCK_RESOURCES', 'true' if IS_INSTANCE else 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 
 # Concurrency tuning (lower on instance to reduce CPU spikes)
 LYST_MAX_BROWSERS = int(os.getenv('LYST_MAX_BROWSERS', '3' if IS_INSTANCE else '6'))

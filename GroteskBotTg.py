@@ -445,8 +445,26 @@ async def save_shoe_data(data):
     await async_save_shoe_data(data)
 
 # Web scraping and browser functions
+BLOCKED_RESOURCE_TYPES = {"media", "font", "stylesheet"}
+BLOCKED_URL_PARTS = (
+    "googletagmanager.com",
+    "google-analytics.com",
+    "doubleclick.net",
+    "facebook.net",
+    "facebook.com/tr",
+    "hotjar.com",
+    "segment.io",
+    "mixpanel.com",
+    "optimizely.com",
+    "clarity.ms",
+    "sentry.io",
+    "newrelic.com",
+)
+
 async def handle_route(route):
-    if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
+    url = route.request.url
+    resource_type = route.request.resource_type
+    if resource_type in BLOCKED_RESOURCE_TYPES or any(part in url for part in BLOCKED_URL_PARTS):
         await route.abort()
     else:
         await route.continue_()
@@ -608,6 +626,10 @@ async def get_page_content(url, country, max_scroll_attempts=None, url_name=None
                 )
             except Exception:
                 pass
+            try:
+                await page.close()
+            except Exception:
+                pass
             raise
         except Exception as exc:
             reason = "target closed" if "Target page, context or browser has been closed" in str(exc) else f"exception: {exc}"
@@ -654,6 +676,8 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_na
                     suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
                 logger.error(f"LYST timeout fetching page content for {url}{suffix}")
                 mark_lyst_issue("page timeout")
+                if attempt < max_retries - 1:
+                    logger.info("LYST timeout: retrying with a fresh page/context")
                 content = None
             if not content:
                 mark_lyst_issue("Failed to get soup")
@@ -688,6 +712,8 @@ async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=
                     suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
                 logger.error(f"LYST timeout fetching page content for {url}{suffix}")
                 mark_lyst_issue("page timeout")
+                if attempt < max_retries - 1:
+                    logger.info("LYST timeout: retrying with a fresh page/context")
                 content = None
             if not content:
                 mark_lyst_issue("Failed to get soup")
