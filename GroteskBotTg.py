@@ -247,25 +247,51 @@ def process_image(image_url, uah_price, sale_percentage):
         else:
             width, height = img.size
 
+        price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
+        padding = 10
+        text_margin = max(16, int(width * 0.03))
+
+        # Choose base font size and adjust if needed for padded areas
         font_size = int(min(width, height) * 0.055)
         font = load_font(font_size)
-        draw = ImageDraw.Draw(img)
 
-        price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
-        price_bbox = draw.textbbox((0, 0), price_text, font=font)
-        sale_bbox = draw.textbbox((0, 0), sale_text, font=font)
-        text_height = max(price_bbox[3] - price_bbox[1], sale_bbox[3] - sale_bbox[1])
+        if width > height:
+            # Pad top/bottom to make a square canvas, keep padding proportional
+            pad_total = width - height
+            top_pad = pad_total // 2
+            bottom_pad = pad_total - top_pad
 
-        padding = 10
-        bottom_area = text_height + (padding * 2)
-        new_img = Image.new('RGBA', (width, height + bottom_area), (0, 0, 0, 0))
-        new_img.paste(img, (0, 0))
-        new_img.paste(Image.new('RGBA', (width, bottom_area), (0, 0, 0, 0)), (0, height))
+            # Ensure text fits within bottom padding by shrinking font if needed
+            while font_size > 10:
+                font = load_font(font_size)
+                dummy = Image.new('RGB', (width, width), (255, 255, 255))
+                d = ImageDraw.Draw(dummy)
+                price_bbox = d.textbbox((0, 0), price_text, font=font)
+                sale_bbox = d.textbbox((0, 0), sale_text, font=font)
+                text_height = max(price_bbox[3] - price_bbox[1], sale_bbox[3] - sale_bbox[1])
+                if text_height + (padding * 2) <= bottom_pad:
+                    break
+                font_size -= 2
 
-        draw = ImageDraw.Draw(new_img)
-        text_y = height + padding + (text_height // 2)
-        draw.text((60, text_y), price_text, font=font, fill=(22,22,24), anchor="lm")
-        draw.text((width - 60, text_y), sale_text, font=font, fill=(255,59,48), anchor="rm")
+            new_img = Image.new('RGB', (width, width), (255, 255, 255))
+            new_img.paste(img, (0, top_pad))
+            draw = ImageDraw.Draw(new_img)
+            text_y = top_pad + height + (bottom_pad // 2)
+            draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="lm")
+            draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rm")
+        else:
+            # Default: add a bottom bar for text
+            draw = ImageDraw.Draw(img)
+            price_bbox = draw.textbbox((0, 0), price_text, font=font)
+            sale_bbox = draw.textbbox((0, 0), sale_text, font=font)
+            text_height = max(price_bbox[3] - price_bbox[1], sale_bbox[3] - sale_bbox[1])
+            bottom_area = text_height + (padding * 2)
+            new_img = Image.new('RGB', (width, height + bottom_area), (255, 255, 255))
+            new_img.paste(img, (0, 0))
+            draw = ImageDraw.Draw(new_img)
+            text_y = height + padding + (text_height // 2)
+            draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="lm")
+            draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rm")
 
         img_byte_arr = io.BytesIO()
         if UPSCALE_IMAGES:
@@ -273,12 +299,7 @@ def process_image(image_url, uah_price, sale_percentage):
         else:
             # JPEG is smaller and avoids Telegram size limits for large images
             if new_img.mode != 'RGB':
-                white_bg = Image.new('RGB', new_img.size, (255, 255, 255))
-                if new_img.mode in ('RGBA', 'LA'):
-                    white_bg.paste(new_img, mask=new_img.split()[-1])
-                else:
-                    white_bg.paste(new_img)
-                new_img = white_bg
+                new_img = new_img.convert('RGB')
             new_img.save(img_byte_arr, format='JPEG', quality=85, optimize=True)
         img_byte_arr.seek(0)
         return img_byte_arr
