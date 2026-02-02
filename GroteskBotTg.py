@@ -1162,25 +1162,41 @@ def calculate_sale_percentage(original_price, sale_price, country):
         return 0
 
 def load_exchange_rates():
+    cached_rates = None
     try:
         with open(EXCHANGE_RATES_FILE, 'r') as f:
             data = json.load(f)
-        is_fresh = (datetime.now() - datetime.fromisoformat(data['last_update'])).days < 1
-        return data['rates'] if is_fresh else update_exchange_rates()
+        cached_rates = data.get('rates')
+        last_update = data.get('last_update')
+        is_fresh = bool(last_update) and (datetime.now() - datetime.fromisoformat(last_update)).days < 1
+        if is_fresh and cached_rates:
+            return cached_rates
     except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
-        return update_exchange_rates()
+        cached_rates = None
+    updated = update_exchange_rates()
+    if updated:
+        return updated
+    if cached_rates:
+        logger.warning("Using cached exchange rates due to update failure")
+        return cached_rates
+    return {'EUR': 1, 'USD': 1, 'GBP': 1}
 
 
 def update_exchange_rates():
     try:
-        resp = requests.get(f"https://v6.exchangerate-api.com/v6/{EXCHANGERATE_API_KEY}/latest/UAH").json()
-        rates = {k: resp['conversion_rates'][k] for k in ('EUR', 'USD', 'GBP')}
+        resp = requests.get(
+            f"https://v6.exchangerate-api.com/v6/{EXCHANGERATE_API_KEY}/latest/UAH",
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        rates = {k: payload['conversion_rates'][k] for k in ('EUR', 'USD', 'GBP')}
         with open(EXCHANGE_RATES_FILE, 'w') as f:
             json.dump({'last_update': datetime.now().isoformat(), 'rates': rates}, f)
         return rates
     except Exception as e:
         logger.error(f"Error updating exchange rates: {e}")
-        return {'EUR': 1, 'USD': 1, 'GBP': 1}
+        return None
 
 def convert_to_uah(price, country, exchange_rates, name):
     try:

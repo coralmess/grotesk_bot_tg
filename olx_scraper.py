@@ -21,7 +21,7 @@ _SEND_SEMAPHORE = asyncio.Semaphore(OLX_SEND_CONCURRENCY)
 _UPSCALE_SEMAPHORE = asyncio.Semaphore(OLX_UPSCALE_CONCURRENCY)
 _http_session: Optional[aiohttp.ClientSession] = None
 MIN_PRICE_DIFF = 50
-MIN_PRICE_DIFF_PERCENT = 12.0
+MIN_PRICE_DIFF_PERCENT = 20.0
 NO_LISTINGS_TEXT = "Ми знайшли 0 оголошень"
 
 def _get_http_session() -> aiohttp.ClientSession:

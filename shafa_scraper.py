@@ -42,7 +42,7 @@ _playwright_browser: Optional[Browser] = None
 _playwright_context: Optional[BrowserContext] = None
 _playwright_instance = None
 MIN_PRICE_DIFF = 50
-MIN_PRICE_DIFF_PERCENT = 12.0
+MIN_PRICE_DIFF_PERCENT = 20.0
 _PARSER = "lxml" if _LXML_AVAILABLE else "html.parser"
 
 if not _LXML_AVAILABLE:
@@ -524,6 +524,7 @@ async def run_shafa_scraper():
             new_count = 0
             send_tasks = []
             items_to_send = []
+            updates = []
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
                 if prev is None:
@@ -532,6 +533,10 @@ async def run_shafa_scraper():
                     send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it))
                     continue
                 previous_price = prev.get("price_int") or 0
+                if previous_price > 0 and it.price_int > previous_price:
+                    # Price increased: update DB but do not notify.
+                    updates.append((it, False))
+                    continue
                 price_diff = abs(it.price_int - previous_price)
                 percent_change = (price_diff / previous_price * 100.0) if previous_price > 0 else None
                 if price_diff < MIN_PRICE_DIFF or (percent_change is not None and percent_change < MIN_PRICE_DIFF_PERCENT):
@@ -540,10 +545,10 @@ async def run_shafa_scraper():
                 send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it))
             if send_tasks:
                 results = await asyncio.gather(*send_tasks, return_exceptions=True)
-                updates = []
                 for it, res in zip(items_to_send, results):
                     sent = False if isinstance(res, Exception) else bool(res)
                     updates.append((it, sent))
+            if updates:
                 await asyncio.to_thread(_db_upsert_items_sync, updates, source_name)
             total_new += new_count
         except aiohttp.ClientError as e:

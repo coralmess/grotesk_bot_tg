@@ -133,8 +133,17 @@ async def _ensure_status_message(bot: Bot, chat_id: int) -> int:
 def _format_status_text(start_ts: float) -> str:
     now = datetime.now(KYIV_TZ)
     uptime_sec = int(time.time() - start_ts)
-    hours = uptime_sec // 3600
-    minutes = (uptime_sec % 3600) // 60
+    if uptime_sec < 3600:
+        minutes = uptime_sec // 60
+        uptime_str = f"{minutes}m"
+    elif uptime_sec < 86400:
+        hours = uptime_sec // 3600
+        minutes = (uptime_sec % 3600) // 60
+        uptime_str = f"{hours}h {minutes}m"
+    else:
+        days = uptime_sec // 86400
+        hours = (uptime_sec % 86400) // 3600
+        uptime_str = f"{days}d {hours}h"
     olx_str = LAST_OLX_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_OLX_RUN_UTC else "never"
     shafa_str = LAST_SHAFA_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_SHAFA_RUN_UTC else "never"
     lyst_time = LAST_LYST_RUN_START_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_LYST_RUN_START_UTC else "never"
@@ -149,7 +158,7 @@ def _format_status_text(start_ts: float) -> str:
         lyst_note = " (running)"
     return (
         "✅ <b>Grotesk Bot OK</b>\n"
-        f"⏱ Uptime: {hours}h {minutes}m\n"
+        f"⏱ Uptime: {uptime_str}\n"
         f"🕒 Last update (Kyiv): {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"🧾 Last OLX run: {olx_str}\n"
         f"🧾 Last SHAFA run: {shafa_str}\n"
