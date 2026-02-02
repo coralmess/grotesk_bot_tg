@@ -15,6 +15,7 @@ LAST_RUNS_FILE = Path(__file__).with_name("last_runs.json")
 LAST_OLX_RUN_UTC = None
 LAST_SHAFA_RUN_UTC = None
 LAST_LYST_RUN_START_UTC = None
+LAST_LYST_RUN_END_UTC = None
 LAST_LYST_RUN_OK = None
 LAST_LYST_RUN_NOTE = ""
 LYST_RUN_HAD_ERRORS = False
@@ -23,7 +24,7 @@ _LYST_RUN_STARTED_THIS_CYCLE = False
 
 
 def load_last_runs_from_file():
-    global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC, LAST_LYST_RUN_START_UTC, LAST_LYST_RUN_OK, LAST_LYST_RUN_NOTE
+    global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC, LAST_LYST_RUN_START_UTC, LAST_LYST_RUN_END_UTC, LAST_LYST_RUN_OK, LAST_LYST_RUN_NOTE
     if not LAST_RUNS_FILE.exists():
         return
     try:
@@ -31,6 +32,7 @@ def load_last_runs_from_file():
         olx_raw = data.get("last_olx_run_utc")
         shafa_raw = data.get("last_shafa_run_utc")
         lyst_raw = data.get("last_lyst_run_start_utc")
+        lyst_end_raw = data.get("last_lyst_run_end_utc")
         lyst_ok = data.get("last_lyst_run_ok")
         lyst_note = data.get("last_lyst_run_note")
         if olx_raw:
@@ -39,6 +41,8 @@ def load_last_runs_from_file():
             LAST_SHAFA_RUN_UTC = datetime.fromisoformat(shafa_raw)
         if lyst_raw:
             LAST_LYST_RUN_START_UTC = datetime.fromisoformat(lyst_raw)
+        if lyst_end_raw:
+            LAST_LYST_RUN_END_UTC = datetime.fromisoformat(lyst_end_raw)
         if isinstance(lyst_ok, bool):
             LAST_LYST_RUN_OK = lyst_ok
         if isinstance(lyst_note, str):
@@ -53,6 +57,7 @@ def save_last_runs_to_file():
             "last_olx_run_utc": LAST_OLX_RUN_UTC.isoformat() if LAST_OLX_RUN_UTC else None,
             "last_shafa_run_utc": LAST_SHAFA_RUN_UTC.isoformat() if LAST_SHAFA_RUN_UTC else None,
             "last_lyst_run_start_utc": LAST_LYST_RUN_START_UTC.isoformat() if LAST_LYST_RUN_START_UTC else None,
+            "last_lyst_run_end_utc": LAST_LYST_RUN_END_UTC.isoformat() if LAST_LYST_RUN_END_UTC else None,
             "last_lyst_run_ok": LAST_LYST_RUN_OK,
             "last_lyst_run_note": LAST_LYST_RUN_NOTE,
         }
@@ -87,10 +92,11 @@ def begin_lyst_cycle():
 
 
 def mark_lyst_start():
-    global LAST_LYST_RUN_START_UTC, LAST_LYST_RUN_OK, _LYST_RUN_STARTED_THIS_CYCLE
+    global LAST_LYST_RUN_START_UTC, LAST_LYST_RUN_END_UTC, LAST_LYST_RUN_OK, _LYST_RUN_STARTED_THIS_CYCLE
     if _LYST_RUN_STARTED_THIS_CYCLE:
         return
     LAST_LYST_RUN_START_UTC = datetime.now(timezone.utc)
+    LAST_LYST_RUN_END_UTC = None
     LAST_LYST_RUN_OK = None
     _LYST_RUN_STARTED_THIS_CYCLE = True
     save_last_runs_to_file()
@@ -105,8 +111,9 @@ def mark_lyst_issue(note: str):
 
 
 def finalize_lyst_run():
-    global LAST_LYST_RUN_OK, LAST_LYST_RUN_NOTE, _LYST_RUN_STARTED_THIS_CYCLE
+    global LAST_LYST_RUN_OK, LAST_LYST_RUN_END_UTC, LAST_LYST_RUN_NOTE, _LYST_RUN_STARTED_THIS_CYCLE
     LAST_LYST_RUN_OK = not LYST_RUN_HAD_ERRORS
+    LAST_LYST_RUN_END_UTC = datetime.now(timezone.utc)
     if not LAST_LYST_RUN_OK and LYST_RUN_NOTES:
         LAST_LYST_RUN_NOTE = "; ".join(sorted(set(LYST_RUN_NOTES)))
     _LYST_RUN_STARTED_THIS_CYCLE = False
@@ -130,7 +137,7 @@ async def _ensure_status_message(bot: Bot, chat_id: int) -> int:
     return msg.message_id
 
 
-def _format_status_text(start_ts: float) -> str:
+def _format_status_text(start_ts: float, *, lyst_stale_after_sec: int | None = None) -> str:
     now = datetime.now(KYIV_TZ)
     uptime_sec = int(time.time() - start_ts)
     if uptime_sec < 3600:
@@ -146,10 +153,27 @@ def _format_status_text(start_ts: float) -> str:
         uptime_str = f"{days}d {hours}h"
     olx_str = LAST_OLX_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_OLX_RUN_UTC else "never"
     shafa_str = LAST_SHAFA_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_SHAFA_RUN_UTC else "never"
-    lyst_time = LAST_LYST_RUN_START_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_LYST_RUN_START_UTC else "never"
-    if LAST_LYST_RUN_OK is True:
+
+    lyst_time = "never"
+    if LAST_LYST_RUN_OK is None and LAST_LYST_RUN_START_UTC:
+        lyst_time = LAST_LYST_RUN_START_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+    elif LAST_LYST_RUN_END_UTC:
+        lyst_time = LAST_LYST_RUN_END_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+    elif LAST_LYST_RUN_START_UTC:
+        lyst_time = LAST_LYST_RUN_START_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+    lyst_stale = False
+    if lyst_stale_after_sec and LAST_LYST_RUN_OK is True and LAST_LYST_RUN_END_UTC:
+        age_sec = (datetime.now(timezone.utc) - LAST_LYST_RUN_END_UTC).total_seconds()
+        if age_sec > lyst_stale_after_sec:
+            lyst_stale = True
+
+    if LAST_LYST_RUN_OK is True and not lyst_stale:
         lyst_icon = "🟢"
         lyst_note = f" ({LAST_LYST_RUN_NOTE})" if LAST_LYST_RUN_NOTE else ""
+    elif LAST_LYST_RUN_OK is True and lyst_stale:
+        lyst_icon = "🟡"
+        lyst_note = " (stale)"
     elif LAST_LYST_RUN_OK is False:
         lyst_icon = "🔴"
         lyst_note = f" ({LAST_LYST_RUN_NOTE})" if LAST_LYST_RUN_NOTE else " (Unknown error)"
@@ -166,14 +190,14 @@ def _format_status_text(start_ts: float) -> str:
     )
 
 
-async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600):
+async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600, *, lyst_stale_after_sec: int | None = None):
     if not bot_token or not chat_id:
         return
     bot = Bot(token=bot_token)
     start_ts = time.time()
     message_id = await _ensure_status_message(bot, chat_id)
     while True:
-        text = _format_status_text(start_ts)
+        text = _format_status_text(start_ts, lyst_stale_after_sec=lyst_stale_after_sec)
         try:
             await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=ParseMode.HTML)
         except Exception:

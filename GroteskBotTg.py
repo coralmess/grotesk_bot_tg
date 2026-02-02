@@ -478,10 +478,25 @@ def _upscale_with_edsr(pil_img: Image.Image) -> Image.Image:
     up_rgb = cv2.cvtColor(up_bgr, cv2.COLOR_BGR2RGB)
     return Image.fromarray(up_rgb)
 
+def _fetch_image_bytes(image_url: str) -> bytes:
+    last_exc = None
+    for url in _image_url_candidates(image_url):
+        try:
+            resp = requests.get(url, timeout=30)
+            if not resp.ok or not resp.content:
+                last_exc = RuntimeError(f"Image HTTP {resp.status_code} for {url}")
+                continue
+            return resp.content
+        except Exception as exc:
+            last_exc = exc
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("No image candidates available")
+
 def process_image(image_url, uah_price, sale_percentage):
-    response = requests.get(image_url)
+    response_bytes = _fetch_image_bytes(image_url)
     try:
-        img = Image.open(io.BytesIO(response.content))
+        img = Image.open(io.BytesIO(response_bytes))
         # If upscaling is disabled, downscale large sources to keep file size under Telegram limit
         if not UPSCALE_IMAGES:
             max_edge = 1280
@@ -490,7 +505,9 @@ def process_image(image_url, uah_price, sale_percentage):
             if scale < 1.0:
                 new_size = (int(w * scale), int(h * scale))
                 img = img.resize(new_size, Image.LANCZOS)
-        if UPSCALE_IMAGES:
+        width, height = img.size
+        should_upscale = UPSCALE_IMAGES and max(width, height) < 720
+        if should_upscale:
             if UPSCALE_METHOD == "edsr":
                 try:
                     img = _upscale_with_edsr(img)
@@ -502,8 +519,6 @@ def process_image(image_url, uah_price, sale_percentage):
             else:
                 width, height = [dim * 2 for dim in img.size]
                 img = img.resize((width, height), Image.LANCZOS)
-        else:
-            width, height = img.size
 
         price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
         padding = max(12, int(width * 0.03))
@@ -1344,20 +1359,44 @@ def _parse_price_amount(raw: str) -> float:
     except ValueError:
         return 0.0
 
+def _normalize_image_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    url = url.strip()
+    if url.startswith("//"):
+        return f"https:{url}"
+    return url
+
 def _pick_src_from_srcset(srcset_value):
     if not srcset_value:
         return None
-    candidates = []
+    best_url = None
+    best_score = -1.0
     for part in srcset_value.split(','):
         part = part.strip()
         if not part:
             continue
-        url = part.split(' ')[0].strip()
-        if url:
-            candidates.append(url)
-    for url in candidates:
-        if url.startswith(("http://", "https://")):
-            return url
+        tokens = part.split()
+        url = tokens[0].strip() if tokens else ""
+        score = 0.0
+        if len(tokens) > 1:
+            desc = tokens[1].strip().lower()
+            if desc.endswith("w"):
+                try:
+                    score = float(desc[:-1])
+                except Exception:
+                    score = 0.0
+            elif desc.endswith("x"):
+                try:
+                    score = float(desc[:-1]) * 1000.0
+                except Exception:
+                    score = 0.0
+        if score >= best_score:
+            best_score = score
+            best_url = url
+    best_url = _normalize_image_url(best_url)
+    if best_url and best_url.startswith(("http://", "https://")):
+        return best_url
     return None
 
 def _extract_image_url_from_tag(tag):
@@ -1372,9 +1411,36 @@ def _extract_image_url_from_tag(tag):
         _pick_src_from_srcset(tag.get('data-lazy-srcset')),
     ]
     for url in candidates:
+        url = _normalize_image_url(url)
         if url and url.startswith(("http://", "https://")):
             return url
     return None
+
+def _upgrade_lyst_image_url(url: str | None) -> str | None:
+    if not url:
+        return url
+    url = _normalize_image_url(url)
+    if not url or not url.startswith(("http://", "https://")):
+        return url
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except Exception:
+        return url
+    host = parsed.netloc.lower()
+    if "lystit.com" not in host:
+        return url
+    path = parsed.path
+    new_path = re.sub(r"^/\d+/\d+/(?:tr/)?photos/", "/photos/", path)
+    if new_path != path:
+        return parsed._replace(path=new_path).geturl()
+    return url
+
+def _image_url_candidates(url: str | None) -> list[str]:
+    url = _normalize_image_url(url)
+    upgraded = _upgrade_lyst_image_url(url)
+    if upgraded and url and upgraded != url:
+        return [upgraded, url]
+    return [url] if url else []
 
 def _dedupe_preserve(items):
     seen = set()
@@ -1427,6 +1493,7 @@ def extract_ldjson_image_map(soup):
             if isinstance(images, str):
                 images = [images]
             image_url = images[0] if images else None
+            image_url = _upgrade_lyst_image_url(image_url)
             if url and image_url:
                 image_map[url] = image_url
                 if url.startswith("https://www.lyst.com"):
@@ -1577,6 +1644,7 @@ def extract_shoe_data(card, country, image_fallback_map=None):
                 image_url = image_fallback_map.get(full_url)
             elif href and href in image_fallback_map:
                 image_url = image_fallback_map.get(href)
+        image_url = _upgrade_lyst_image_url(image_url)
         # Ignore inline data URLs or non-external image sources
         if not image_url or not image_url.startswith(("http://", "https://")):
             if unique_id:
@@ -1865,7 +1933,8 @@ async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah
                     img_byte_arr = process_image(image_url, uah_price, sale_percentage)
                     await bot.send_photo(chat_id=chat_id, photo=img_byte_arr, caption=message, parse_mode='HTML')
                 else:
-                    await bot.send_photo(chat_id=chat_id, photo=image_url, caption=message, parse_mode='HTML')
+                    best_url = _upgrade_lyst_image_url(image_url) or image_url
+                    await bot.send_photo(chat_id=chat_id, photo=best_url, caption=message, parse_mode='HTML')
             else:
                 await bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
             return True
@@ -2245,7 +2314,15 @@ async def main():
     except Exception:
         chat_id = None
     if chat_id:
-        asyncio.create_task(status_heartbeat(TELEGRAM_BOT_TOKEN, chat_id, interval_s=600))
+        lyst_stale_after_sec = max(0, CHECK_INTERVAL_SEC + CHECK_JITTER_SEC + 600)
+        asyncio.create_task(
+            status_heartbeat(
+                TELEGRAM_BOT_TOKEN,
+                chat_id,
+                interval_s=600,
+                lyst_stale_after_sec=lyst_stale_after_sec,
+            )
+        )
     if MAINTENANCE_INTERVAL_SEC > 0:
         asyncio.create_task(maintenance_loop(MAINTENANCE_INTERVAL_SEC))
     terminal_width = shutil.get_terminal_size().columns
@@ -2307,6 +2384,15 @@ async def main():
             raise
 
     try:
+        async def _on_lyst_stall():
+            mark_lyst_issue("stalled")
+            try:
+                await mark_lyst_run_failed("stalled")
+            except Exception as exc:
+                logger.warning(f"Failed to persist Lyst stall state: {exc}")
+            log_lyst_run_progress_summary()
+            finalize_lyst_run()
+
         await run_scheduler(
             run_olx=_run_olx_and_mark,
             run_shafa=_run_shafa_and_mark,
@@ -2318,6 +2404,7 @@ async def main():
             logger=logger,
             last_olx_run_exists=LAST_OLX_RUN_UTC is not None,
             last_shafa_run_exists=LAST_SHAFA_RUN_UTC is not None,
+            on_lyst_stall=_on_lyst_stall,
             olx_timeout_sec=OLX_TIMEOUT_SEC,
             shafa_timeout_sec=SHAFA_TIMEOUT_SEC,
             lyst_stall_timeout_sec=LYST_STALL_TIMEOUT_SEC,

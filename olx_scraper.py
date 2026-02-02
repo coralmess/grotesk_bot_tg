@@ -307,13 +307,15 @@ async def fetch_first_image_best(item_url: str) -> Optional[str]:
         return None
 
 
-def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048) -> Optional[bytes]:
+def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048, min_upscale_dim: int = 720) -> Optional[bytes]:
     """Synchronous image upscaling (called via thread pool)."""
     try:
         im = Image.open(io.BytesIO(img_bytes))
         if im.mode not in ("RGB", "L"):
             im = im.convert("RGB")
         w, h = im.size
+        if max(w, h) >= min_upscale_dim:
+            return None
         new_w, new_h = int(w * scale), int(h * scale)
         longer = max(new_w, new_h)
         if longer > max_dim:
@@ -330,10 +332,10 @@ def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int
         logger.error(f"🖼️  Image upscaling failed: {e}")
         return None
 
-async def _upscale_image_bytes(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048) -> Optional[bytes]:
+async def _upscale_image_bytes(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048, min_upscale_dim: int = 720) -> Optional[bytes]:
     """Async wrapper for image upscaling."""
     async with _UPSCALE_SEMAPHORE:
-        return await asyncio.to_thread(_upscale_image_bytes_sync, img_bytes, scale, max_dim)
+        return await asyncio.to_thread(_upscale_image_bytes_sync, img_bytes, scale, max_dim, min_upscale_dim)
 
 
 @async_retry(max_retries=3, backoff_base=1.0)

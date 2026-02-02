@@ -31,6 +31,7 @@ async def run_scheduler(
     logger,
     last_olx_run_exists,
     last_shafa_run_exists,
+    on_lyst_stall=None,
     olx_timeout_sec=1800,
     shafa_timeout_sec=1800,
     lyst_stall_timeout_sec=1800,
@@ -74,6 +75,13 @@ async def run_scheduler(
                 progress_ts = get_lyst_progress_ts()
                 if progress_ts and (time.time() - progress_ts) > lyst_stall_timeout_sec:
                     logger.error("Lyst task stalled; cancelling")
+                    if on_lyst_stall is not None:
+                        try:
+                            result = on_lyst_stall()
+                            if asyncio.iscoroutine(result):
+                                await result
+                        except Exception as exc:
+                            logger.warning(f"on_lyst_stall handler failed: {exc}")
                     lyst_task.cancel()
                     next_lyst_ts = time.time() + _sleep_interval_with_jitter(check_interval_sec, check_jitter_sec)
 
