@@ -22,6 +22,7 @@ SHAFA_RETENTION_DAYS = int(os.getenv('SHAFA_RETENTION_DAYS', '0'))
 UPSCALE_IMAGES = os.getenv('UPSCALE_IMAGES', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 BLOCK_RESOURCES = os.getenv('BLOCK_RESOURCES', 'true' if IS_INSTANCE else 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 LYST_HTTP_ONLY = os.getenv('LYST_HTTP_ONLY', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+LYST_HTTP_TIMEOUT_SEC = float(os.getenv('LYST_HTTP_TIMEOUT_SEC', '45'))
 
 # Concurrency tuning (lower on instance to reduce CPU spikes)
 LYST_MAX_BROWSERS = int(os.getenv('LYST_MAX_BROWSERS', '2' if IS_INSTANCE else '6'))

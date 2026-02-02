@@ -20,7 +20,7 @@ from GroteskBotStatus import (
     mark_lyst_issue,
     finalize_lyst_run,
 )
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, LYST_HTTP_ONLY
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -105,6 +105,7 @@ def build_lyst_context_lines(*, attempt=None, max_retries=None, max_scroll_attem
         f"image_extra_scrolls: {LYST_IMAGE_EXTRA_SCROLLS}",
         f"image_settle_passes: {LYST_IMAGE_SETTLE_PASSES}",
         f"lyst_http_only: {LYST_HTTP_ONLY}",
+        f"lyst_http_timeout_sec: {LYST_HTTP_TIMEOUT_SEC}",
         f"lyst_page_timeout_sec: {LYST_PAGE_TIMEOUT_SEC}",
         f"lyst_url_timeout_sec: {LYST_URL_TIMEOUT_SEC}",
         f"lyst_stall_timeout_sec: {LYST_STALL_TIMEOUT_SEC}",
@@ -688,7 +689,7 @@ def _fetch_lyst_http_content(url: str, country: str):
             session.cookies.set("country", country, domain=".lyst.com", path="/")
         except Exception:
             session.cookies.set("country", country)
-        resp = session.get(url, timeout=30)
+        resp = session.get(url, timeout=LYST_HTTP_TIMEOUT_SEC)
         return resp.status_code, resp.text
 
 async def get_page_content_http(
@@ -709,31 +710,53 @@ async def get_page_content_http(
         use_pagination=use_pagination,
     )
     context_lines.append("http_only: true")
-    status_code, content = await asyncio.to_thread(_fetch_lyst_http_content, url, country)
-    context_lines.append(f"http_status: {status_code}")
-    if is_cloudflare_challenge(content):
-        now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
-        log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+    http_attempt = 0
+    last_exc = None
+    while True:
+        http_attempt += 1
+        context_lines.append(f"http_attempt: {http_attempt}")
         try:
-            await dump_lyst_debug_event(
-                "lyst_cloudflare",
-                reason="Cloudflare challenge",
-                url=url,
-                country=country,
-                url_name=url_name,
-                page_num=page_num,
-                step="http",
-                content=content,
-                now_kyiv=now_kyiv,
-                log_lines=log_lines,
-                context_lines=context_lines,
-            )
-        except Exception:
-            pass
-        raise LystCloudflareChallenge()
-    if status_code >= 400:
-        raise RuntimeError(f"http_only_status_{status_code}")
-    return content
+            status_code, content = await asyncio.to_thread(_fetch_lyst_http_content, url, country)
+        except Exception as exc:
+            status_code, content = None, ""
+            last_exc = exc
+        context_lines.append(f"http_status: {status_code if status_code is not None else 'error'}")
+        if status_code is None:
+            if http_attempt <= 2:
+                await asyncio.sleep(2)
+                continue
+            raise RuntimeError(f"http_only_exception: {last_exc}")
+        if is_cloudflare_challenge(content):
+            now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+            try:
+                await dump_lyst_debug_event(
+                    "lyst_cloudflare",
+                    reason="Cloudflare challenge",
+                    url=url,
+                    country=country,
+                    url_name=url_name,
+                    page_num=page_num,
+                    step="http",
+                    content=content,
+                    now_kyiv=now_kyiv,
+                    log_lines=log_lines,
+                    context_lines=context_lines,
+                )
+            except Exception:
+                pass
+            raise LystCloudflareChallenge()
+        if not content.strip():
+            if http_attempt <= 2:
+                await asyncio.sleep(2)
+                continue
+            raise RuntimeError("http_only_empty_content")
+        if status_code >= 400:
+            if status_code in (408, 429, 500, 502, 503, 504) and http_attempt <= 2:
+                await asyncio.sleep(2)
+                continue
+            raise RuntimeError(f"http_only_status_{status_code}")
+        return content
 
 async def count_product_images_ready(page):
     return await page.evaluate("""
