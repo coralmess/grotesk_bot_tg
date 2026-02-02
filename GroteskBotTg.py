@@ -1,4 +1,4 @@
-import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3
+import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, threading
 from pathlib import Path
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple, deque
@@ -20,7 +20,7 @@ from GroteskBotStatus import (
     mark_lyst_issue,
     finalize_lyst_run,
 )
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -42,6 +42,14 @@ from asyncio import Semaphore
 import aiosqlite
 from olx_scraper import run_olx_scraper
 from shafa_scraper import run_shafa_scraper
+try:
+    import cv2
+except Exception:
+    cv2 = None
+try:
+    import numpy as np
+except Exception:
+    np = None
 
 # Basic anti-bot headers & stealth tweaks (best-effort for Cloudflare)
 STEALTH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -83,6 +91,11 @@ LYST_IMAGE_STRATEGY = "adaptive"  # "adaptive" or "settle"
 LYST_IMAGE_READY_TARGET = 0.6
 LYST_IMAGE_EXTRA_SCROLLS = 4
 LYST_IMAGE_SETTLE_PASSES = 2
+
+EDSR_MODEL_URL = "https://github.com/Saafke/EDSR_Tensorflow/raw/master/models/EDSR_x2.pb"
+EDSR_MODEL_PATH = Path(__file__).with_name("upscale_weights") / "EDSR_x2.pb"
+_EDSR_LOCK = threading.Lock()
+_EDSR_SUPERRES = None
 
 class LystCloudflareChallenge(Exception):
     pass
@@ -422,6 +435,49 @@ def load_font(font_size, prefer_heavy=False):
             continue
     return ImageFont.load_default()
 
+def _ensure_edsr_weights():
+    if EDSR_MODEL_PATH.exists():
+        return True
+    try:
+        EDSR_MODEL_PATH.parent.mkdir(exist_ok=True)
+        resp = requests.get(EDSR_MODEL_URL, stream=True, timeout=60)
+        if resp.status_code != 200:
+            logger.warning(f"EDSR weights download failed: HTTP {resp.status_code}")
+            return False
+        with open(EDSR_MODEL_PATH, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                if chunk:
+                    f.write(chunk)
+        return True
+    except Exception as exc:
+        logger.warning(f"EDSR weights download failed: {exc}")
+        return False
+
+def _get_edsr_superres():
+    global _EDSR_SUPERRES
+    if _EDSR_SUPERRES is not None:
+        return _EDSR_SUPERRES
+    if cv2 is None or not hasattr(cv2, "dnn_superres"):
+        raise RuntimeError("opencv-contrib (dnn_superres) not available")
+    if not _ensure_edsr_weights():
+        raise RuntimeError("EDSR weights unavailable")
+    sr = cv2.dnn_superres.DnnSuperResImpl_create()
+    sr.readModel(str(EDSR_MODEL_PATH))
+    sr.setModel("edsr", 2)
+    _EDSR_SUPERRES = sr
+    return _EDSR_SUPERRES
+
+def _upscale_with_edsr(pil_img: Image.Image) -> Image.Image:
+    if cv2 is None or np is None:
+        raise RuntimeError("opencv/numpy not available for EDSR")
+    sr = _get_edsr_superres()
+    img_rgb = np.array(pil_img.convert("RGB"))
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    with _EDSR_LOCK:
+        up_bgr = sr.upsample(img_bgr)
+    up_rgb = cv2.cvtColor(up_bgr, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(up_rgb)
+
 def process_image(image_url, uah_price, sale_percentage):
     response = requests.get(image_url)
     try:
@@ -435,8 +491,17 @@ def process_image(image_url, uah_price, sale_percentage):
                 new_size = (int(w * scale), int(h * scale))
                 img = img.resize(new_size, Image.LANCZOS)
         if UPSCALE_IMAGES:
-            width, height = [dim * 2 for dim in img.size]
-            img = img.resize((width, height), Image.LANCZOS)
+            if UPSCALE_METHOD == "edsr":
+                try:
+                    img = _upscale_with_edsr(img)
+                    width, height = img.size
+                except Exception as exc:
+                    logger.warning(f"EDSR upscale failed, falling back to LANCZOS: {exc}")
+                    width, height = [dim * 2 for dim in img.size]
+                    img = img.resize((width, height), Image.LANCZOS)
+            else:
+                width, height = [dim * 2 for dim in img.size]
+                img = img.resize((width, height), Image.LANCZOS)
         else:
             width, height = img.size
 
