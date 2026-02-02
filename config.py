@@ -23,8 +23,8 @@ UPSCALE_IMAGES = os.getenv('UPSCALE_IMAGES', 'true').strip().lower() in ('1', 't
 BLOCK_RESOURCES = os.getenv('BLOCK_RESOURCES', 'true' if IS_INSTANCE else 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 
 # Concurrency tuning (lower on instance to reduce CPU spikes)
-LYST_MAX_BROWSERS = int(os.getenv('LYST_MAX_BROWSERS', '3' if IS_INSTANCE else '6'))
-LYST_SHOE_CONCURRENCY = int(os.getenv('LYST_SHOE_CONCURRENCY', '4' if IS_INSTANCE else '9'))
+LYST_MAX_BROWSERS = int(os.getenv('LYST_MAX_BROWSERS', '2' if IS_INSTANCE else '6'))
+LYST_SHOE_CONCURRENCY = int(os.getenv('LYST_SHOE_CONCURRENCY', '3' if IS_INSTANCE else '9'))
 
 OLX_TASK_CONCURRENCY = int(os.getenv('OLX_TASK_CONCURRENCY', '2' if IS_INSTANCE else '3'))
 OLX_HTTP_HTML_CONCURRENCY = int(os.getenv('OLX_HTTP_HTML_CONCURRENCY', '6' if IS_INSTANCE else '10'))

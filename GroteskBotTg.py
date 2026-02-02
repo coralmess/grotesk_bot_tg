@@ -83,6 +83,26 @@ LYST_IMAGE_READY_TARGET = 0.6
 LYST_IMAGE_EXTRA_SCROLLS = 4
 LYST_IMAGE_SETTLE_PASSES = 2
 
+def build_lyst_context_lines(*, attempt=None, max_retries=None, max_scroll_attempts=None, use_pagination=None):
+    lines = [
+        f"attempt: {attempt}/{max_retries}" if attempt is not None and max_retries is not None else "attempt: ",
+        f"block_resources: {BLOCK_RESOURCES}",
+        f"page_scrape: {PAGE_SCRAPE}",
+        f"use_pagination: {use_pagination if use_pagination is not None else ''}",
+        f"max_scroll_attempts: {max_scroll_attempts if max_scroll_attempts is not None else ''}",
+        f"image_strategy: {LYST_IMAGE_STRATEGY}",
+        f"image_ready_target: {LYST_IMAGE_READY_TARGET}",
+        f"image_extra_scrolls: {LYST_IMAGE_EXTRA_SCROLLS}",
+        f"image_settle_passes: {LYST_IMAGE_SETTLE_PASSES}",
+        f"lyst_page_timeout_sec: {LYST_PAGE_TIMEOUT_SEC}",
+        f"lyst_url_timeout_sec: {LYST_URL_TIMEOUT_SEC}",
+        f"lyst_stall_timeout_sec: {LYST_STALL_TIMEOUT_SEC}",
+        f"lyst_max_browsers: {LYST_MAX_BROWSERS}",
+        f"lyst_shoe_concurrency: {LYST_SHOE_CONCURRENCY}",
+        f"live_mode: {LIVE_MODE}",
+    ]
+    return lines
+
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
 SALE_EMOJI_ROCKET_THRESHOLD, SALE_EMOJI_UAH_THRESHOLD = 75, 2600
@@ -552,7 +572,25 @@ async def scroll_page(page, max_attempts=None):
             await page.evaluate(f"window.scrollBy(0, {SCROLL_STEP})")
             await asyncio.sleep(SCROLL_PAUSE_TIME)
 
-async def get_page_content(url, country, max_scroll_attempts=None, url_name=None, page_num=None):
+def is_target_closed_error(exc: Exception) -> bool:
+    try:
+        if exc.__class__.__name__ == "TargetClosedError":
+            return True
+    except Exception:
+        pass
+    msg = str(exc)
+    return "Target page, context or browser has been closed" in msg or "TargetClosedError" in msg
+
+async def get_page_content(
+    url,
+    country,
+    max_scroll_attempts=None,
+    url_name=None,
+    page_num=None,
+    attempt=None,
+    max_retries=None,
+    use_pagination=None,
+):
     async with (await browser_pool.get_browser()) as browser:
         context = await browser.new_context(
             user_agent=STEALTH_UA,
@@ -568,13 +606,26 @@ async def get_page_content(url, country, max_scroll_attempts=None, url_name=None
         if BLOCK_RESOURCES:
             await page.route("**/*", handle_route)
         step = "goto"
+        context_lines = build_lyst_context_lines(
+            attempt=attempt,
+            max_retries=max_retries,
+            max_scroll_attempts=max_scroll_attempts,
+            use_pagination=use_pagination,
+        )
         try:
             logger.info(f"LYST step=goto url={url}")
-            await page.goto(
+            response = await page.goto(
                 url,
                 wait_until="domcontentloaded",
                 timeout=int(LYST_PAGE_TIMEOUT_SEC * 1000),
             )
+            try:
+                if response is not None:
+                    context_lines.append(f"goto_status: {response.status}")
+                else:
+                    context_lines.append("goto_status: ")
+            except Exception:
+                pass
             if max_scroll_attempts is not None and max_scroll_attempts <= 0:
                 step = "scroll_skip"
                 logger.info(f"LYST step=scroll_skip url={url}")
@@ -621,6 +672,7 @@ async def get_page_content(url, country, max_scroll_attempts=None, url_name=None
                         now_kyiv=now_kyiv,
                         log_lines=log_lines,
                         extra_lines=debug_events,
+                        context_lines=context_lines,
                         final_url=final_url,
                     )
                 )
@@ -642,6 +694,9 @@ async def get_page_content(url, country, max_scroll_attempts=None, url_name=None
             except Exception:
                 final_url = None
             try:
+                context_lines = list(context_lines)
+                context_lines.append(f"exception_type: {exc.__class__.__name__}")
+                context_lines.append(f"exception_message: {exc}")
                 await dump_lyst_debug_event(
                     prefix,
                     reason=reason,
@@ -655,6 +710,7 @@ async def get_page_content(url, country, max_scroll_attempts=None, url_name=None
                     log_lines=log_lines,
                     extra_lines=debug_events,
                     final_url=final_url,
+                    context_lines=context_lines,
                 )
             except Exception:
                 pass
@@ -663,11 +719,21 @@ async def get_page_content(url, country, max_scroll_attempts=None, url_name=None
             await context.close()
 
 async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None):
-    for attempt in range(max_retries):
+    attempt = 0
+    target_closed_retry_used = False
+    while attempt < max_retries:
         try:
             try:
                 content = await asyncio.wait_for(
-                    get_page_content(url, country, max_scroll_attempts, url_name=url_name, page_num=page_num),
+                    get_page_content(
+                        url,
+                        country,
+                        max_scroll_attempts,
+                        url_name=url_name,
+                        page_num=page_num,
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                    ),
                     timeout=LYST_PAGE_TIMEOUT_SEC,
                 )
             except asyncio.TimeoutError:
@@ -683,6 +749,7 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_na
                 mark_lyst_issue("Failed to get soup")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(5)
+                    attempt += 1
                     continue
                 return None
             try:
@@ -690,20 +757,40 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_na
             except Exception:
                 return BeautifulSoup(content, 'html.parser')
         except Exception as e:
-            if attempt < max_retries - 1:
-                logger.warning(f"Failed to get soup (attempt {attempt + 1}/{max_retries}). Retrying...")
+            suffix = ""
+            if url_name or page_num is not None:
+                suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+            if is_target_closed_error(e) and not target_closed_retry_used:
+                target_closed_retry_used = True
+                mark_lyst_issue("TargetClosedError")
+                logger.warning(f"LYST TargetClosedError: retrying with a fresh page/context for {url}{suffix}")
+                await asyncio.sleep(3)
+                continue
+            attempt += 1
+            if attempt < max_retries:
+                logger.warning(f"Failed to get soup (attempt {attempt}/{max_retries}). Retrying...")
                 await asyncio.sleep(5)
             else:
-                logger.error(f"Failed to get soup for {url}")
+                logger.error(f"Failed to get soup for {url}{suffix}")
                 mark_lyst_issue("Failed to get soup")
                 raise
 
 async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None):
-    for attempt in range(max_retries):
+    attempt = 0
+    target_closed_retry_used = False
+    while attempt < max_retries:
         try:
             try:
                 content = await asyncio.wait_for(
-                    get_page_content(url, country, max_scroll_attempts, url_name=url_name, page_num=page_num),
+                    get_page_content(
+                        url,
+                        country,
+                        max_scroll_attempts,
+                        url_name=url_name,
+                        page_num=page_num,
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                    ),
                     timeout=LYST_PAGE_TIMEOUT_SEC,
                 )
             except asyncio.TimeoutError:
@@ -719,18 +806,29 @@ async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=
                 mark_lyst_issue("Failed to get soup")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(5)
+                    attempt += 1
                     continue
                 return None, None
             try:
                 return BeautifulSoup(content, 'lxml'), content
             except Exception:
                 return BeautifulSoup(content, 'html.parser'), content
-        except Exception:
-            if attempt < max_retries - 1:
-                logger.warning(f"Failed to get soup (attempt {attempt + 1}/{max_retries}). Retrying...")
+        except Exception as e:
+            suffix = ""
+            if url_name or page_num is not None:
+                suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+            if is_target_closed_error(e) and not target_closed_retry_used:
+                target_closed_retry_used = True
+                mark_lyst_issue("TargetClosedError")
+                logger.warning(f"LYST TargetClosedError: retrying with a fresh page/context for {url}{suffix}")
+                await asyncio.sleep(3)
+                continue
+            attempt += 1
+            if attempt < max_retries:
+                logger.warning(f"Failed to get soup (attempt {attempt}/{max_retries}). Retrying...")
                 await asyncio.sleep(5)
             else:
-                logger.error(f"Failed to get soup for {url}")
+                logger.error(f"Failed to get soup for {url}{suffix}")
                 mark_lyst_issue("Failed to get soup")
                 return None, None
 
@@ -1123,6 +1221,10 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
                 mark_lyst_issue("Stopped too early")
                 now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
                 log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+                context_lines = build_lyst_context_lines(
+                    max_scroll_attempts=max_scroll_attempts,
+                    use_pagination=use_pagination,
+                )
                 write_stop_too_early_dump(
                     reason="Stopped too early",
                     url=url,
@@ -1132,6 +1234,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
                     content=content,
                     now_kyiv=now_kyiv,
                     log_lines=log_lines,
+                    context_lines=context_lines,
                 )
                 if use_pagination == PAGE_SCRAPE:
                     logger.info(f"Retrying {base_url['url_name']} for {country} with PAGE_SCRAPE={not use_pagination}")

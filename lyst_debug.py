@@ -9,6 +9,8 @@ def attach_lyst_debug_listeners(page, collector: list[str]) -> None:
     def _safe_append(line: str) -> None:
         if line:
             collector.append(line)
+            if len(collector) > 200:
+                del collector[: len(collector) - 200]
     def _get_value(val) -> str:
         try:
             return val() if callable(val) else val
@@ -20,6 +22,22 @@ def attach_lyst_debug_listeners(page, collector: list[str]) -> None:
     page.on(
         "requestfailed",
         lambda req: _safe_append(f"requestfailed: {req.method} {req.url} {req.failure}"),
+    )
+    page.on(
+        "request",
+        lambda req: _safe_append(
+            f"request: {req.method} {req.url} type={req.resource_type}"
+        )
+        if req.resource_type == "document"
+        else None,
+    )
+    page.on(
+        "response",
+        lambda resp: _safe_append(
+            f"response: {resp.status} {resp.url} type={resp.request.resource_type}"
+        )
+        if resp.status >= 400 or resp.request.resource_type == "document"
+        else None,
     )
 
 
@@ -35,6 +53,7 @@ def build_lyst_debug_meta(
     now_kyiv: Optional[str] = None,
     log_lines: Optional[Iterable[str]] = None,
     extra_lines: Optional[Iterable[str]] = None,
+    context_lines: Optional[Iterable[str]] = None,
 ) -> list[str]:
     now_val = now_kyiv or datetime.now().isoformat(sep=" ", timespec="seconds")
     lines = [
@@ -47,6 +66,8 @@ def build_lyst_debug_meta(
         f"url: {url}",
         f"final_url: {final_url or ''}",
     ]
+    if context_lines:
+        lines.extend(["", "context:", *context_lines])
     if extra_lines:
         lines.extend(["", "page_debug_events:", *extra_lines])
     if log_lines:
@@ -126,6 +147,7 @@ async def dump_lyst_debug_event(
     log_lines: Optional[Iterable[str]] = None,
     extra_lines: Optional[Iterable[str]] = None,
     final_url: Optional[str] = None,
+    context_lines: Optional[Iterable[str]] = None,
     base_dir: Optional[Path] = None,
     take_screenshot: bool = True,
 ) -> None:
@@ -140,6 +162,7 @@ async def dump_lyst_debug_event(
         now_kyiv=now_kyiv,
         log_lines=log_lines,
         extra_lines=extra_lines,
+        context_lines=context_lines,
     )
     await dump_lyst_debug(
         prefix,
@@ -162,6 +185,7 @@ def write_stop_too_early_dump(
     content: Optional[str],
     now_kyiv: str,
     log_lines: Iterable[str],
+    context_lines: Optional[Iterable[str]] = None,
     base_dir: Optional[Path] = None,
 ) -> None:
     meta_lines = build_lyst_debug_meta(
@@ -173,6 +197,7 @@ def write_stop_too_early_dump(
         step=step,
         now_kyiv=now_kyiv,
         log_lines=log_lines,
+        context_lines=context_lines,
     )
     write_lyst_debug_dump(
         "lyst_stop_too_early",
