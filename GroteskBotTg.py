@@ -20,7 +20,7 @@ from GroteskBotStatus import (
     mark_lyst_issue,
     finalize_lyst_run,
 )
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, UPSCALE_IMAGES
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -67,6 +67,7 @@ BOT_LOG_FILE = Path(__file__).with_name("python.log")
 SHOES_DB_FILE = Path(__file__).with_name("shoes.db")
 OLX_DB_FILE = Path(__file__).with_name("olx_items.db")
 SHAFA_DB_FILE = Path(__file__).with_name("shafa_items.db")
+LYST_RESUME_FILE = Path(__file__).with_name("lyst_resume.json")
 LOG_TAIL_LINES = 500
 COUNTRIES = LYST_COUNTRIES
 BLOCK_RESOURCES = False
@@ -82,6 +83,15 @@ LYST_IMAGE_STRATEGY = "adaptive"  # "adaptive" or "settle"
 LYST_IMAGE_READY_TARGET = 0.6
 LYST_IMAGE_EXTRA_SCROLLS = 4
 LYST_IMAGE_SETTLE_PASSES = 2
+
+class LystCloudflareChallenge(Exception):
+    pass
+
+LYST_RESUME_STATE = {"resume_active": False, "entries": {}}
+LYST_RESUME_LOCK = asyncio.Lock()
+LYST_ABORT_EVENT = asyncio.Event()
+LYST_RUN_FAILED = False
+LYST_RUN_PROGRESS = {}
 
 def build_lyst_context_lines(*, attempt=None, max_retries=None, max_scroll_attempts=None, use_pagination=None):
     lines = [
@@ -99,6 +109,7 @@ def build_lyst_context_lines(*, attempt=None, max_retries=None, max_scroll_attem
         f"lyst_stall_timeout_sec: {LYST_STALL_TIMEOUT_SEC}",
         f"lyst_max_browsers: {LYST_MAX_BROWSERS}",
         f"lyst_shoe_concurrency: {LYST_SHOE_CONCURRENCY}",
+        f"lyst_country_concurrency: {LYST_COUNTRY_CONCURRENCY}",
         f"live_mode: {LIVE_MODE}",
     ]
     return lines
@@ -238,10 +249,151 @@ class BrowserWrapper:
 
 browser_pool = BrowserPool(max_browsers=LYST_MAX_BROWSERS)
 
+class LystContextPool:
+    def __init__(self):
+        self._playwright = None
+        self._browser = None
+        self._contexts = {}
+        self._context_init_locks = {}
+        self._country_semaphores = {}
+        self._init_lock = asyncio.Lock()
+
+    async def init(self):
+        async with self._init_lock:
+            if self._playwright:
+                return
+            self._playwright = await async_playwright().start()
+            self._browser = await self._playwright.chromium.launch(
+                headless=not LIVE_MODE,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+
+    def get_country_semaphore(self, country):
+        sem = self._country_semaphores.get(country)
+        if sem is None:
+            sem = asyncio.Semaphore(LYST_COUNTRY_CONCURRENCY)
+            self._country_semaphores[country] = sem
+        return sem
+
+    async def get_context(self, country):
+        await self.init()
+        lock = self._context_init_locks.get(country)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._context_init_locks[country] = lock
+        async with lock:
+            ctx = self._contexts.get(country)
+            if ctx is not None:
+                return ctx, True
+            ctx = await self._browser.new_context(
+                user_agent=STEALTH_UA,
+                locale="en-US",
+                timezone_id="Europe/Kyiv",
+                extra_http_headers=STEALTH_HEADERS,
+            )
+            await ctx.add_init_script(STEALTH_SCRIPT)
+            await ctx.add_cookies([{'name': 'country', 'value': country, 'domain': '.lyst.com', 'path': '/'}])
+            self._contexts[country] = ctx
+            return ctx, False
+
+    async def reset_context(self, country):
+        ctx = self._contexts.pop(country, None)
+        if ctx is None:
+            return
+        try:
+            await ctx.close()
+        except Exception:
+            pass
+
+lyst_context_pool = LystContextPool()
+
 # Helper functions
 def clean_link_for_display(link):
     cleaned_link = re.sub(r'^(https?://)?(www\.)?', '', link)
     return (cleaned_link[:22] + '...') if len(cleaned_link) > 25 else cleaned_link
+
+def _resume_key(base_url, country):
+    return f"{base_url['url_name']}|{country}"
+
+def _now_kyiv_str():
+    return datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+def load_lyst_resume_state():
+    try:
+        data = json.loads(LYST_RESUME_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and "entries" in data:
+            data.setdefault("resume_active", False)
+            if not isinstance(data.get("entries"), dict):
+                data["entries"] = {}
+            return data
+    except Exception:
+        pass
+    return {"resume_active": False, "entries": {}}
+
+def save_lyst_resume_state(state):
+    try:
+        LYST_RESUME_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+async def update_lyst_resume_entry(key, **fields):
+    async with LYST_RESUME_LOCK:
+        entries = LYST_RESUME_STATE.setdefault("entries", {})
+        entry = entries.get(key, {})
+        entry.update(fields)
+        entry["updated_at"] = _now_kyiv_str()
+        entries[key] = entry
+        save_lyst_resume_state(LYST_RESUME_STATE)
+
+def init_lyst_resume_state():
+    global LYST_RESUME_STATE, LYST_RUN_FAILED, LYST_RUN_PROGRESS
+    LYST_RESUME_STATE = load_lyst_resume_state()
+    if not LYST_RESUME_STATE.get("resume_active", False):
+        LYST_RESUME_STATE["entries"] = {}
+    LYST_RUN_FAILED = False
+    LYST_RUN_PROGRESS = {}
+    if LYST_ABORT_EVENT.is_set():
+        LYST_ABORT_EVENT.clear()
+
+async def mark_lyst_run_failed(reason: str):
+    global LYST_RUN_FAILED
+    LYST_RUN_FAILED = True
+    LYST_ABORT_EVENT.set()
+    async with LYST_RESUME_LOCK:
+        LYST_RESUME_STATE["resume_active"] = True
+        LYST_RESUME_STATE["last_failure_reason"] = reason
+        LYST_RESUME_STATE["last_failure_at"] = _now_kyiv_str()
+        LYST_RESUME_STATE["last_run_progress"] = dict(LYST_RUN_PROGRESS)
+        save_lyst_resume_state(LYST_RESUME_STATE)
+
+def log_lyst_run_progress_summary():
+    if not LYST_RUN_PROGRESS:
+        return
+    logger.error("Lyst run progress before abort:")
+    for key, page in sorted(LYST_RUN_PROGRESS.items()):
+        logger.error(f"LYST progress {key}: last_scraped_page={page}")
+
+async def finalize_lyst_resume_after_processing():
+    async with LYST_RESUME_LOCK:
+        entries = LYST_RESUME_STATE.get("entries", {})
+        for key, entry in entries.items():
+            last_scraped = entry.get("last_scraped_page")
+            if last_scraped is None:
+                continue
+            entry["last_success_page"] = last_scraped
+            if entry.get("scrape_complete") and not LYST_RUN_FAILED:
+                entry["completed"] = True
+                entry["next_page"] = 1
+            else:
+                entry["completed"] = False
+                entry["next_page"] = (last_scraped + 1) if last_scraped else entry.get("next_page", 1)
+        if LYST_RUN_FAILED:
+            LYST_RESUME_STATE["resume_active"] = True
+        save_lyst_resume_state(LYST_RESUME_STATE)
 
 def load_font(font_size, prefer_heavy=False):
     font_dir = Path(__file__).with_name("fonts")
@@ -510,6 +662,18 @@ async def normalize_lazy_images(page):
         }
     """)
 
+def is_cloudflare_challenge(content: str) -> bool:
+    if not content:
+        return False
+    lowered = content.lower()
+    if "cloudflare" in lowered and ("just a moment" in lowered or "checking your browser" in lowered):
+        return True
+    if "cf-challenge" in lowered or "cf_challenge" in lowered or "cf-turnstile" in lowered:
+        return True
+    if "<title>just a moment" in lowered or "<title>attention required" in lowered:
+        return True
+    return False
+
 async def count_product_images_ready(page):
     return await page.evaluate("""
         () => {
@@ -591,15 +755,10 @@ async def get_page_content(
     max_retries=None,
     use_pagination=None,
 ):
-    async with (await browser_pool.get_browser()) as browser:
-        context = await browser.new_context(
-            user_agent=STEALTH_UA,
-            locale="en-US",
-            timezone_id="Europe/Kyiv",
-            extra_http_headers=STEALTH_HEADERS,
-        )
-        await context.add_init_script(STEALTH_SCRIPT)
-        await context.add_cookies([{'name': 'country', 'value': country, 'domain': '.lyst.com', 'path': '/'}])
+    await lyst_context_pool.init()
+    sem = lyst_context_pool.get_country_semaphore(country)
+    async with sem:
+        context, reused = await lyst_context_pool.get_context(country)
         page = await context.new_page()
         debug_events = []
         attach_lyst_debug_listeners(page, debug_events)
@@ -612,6 +771,7 @@ async def get_page_content(
             max_scroll_attempts=max_scroll_attempts,
             use_pagination=use_pagination,
         )
+        context_lines.append(f"country_context_reused: {reused}")
         try:
             logger.info(f"LYST step=goto url={url}")
             response = await page.goto(
@@ -649,7 +809,44 @@ async def get_page_content(
                 pass
             step = "content"
             logger.info(f"LYST step=content url={url}")
-            return await page.content()
+            content = await page.content()
+            if is_cloudflare_challenge(content):
+                context_lines.append("cloudflare_detected: true")
+                try:
+                    title = await page.title()
+                    context_lines.append(f"page_title: {title}")
+                except Exception:
+                    pass
+                now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+                log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+                final_url = None
+                try:
+                    final_url = page.url
+                except Exception:
+                    final_url = None
+                try:
+                    await dump_lyst_debug_event(
+                        "lyst_cloudflare",
+                        reason="Cloudflare challenge",
+                        url=url,
+                        country=country,
+                        url_name=url_name,
+                        page_num=page_num,
+                        step=step,
+                        page=page,
+                        content=content,
+                        now_kyiv=now_kyiv,
+                        log_lines=log_lines,
+                        extra_lines=debug_events,
+                        final_url=final_url,
+                        context_lines=context_lines,
+                    )
+                except Exception:
+                    pass
+                mark_lyst_issue("Cloudflare challenge")
+                await lyst_context_pool.reset_context(country)
+                raise LystCloudflareChallenge()
+            return content
         except asyncio.CancelledError:
             now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
             log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
@@ -714,13 +911,19 @@ async def get_page_content(
                 )
             except Exception:
                 pass
+            if is_target_closed_error(exc):
+                await lyst_context_pool.reset_context(country)
             raise
         finally:
-            await context.close()
+            try:
+                await page.close()
+            except Exception:
+                pass
 
-async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None):
+async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None, use_pagination=None):
     attempt = 0
     target_closed_retry_used = False
+    cloudflare_retry_used = False
     while attempt < max_retries:
         try:
             try:
@@ -733,6 +936,7 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_na
                         page_num=page_num,
                         attempt=attempt + 1,
                         max_retries=max_retries,
+                        use_pagination=use_pagination,
                     ),
                     timeout=LYST_PAGE_TIMEOUT_SEC,
                 )
@@ -760,6 +964,17 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_na
             suffix = ""
             if url_name or page_num is not None:
                 suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+            if isinstance(e, LystCloudflareChallenge):
+                if not cloudflare_retry_used:
+                    cloudflare_retry_used = True
+                    logger.warning(f"LYST Cloudflare challenge: retrying after short wait for {url}{suffix}")
+                    await asyncio.sleep(8)
+                    continue
+                attempt += 1
+                if attempt < max_retries:
+                    await asyncio.sleep(8)
+                    continue
+                raise
             if is_target_closed_error(e) and not target_closed_retry_used:
                 target_closed_retry_used = True
                 mark_lyst_issue("TargetClosedError")
@@ -775,9 +990,10 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_na
                 mark_lyst_issue("Failed to get soup")
                 raise
 
-async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None):
+async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None, use_pagination=None):
     attempt = 0
     target_closed_retry_used = False
+    cloudflare_retry_used = False
     while attempt < max_retries:
         try:
             try:
@@ -790,6 +1006,7 @@ async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=
                         page_num=page_num,
                         attempt=attempt + 1,
                         max_retries=max_retries,
+                        use_pagination=use_pagination,
                     ),
                     timeout=LYST_PAGE_TIMEOUT_SEC,
                 )
@@ -817,6 +1034,17 @@ async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=
             suffix = ""
             if url_name or page_num is not None:
                 suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+            if isinstance(e, LystCloudflareChallenge):
+                if not cloudflare_retry_used:
+                    cloudflare_retry_used = True
+                    logger.warning(f"LYST Cloudflare challenge: retrying after short wait for {url}{suffix}")
+                    await asyncio.sleep(8)
+                    continue
+                attempt += 1
+                if attempt < max_retries:
+                    await asyncio.sleep(8)
+                    continue
+                raise
             if is_target_closed_error(e) and not target_closed_retry_used:
                 target_closed_retry_used = True
                 mark_lyst_issue("TargetClosedError")
@@ -1176,30 +1404,46 @@ def extract_shoe_data(card, country, image_fallback_map=None):
         logger.error(f"Error extracting shoe data: {e}")
         return None
 
-async def scrape_page(url, country, max_scroll_attempts=None, url_name=None, page_num=None):
-    soup, content = await get_soup_and_content(
-        url,
-        country,
-        max_scroll_attempts=max_scroll_attempts,
-        url_name=url_name,
-        page_num=page_num,
-    )
+async def scrape_page(url, country, max_scroll_attempts=None, url_name=None, page_num=None, use_pagination=None):
+    try:
+        soup, content = await get_soup_and_content(
+            url,
+            country,
+            max_scroll_attempts=max_scroll_attempts,
+            url_name=url_name,
+            page_num=page_num,
+            use_pagination=use_pagination,
+        )
+    except LystCloudflareChallenge:
+        return [], None, "cloudflare"
     if not soup:
         mark_lyst_issue("Failed to get soup")
-        return [], content
+        return [], content, "failed"
     
     shoe_cards = soup.find_all('div', class_='_693owt3')
     image_fallback_map = extract_ldjson_image_map(soup)
-    return [data for card in shoe_cards if (data := extract_shoe_data(card, country, image_fallback_map))], content
+    return [data for card in shoe_cards if (data := extract_shoe_data(card, country, image_fallback_map))], content, "ok"
 
 async def scrape_all_pages(base_url, country, use_pagination=None):
     if use_pagination is None:
         use_pagination = PAGE_SCRAPE
     
     max_scroll_attempts = LYST_MAX_SCROLL_ATTEMPTS
-    all_shoes, page = [], 1
+    all_shoes = []
+    key = _resume_key(base_url, country)
+    resume_active = LYST_RESUME_STATE.get("resume_active", False)
+    entry = LYST_RESUME_STATE.get("entries", {}).get(key, {})
+    if resume_active and entry.get("completed"):
+        logger.info(f"Skipping {base_url['url_name']} for {country} (completed in previous run)")
+        return all_shoes
+    page = entry.get("next_page", 1) if resume_active else 1
+    last_scraped_page = entry.get("last_scraped_page", entry.get("last_success_page", 0))
+    if use_pagination and page > 1:
+        logger.info(f"Resuming {base_url['url_name']} for {country} from page {page}")
     
     while True:
+        if LYST_ABORT_EVENT.is_set():
+            break
         _touch_lyst_progress()
         if use_pagination:
             url = base_url['url'] if page == 1 else f"{base_url['url']}&page={page}"
@@ -1208,13 +1452,40 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             url = base_url['url']
             logger.info(f"Scraping single page for country {country} - {base_url['url_name']}")
 
-        shoes, content = await scrape_page(
+        shoes, content, status = await scrape_page(
             url,
             country,
             max_scroll_attempts=max_scroll_attempts,
             url_name=base_url["url_name"],
             page_num=page if use_pagination else None,
+            use_pagination=use_pagination,
         )
+        if status == "cloudflare":
+            logger.error(f"Cloudflare challenge for {base_url['url_name']} {country} page {page}")
+            await update_lyst_resume_entry(
+                key,
+                next_page=page,
+                last_scraped_page=last_scraped_page,
+                last_url=url,
+                completed=False,
+                failure_reason="Cloudflare challenge",
+            )
+            await mark_lyst_run_failed("Cloudflare challenge")
+            log_lyst_run_progress_summary()
+            break
+        if status == "failed":
+            logger.error(f"Failed to fetch page for {base_url['url_name']} {country} page {page}")
+            await update_lyst_resume_entry(
+                key,
+                next_page=page,
+                last_scraped_page=last_scraped_page,
+                last_url=url,
+                completed=False,
+                failure_reason="Failed to get soup",
+            )
+            await mark_lyst_run_failed("Failed to get soup")
+            log_lyst_run_progress_summary()
+            break
         if not shoes:
             if use_pagination and page < 3:
                 logger.error(f"{base_url['url_name']} for {country} Stopped too early. Please check for errors")
@@ -1241,10 +1512,33 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
                     return await scrape_all_pages(base_url, country, use_pagination=not use_pagination)
             
             logger.info(f"Total for {country} {base_url['url_name']}: {len(all_shoes)}. Stopped on page {page}")
+            await update_lyst_resume_entry(
+                key,
+                scrape_complete=True,
+                final_page=last_scraped_page,
+                last_url=url,
+                completed=False,
+            )
             break
         all_shoes.extend(shoes)
+        LYST_RUN_PROGRESS[key] = page
+        last_scraped_page = page
+        await update_lyst_resume_entry(
+            key,
+            last_scraped_page=page,
+            last_url=url,
+            completed=False if use_pagination else True,
+        )
         
         if not use_pagination:
+            await update_lyst_resume_entry(
+                key,
+                last_scraped_page=page,
+                scrape_complete=True,
+                final_page=page,
+                last_url=url,
+                completed=False,
+            )
             break
             
         page += 1
@@ -1633,6 +1927,7 @@ def center_text(text, width, fill_char=' '): return text.center(width, fill_char
 
 async def run_lyst_cycle_impl(message_queue):
     global LYST_LAST_PROGRESS_TS
+    init_lyst_resume_state()
     SKIPPED_ITEMS.clear()
     begin_lyst_cycle()
     _touch_lyst_progress()
@@ -1663,6 +1958,15 @@ async def run_lyst_cycle_impl(message_queue):
         special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
 
         await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
+        await finalize_lyst_resume_after_processing()
+        if not LYST_RUN_FAILED:
+            async with LYST_RESUME_LOCK:
+                LYST_RESUME_STATE["resume_active"] = False
+                LYST_RESUME_STATE["entries"] = {}
+                LYST_RESUME_STATE.pop("last_run_progress", None)
+                LYST_RESUME_STATE.pop("last_failure_reason", None)
+                LYST_RESUME_STATE.pop("last_failure_at", None)
+                save_lyst_resume_state(LYST_RESUME_STATE)
         finalize_lyst_run()
 
         print_statistics()
