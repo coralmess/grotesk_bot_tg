@@ -20,7 +20,7 @@ from GroteskBotStatus import (
     mark_lyst_issue,
     finalize_lyst_run,
 )
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, LYST_HTTP_ONLY
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -104,6 +104,7 @@ def build_lyst_context_lines(*, attempt=None, max_retries=None, max_scroll_attem
         f"image_ready_target: {LYST_IMAGE_READY_TARGET}",
         f"image_extra_scrolls: {LYST_IMAGE_EXTRA_SCROLLS}",
         f"image_settle_passes: {LYST_IMAGE_SETTLE_PASSES}",
+        f"lyst_http_only: {LYST_HTTP_ONLY}",
         f"lyst_page_timeout_sec: {LYST_PAGE_TIMEOUT_SEC}",
         f"lyst_url_timeout_sec: {LYST_URL_TIMEOUT_SEC}",
         f"lyst_stall_timeout_sec: {LYST_STALL_TIMEOUT_SEC}",
@@ -674,6 +675,66 @@ def is_cloudflare_challenge(content: str) -> bool:
         return True
     return False
 
+def _fetch_lyst_http_content(url: str, country: str):
+    headers = {
+        "User-Agent": STEALTH_UA,
+        "Accept-Language": STEALTH_HEADERS.get("Accept-Language", "en-US,en;q=0.9"),
+        "Upgrade-Insecure-Requests": "1",
+        "DNT": "1",
+    }
+    with requests.Session() as session:
+        session.headers.update(headers)
+        try:
+            session.cookies.set("country", country, domain=".lyst.com", path="/")
+        except Exception:
+            session.cookies.set("country", country)
+        resp = session.get(url, timeout=30)
+        return resp.status_code, resp.text
+
+async def get_page_content_http(
+    url,
+    country,
+    *,
+    max_scroll_attempts=None,
+    url_name=None,
+    page_num=None,
+    attempt=None,
+    max_retries=None,
+    use_pagination=None,
+):
+    context_lines = build_lyst_context_lines(
+        attempt=attempt,
+        max_retries=max_retries,
+        max_scroll_attempts=max_scroll_attempts,
+        use_pagination=use_pagination,
+    )
+    context_lines.append("http_only: true")
+    status_code, content = await asyncio.to_thread(_fetch_lyst_http_content, url, country)
+    context_lines.append(f"http_status: {status_code}")
+    if is_cloudflare_challenge(content):
+        now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+        log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+        try:
+            await dump_lyst_debug_event(
+                "lyst_cloudflare",
+                reason="Cloudflare challenge",
+                url=url,
+                country=country,
+                url_name=url_name,
+                page_num=page_num,
+                step="http",
+                content=content,
+                now_kyiv=now_kyiv,
+                log_lines=log_lines,
+                context_lines=context_lines,
+            )
+        except Exception:
+            pass
+        raise LystCloudflareChallenge()
+    if status_code >= 400:
+        raise RuntimeError(f"http_only_status_{status_code}")
+    return content
+
 async def count_product_images_ready(page):
     return await page.evaluate("""
         () => {
@@ -755,6 +816,28 @@ async def get_page_content(
     max_retries=None,
     use_pagination=None,
 ):
+    if LYST_HTTP_ONLY:
+        try:
+            content = await get_page_content_http(
+                url,
+                country,
+                max_scroll_attempts=max_scroll_attempts,
+                url_name=url_name,
+                page_num=page_num,
+                attempt=attempt,
+                max_retries=max_retries,
+                use_pagination=use_pagination,
+            )
+            if content:
+                return content
+            raise RuntimeError("http_only_empty_content")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            suffix = ""
+            if url_name or page_num is not None:
+                suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+            logger.warning(f"LYST HTTP-only failed, falling back to Playwright for {url}{suffix} | {exc}")
     await lyst_context_pool.init()
     sem = lyst_context_pool.get_country_semaphore(country)
     async with sem:
@@ -1130,6 +1213,7 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
 
 # Data extraction and processing
 PRICE_TOKEN_RE = re.compile(r'([\d.,]+\s*[^\d\s]+|[^\d\s]+\s*[\d.,]+)')
+CURRENCY_MARKERS = ("€", "£", "$", "â‚¬", "Â£", "EUR", "GBP", "USD", "UAH", "грн", "грн.", "uah")
 
 def extract_price(price_str):
     price_num = re.sub(r'[^\d.]', '', price_str)
@@ -1145,8 +1229,32 @@ def extract_price_tokens(text):
         # Normalize trailing currency (e.g. "215€") to leading ("€215")
         if token and token[-1] not in '0123456789' and (token[0].isdigit() or token[0] == '.'):
             token = token[-1] + token[:-1]
-        tokens.append(token)
+        if any(marker.lower() in token.lower() for marker in CURRENCY_MARKERS):
+            tokens.append(token)
     return tokens
+
+def _parse_price_amount(raw: str) -> float:
+    if not raw:
+        return 0.0
+    cleaned = re.sub(r'[^\d,\.]', '', raw)
+    if not cleaned:
+        return 0.0
+    if ',' in cleaned and '.' in cleaned:
+        cleaned = cleaned.replace(',', '')
+    elif ',' in cleaned and '.' not in cleaned:
+        parts = cleaned.split(',')
+        if len(parts[-1]) == 3:
+            cleaned = ''.join(parts)
+        else:
+            cleaned = '.'.join(parts)
+    elif '.' in cleaned:
+        parts = cleaned.split('.')
+        if len(parts[-1]) == 3:
+            cleaned = ''.join(parts)
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 0.0
 
 def _pick_src_from_srcset(srcset_value):
     if not srcset_value:
@@ -1273,6 +1381,8 @@ def extract_shoe_data(card, country, image_fallback_map=None):
                 return None
         else:
             full_name = ' '.join(e.text.strip() for e in name_elements if e and e.text)
+        if full_name and "view all" in full_name.strip().lower():
+            return None
         if 'Giuseppe Zanotti' in full_name: return None
         
         # Extract price elements (prefer data-testid, fallback to class heuristics)
@@ -1598,19 +1708,27 @@ def update_exchange_rates():
 def convert_to_uah(price, country, exchange_rates, name):
     try:
         currency_map = {
-            '€': ('EUR', lambda p: float(p.replace('€','').replace(',', '.').strip())),
-            '£': ('GBP', lambda p: float(p.replace('£','').replace(',', '').strip())),
-            '$': ('USD', lambda p: float(p.replace('$','').replace(',', '').strip()))
+            '\u20ac': 'EUR',
+            '\u00e2\u201a\u00ac': 'EUR',
+            '\u00a3': 'GBP',
+            '\u00c2\u00a3': 'GBP',
+            '$': 'USD',
         }
-        
-        for symbol, (code, parse_fn) in currency_map.items():
+
+        currency = None
+        currency_symbol = ''
+        for symbol, code in currency_map.items():
             if symbol in price:
-                currency, currency_symbol = code, symbol
-                amount = parse_fn(price)
+                currency = code
+                currency_symbol = symbol if symbol in ('\u20ac', '\u00a3', '$') else {'\u00e2\u201a\u00ac': '\u20ac', '\u00c2\u00a3': '\u00a3'}.get(symbol, symbol)
                 break
-        else:
+        if not currency:
             logger.error(f"Unrecognized currency symbol in price '{price}' for '{name}' country '{country}'")
             return ConversionResult(0, 0, '')
+        amount = _parse_price_amount(price)
+        if amount <= 0:
+            logger.error(f"Failed to parse price '{price}' for '{name}' country '{country}'")
+            return ConversionResult(0, 0, currency_symbol)
 
         rate = exchange_rates.get(currency)
         if not rate:
