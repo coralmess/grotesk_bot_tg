@@ -1990,11 +1990,13 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     new_shoe_count = 0
     semaphore = asyncio.Semaphore(LYST_SHOE_CONCURRENCY)  # Reduce concurrency to prevent database locks
     total_items = len(all_shoes)
+    _touch_lyst_progress()
 
     async def process_single_shoe(i, shoe):
         nonlocal new_shoe_count
         async with semaphore:  # Limit concurrency
             try:
+                _touch_lyst_progress()
                 country, name, unique_id = shoe['country'], shoe['name'], shoe['unique_id']
                 key = f"{name}_{unique_id}"
                 sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
@@ -2020,6 +2022,7 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     for i in range(0, len(all_shoes), batch_size):
         batch = all_shoes[i:i + batch_size]
         await asyncio.gather(*[process_single_shoe(i + j, shoe) for j, shoe in enumerate(batch)])
+        _touch_lyst_progress()
         # Small delay between batches to prevent overwhelming the database
         await asyncio.sleep(0.1)
     
@@ -2032,6 +2035,7 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
         old_data[s['key']]['active'] = False
     if removed_shoes:
         await save_shoe_data_bulk(removed_shoes)
+        _touch_lyst_progress()
 
 async def process_url(base_url, countries, exchange_rates):
     _touch_lyst_progress()
