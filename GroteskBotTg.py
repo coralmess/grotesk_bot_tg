@@ -1356,6 +1356,37 @@ def _format_task_stack(task):
             continue
     return lines
 
+def _format_tasks_snapshot(limit=10):
+    try:
+        tasks = asyncio.all_tasks()
+    except Exception:
+        return []
+    lines = []
+    seen = 0
+    for task in tasks:
+        if task.done() or task is asyncio.current_task():
+            continue
+        try:
+            frames = task.get_stack()
+        except Exception:
+            continue
+        if not frames:
+            continue
+        # Focus on tasks that are likely part of this app.
+        if not any("GroteskBotTg.py" in frame.f_code.co_filename for frame in frames):
+            continue
+        task_name = task.get_name() if hasattr(task, "get_name") else str(task)
+        lines.append(f"Task {task_name} id={id(task)}")
+        for frame in frames[-4:]:
+            try:
+                lines.append(f"  {frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}")
+            except Exception:
+                continue
+        seen += 1
+        if seen >= limit:
+            break
+    return lines
+
 async def get_final_clear_link(initial_url, semaphore, item_name, country, current_item, total_items):
     logger.info(f"Processing final link for {item_name} | Country: {country} | Progress: {current_item}/{total_items}")
     async with (await browser_pool.get_browser()) as browser:
@@ -2351,16 +2382,32 @@ async def run_lyst_cycle_impl(message_queue):
         special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
 
         await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
-        await finalize_lyst_resume_after_processing()
+        try:
+            _touch_lyst_progress("finalize_resume_start")
+            await asyncio.wait_for(finalize_lyst_resume_after_processing(), timeout=60)
+            _touch_lyst_progress("finalize_resume_done")
+        except asyncio.TimeoutError:
+            mark_lyst_issue("resume finalize timeout")
+            logger.error("LYST finalize resume timed out; continuing without resume update")
         if not LYST_RUN_FAILED:
-            async with LYST_RESUME_LOCK:
-                LYST_RESUME_STATE["resume_active"] = False
-                LYST_RESUME_STATE["entries"] = {}
-                LYST_RESUME_STATE.pop("last_run_progress", None)
-                LYST_RESUME_STATE.pop("last_failure_reason", None)
-                LYST_RESUME_STATE.pop("last_failure_at", None)
-                save_lyst_resume_state(LYST_RESUME_STATE)
+            async def _clear_resume_state():
+                async with LYST_RESUME_LOCK:
+                    LYST_RESUME_STATE["resume_active"] = False
+                    LYST_RESUME_STATE["entries"] = {}
+                    LYST_RESUME_STATE.pop("last_run_progress", None)
+                    LYST_RESUME_STATE.pop("last_failure_reason", None)
+                    LYST_RESUME_STATE.pop("last_failure_at", None)
+                    save_lyst_resume_state(LYST_RESUME_STATE)
+            try:
+                _touch_lyst_progress("finalize_clear_start")
+                await asyncio.wait_for(_clear_resume_state(), timeout=60)
+                _touch_lyst_progress("finalize_clear_done")
+            except asyncio.TimeoutError:
+                mark_lyst_issue("resume clear timeout")
+                logger.error("LYST resume clear timed out; continuing")
+        _touch_lyst_progress("finalize_run")
         finalize_lyst_run()
+        logger.info("LYST run completed")
 
         print_statistics()
         print_link_statistics()
@@ -2500,7 +2547,7 @@ async def main():
             raise
 
     try:
-        async def _on_lyst_stall():
+        async def _on_lyst_stall(lyst_task=None):
             mark_lyst_issue("stalled")
             try:
                 await mark_lyst_run_failed("stalled")
@@ -2514,11 +2561,27 @@ async def main():
                 logger.error(f"Lyst message queue stats at stall: {stats}")
             except Exception:
                 pass
-            stack_lines = _format_task_stack(LYST_ACTIVE_TASK)
+            task = lyst_task or LYST_ACTIVE_TASK
+            if task is not None:
+                try:
+                    coro = task.get_coro()
+                    coro_name = getattr(coro, "__name__", repr(coro))
+                except Exception:
+                    coro_name = "unknown"
+                logger.error(
+                    f"Lyst task state at stall: id={id(task)} done={task.done()} cancelled={task.cancelled()} coro={coro_name}"
+                )
+            stack_lines = _format_task_stack(task)
             if stack_lines:
                 logger.error("Lyst task stack at stall:")
                 for line in stack_lines:
                     logger.error(f"  {line}")
+            else:
+                snapshot = _format_tasks_snapshot()
+                if snapshot:
+                    logger.error("Lyst-related task snapshot at stall:")
+                    for line in snapshot:
+                        logger.error(line)
             log_lyst_run_progress_summary()
             finalize_lyst_run()
 

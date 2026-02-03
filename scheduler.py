@@ -77,7 +77,7 @@ async def run_scheduler(
                     logger.error("Lyst task stalled; cancelling")
                     if on_lyst_stall is not None:
                         try:
-                            result = on_lyst_stall()
+                            result = on_lyst_stall(lyst_task)
                             if asyncio.iscoroutine(result):
                                 await result
                         except Exception as exc:
