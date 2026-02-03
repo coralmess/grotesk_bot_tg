@@ -495,97 +495,94 @@ def _fetch_image_bytes(image_url: str) -> bytes:
 
 def process_image(image_url, uah_price, sale_percentage):
     response_bytes = _fetch_image_bytes(image_url)
-    try:
-        img = Image.open(io.BytesIO(response_bytes))
-        # If upscaling is disabled, downscale large sources to keep file size under Telegram limit
-        if not UPSCALE_IMAGES:
-            max_edge = 1280
-            w, h = img.size
-            scale = min(1.0, max_edge / max(w, h)) if max(w, h) else 1.0
-            if scale < 1.0:
-                new_size = (int(w * scale), int(h * scale))
-                img = img.resize(new_size, Image.LANCZOS)
-        width, height = img.size
-        should_upscale = UPSCALE_IMAGES and max(width, height) < 720
-        if should_upscale:
-            if UPSCALE_METHOD == "edsr":
-                try:
-                    img = _upscale_with_edsr(img)
-                    width, height = img.size
-                except Exception as exc:
-                    logger.warning(f"EDSR upscale failed, falling back to LANCZOS: {exc}")
-                    width, height = [dim * 2 for dim in img.size]
-                    img = img.resize((width, height), Image.LANCZOS)
-            else:
+    img = Image.open(io.BytesIO(response_bytes))
+    # If upscaling is disabled, downscale large sources to keep file size under Telegram limit
+    if not UPSCALE_IMAGES:
+        max_edge = 1280
+        w, h = img.size
+        scale = min(1.0, max_edge / max(w, h)) if max(w, h) else 1.0
+        if scale < 1.0:
+            new_size = (int(w * scale), int(h * scale))
+            img = img.resize(new_size, Image.LANCZOS)
+    width, height = img.size
+    should_upscale = UPSCALE_IMAGES and max(width, height) < 720
+    if should_upscale:
+        if UPSCALE_METHOD == "edsr":
+            try:
+                img = _upscale_with_edsr(img)
+                width, height = img.size
+            except Exception as exc:
+                logger.warning(f"EDSR upscale failed, falling back to LANCZOS: {exc}")
                 width, height = [dim * 2 for dim in img.size]
                 img = img.resize((width, height), Image.LANCZOS)
-
-        price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
-        padding = max(12, int(width * 0.03))
-        text_margin = max(20, int(width * 0.1))
-        text_margin = min(text_margin, int(width * 0.14))
-
-        # Choose base font size and adjust if needed to fit width
-        base_scale = 0.06 if width > height else 0.055
-        font_size = max(24, int(width * base_scale))
-        font = load_font(font_size, prefer_heavy=False)
-
-        def _fit_font(font_size):
-            while font_size > 12:
-                font = load_font(font_size, prefer_heavy=False)
-                dummy = Image.new('RGB', (width, width), (255, 255, 255))
-                d = ImageDraw.Draw(dummy)
-                price_bbox = d.textbbox((0, 0), price_text, font=font)
-                sale_bbox = d.textbbox((0, 0), sale_text, font=font)
-                price_w = price_bbox[2] - price_bbox[0]
-                sale_w = sale_bbox[2] - sale_bbox[0]
-                if max(price_w, sale_w) <= (width - (text_margin * 2)):
-                    return font
-                font_size -= 2
-            return load_font(font_size, prefer_heavy=False)
-
-        font = _fit_font(font_size)
-        ascent, descent = font.getmetrics()
-        text_height = ascent + descent
-        line_padding = max(2, int(font_size * 0.15))
-
-        if width > height:
-            # Make square by adding white space ABOVE the image (not below the prices)
-            top_pad = width - height
-            square_img = Image.new('RGB', (width, width), (255, 255, 255))
-            square_img.paste(img, (0, top_pad))
-
-            draw = ImageDraw.Draw(square_img)
-            bottom_area = text_height + (padding * 2) + line_padding
-
-            new_img = Image.new('RGB', (width, width + bottom_area), (255, 255, 255))
-            new_img.paste(square_img, (0, 0))
-            draw = ImageDraw.Draw(new_img)
-            text_y = width + padding + ascent + (line_padding // 2)
-            draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
-            draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
         else:
-            # Default: add a bottom bar for text
-            bottom_area = text_height + (padding * 2) + line_padding
-            new_img = Image.new('RGB', (width, height + bottom_area), (255, 255, 255))
-            new_img.paste(img, (0, 0))
-            draw = ImageDraw.Draw(new_img)
-            text_y = height + padding + ascent + (line_padding // 2)
-            draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
-            draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
+            width, height = [dim * 2 for dim in img.size]
+            img = img.resize((width, height), Image.LANCZOS)
 
-        img_byte_arr = io.BytesIO()
-        if UPSCALE_IMAGES:
-            new_img.save(img_byte_arr, format='PNG', quality=95)
-        else:
-            # JPEG is smaller and avoids Telegram size limits for large images
-            if new_img.mode != 'RGB':
-                new_img = new_img.convert('RGB')
-            new_img.save(img_byte_arr, format='JPEG', quality=85, optimize=True, subsampling=0)
-        img_byte_arr.seek(0)
-        return img_byte_arr
-    finally:
-        response.close()
+    price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
+    padding = max(12, int(width * 0.03))
+    text_margin = max(20, int(width * 0.1))
+    text_margin = min(text_margin, int(width * 0.14))
+
+    # Choose base font size and adjust if needed to fit width
+    base_scale = 0.06 if width > height else 0.055
+    font_size = max(24, int(width * base_scale))
+    font = load_font(font_size, prefer_heavy=False)
+
+    def _fit_font(font_size):
+        while font_size > 12:
+            font = load_font(font_size, prefer_heavy=False)
+            dummy = Image.new('RGB', (width, width), (255, 255, 255))
+            d = ImageDraw.Draw(dummy)
+            price_bbox = d.textbbox((0, 0), price_text, font=font)
+            sale_bbox = d.textbbox((0, 0), sale_text, font=font)
+            price_w = price_bbox[2] - price_bbox[0]
+            sale_w = sale_bbox[2] - sale_bbox[0]
+            if max(price_w, sale_w) <= (width - (text_margin * 2)):
+                return font
+            font_size -= 2
+        return load_font(font_size, prefer_heavy=False)
+
+    font = _fit_font(font_size)
+    ascent, descent = font.getmetrics()
+    text_height = ascent + descent
+    line_padding = max(2, int(font_size * 0.15))
+
+    if width > height:
+        # Make square by adding white space ABOVE the image (not below the prices)
+        top_pad = width - height
+        square_img = Image.new('RGB', (width, width), (255, 255, 255))
+        square_img.paste(img, (0, top_pad))
+
+        draw = ImageDraw.Draw(square_img)
+        bottom_area = text_height + (padding * 2) + line_padding
+
+        new_img = Image.new('RGB', (width, width + bottom_area), (255, 255, 255))
+        new_img.paste(square_img, (0, 0))
+        draw = ImageDraw.Draw(new_img)
+        text_y = width + padding + ascent + (line_padding // 2)
+        draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
+        draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
+    else:
+        # Default: add a bottom bar for text
+        bottom_area = text_height + (padding * 2) + line_padding
+        new_img = Image.new('RGB', (width, height + bottom_area), (255, 255, 255))
+        new_img.paste(img, (0, 0))
+        draw = ImageDraw.Draw(new_img)
+        text_y = height + padding + ascent + (line_padding // 2)
+        draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
+        draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
+
+    img_byte_arr = io.BytesIO()
+    if UPSCALE_IMAGES:
+        new_img.save(img_byte_arr, format='PNG', quality=95)
+    else:
+        # JPEG is smaller and avoids Telegram size limits for large images
+        if new_img.mode != 'RGB':
+            new_img = new_img.convert('RGB')
+        new_img.save(img_byte_arr, format='JPEG', quality=85, optimize=True, subsampling=0)
+    img_byte_arr.seek(0)
+    return img_byte_arr
 
 # Database functions
 PRAGMA_STATEMENTS = ['PRAGMA foreign_keys = ON','PRAGMA journal_mode = WAL','PRAGMA synchronous = NORMAL','PRAGMA busy_timeout = 30000']
