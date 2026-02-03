@@ -84,6 +84,8 @@ SKIPPED_ITEMS = set()
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 LYST_URL_TIMEOUT_SEC = LYST_URL_TIMEOUT_DEFAULT
 LYST_LAST_PROGRESS_TS = 0.0
+LYST_LAST_STEP_INFO = {}
+LYST_ACTIVE_TASK = None
 LYST_STALL_TIMEOUT_SEC = LYST_STALL_TIMEOUT_DEFAULT
 OLX_TIMEOUT_SEC = 1800
 SHAFA_TIMEOUT_SEC = 1800
@@ -195,6 +197,10 @@ class TelegramMessageQueue:
 
     def is_message_sent(self, message_id):
         return self.pending_messages.get(message_id, False)
+
+    def stats(self):
+        pending = sum(1 for sent in self.pending_messages.values() if not sent)
+        return {"queue_size": self.queue.qsize(), "pending": pending}
 
 # Configure logging
 logger = logging.getLogger()
@@ -791,9 +797,23 @@ async def get_page_content_http(
     last_exc = None
     while True:
         http_attempt += 1
+        _touch_lyst_progress(
+            "http_attempt",
+            url=url,
+            country=country,
+            url_name=url_name,
+            page_num=page_num,
+            attempt=http_attempt,
+        )
         context_lines.append(f"http_attempt: {http_attempt}")
         try:
-            status_code, content = await asyncio.to_thread(_fetch_lyst_http_content, url, country)
+            status_code, content = await asyncio.wait_for(
+                asyncio.to_thread(_fetch_lyst_http_content, url, country),
+                timeout=LYST_HTTP_TIMEOUT_SEC + 5,
+            )
+        except asyncio.TimeoutError as exc:
+            status_code, content = None, ""
+            last_exc = exc
         except Exception as exc:
             status_code, content = None, ""
             last_exc = exc
@@ -956,6 +976,14 @@ async def get_page_content(
         )
         context_lines.append(f"country_context_reused: {reused}")
         try:
+            _touch_lyst_progress(
+                "goto",
+                url=url,
+                country=country,
+                url_name=url_name,
+                page_num=page_num,
+                attempt=attempt,
+            )
             logger.info(f"LYST step=goto url={url}")
             response = await page.goto(
                 url,
@@ -971,19 +999,54 @@ async def get_page_content(
                 pass
             if max_scroll_attempts is not None and max_scroll_attempts <= 0:
                 step = "scroll_skip"
+                _touch_lyst_progress(
+                    "scroll_skip",
+                    url=url,
+                    country=country,
+                    url_name=url_name,
+                    page_num=page_num,
+                )
                 logger.info(f"LYST step=scroll_skip url={url}")
             else:
                 step = "scroll"
+                _touch_lyst_progress(
+                    "scroll",
+                    url=url,
+                    country=country,
+                    url_name=url_name,
+                    page_num=page_num,
+                )
                 logger.info(f"LYST step=scroll url={url}")
                 await scroll_page(page, max_scroll_attempts)
             if LYST_IMAGE_STRATEGY == "settle":
                 step = "settle_lazy_images"
+                _touch_lyst_progress(
+                    "settle_lazy_images",
+                    url=url,
+                    country=country,
+                    url_name=url_name,
+                    page_num=page_num,
+                )
                 logger.info(f"LYST step=settle_lazy_images url={url}")
                 await settle_lazy_images(page, passes=LYST_IMAGE_SETTLE_PASSES)
             step = "normalize_lazy_images"
+            _touch_lyst_progress(
+                "normalize_lazy_images",
+                url=url,
+                country=country,
+                url_name=url_name,
+                page_num=page_num,
+            )
             logger.info(f"LYST step=normalize_lazy_images url={url}")
             await normalize_lazy_images(page)
             step = "wait_selector"
+            _touch_lyst_progress(
+                "wait_selector",
+                url=url,
+                country=country,
+                url_name=url_name,
+                page_num=page_num,
+            )
             try:
                 logger.info(f"LYST step=wait_selector url={url}")
                 await page.wait_for_selector('._693owt3', timeout=20000)
@@ -991,6 +1054,13 @@ async def get_page_content(
                 # If selector wait fails, still return content for parsing
                 pass
             step = "content"
+            _touch_lyst_progress(
+                "content",
+                url=url,
+                country=country,
+                url_name=url_name,
+                page_num=page_num,
+            )
             logger.info(f"LYST step=content url={url}")
             content = await page.content()
             if is_cloudflare_challenge(content):
@@ -1253,9 +1323,38 @@ def extract_embedded_url(url):
         if v: return urllib.parse.unquote(v[0])
     return url
 
-def _touch_lyst_progress():
-    global LYST_LAST_PROGRESS_TS
+def _touch_lyst_progress(step: str | None = None, **details):
+    global LYST_LAST_PROGRESS_TS, LYST_LAST_STEP_INFO
     LYST_LAST_PROGRESS_TS = time.time()
+    if step is None:
+        return
+    info = {
+        "step": step,
+        "ts": LYST_LAST_PROGRESS_TS,
+        "ts_kyiv": datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    info.update({k: v for k, v in details.items() if v is not None})
+    LYST_LAST_STEP_INFO = info
+
+def _lyst_step_snapshot():
+    return dict(LYST_LAST_STEP_INFO) if LYST_LAST_STEP_INFO else {}
+
+def _format_task_stack(task):
+    if task is None:
+        return []
+    try:
+        frames = task.get_stack()
+    except Exception:
+        return []
+    if not frames:
+        return []
+    lines = []
+    for frame in frames[-6:]:
+        try:
+            lines.append(f"{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}")
+        except Exception:
+            continue
+    return lines
 
 async def get_final_clear_link(initial_url, semaphore, item_name, country, current_item, total_items):
     logger.info(f"Processing final link for {item_name} | Country: {country} | Progress: {current_item}/{total_items}")
@@ -1707,7 +1806,12 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
     while True:
         if LYST_ABORT_EVENT.is_set():
             break
-        _touch_lyst_progress()
+        _touch_lyst_progress(
+            "scrape_page_start",
+            url_name=base_url.get('url_name'),
+            country=country,
+            page_num=page,
+        )
         if use_pagination:
             url = base_url['url'] if page == 1 else f"{base_url['url']}&page={page}"
             logger.info(f"Scraping page {page} for country {country} - {base_url['url_name']}")
@@ -1722,6 +1826,14 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             url_name=base_url["url_name"],
             page_num=page if use_pagination else None,
             use_pagination=use_pagination,
+        )
+        _touch_lyst_progress(
+            "scrape_page_end",
+            url=url,
+            url_name=base_url.get('url_name'),
+            country=country,
+            page_num=page,
+            status=status,
         )
         if status == "cloudflare":
             logger.error(f"Cloudflare challenge for {base_url['url_name']} {country} page {page}")
@@ -2090,9 +2202,7 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
             'active': True
         })
         message = build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol)
-        message_id = await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
-        while not message_queue.is_message_sent(message_id):
-            await asyncio.sleep(1)
+        await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
         await mark_shoe_processed(key)
         old_data[key] = shoe
         # Save individual shoe instead of entire dataset
@@ -2202,7 +2312,8 @@ def print_link_statistics():
 def center_text(text, width, fill_char=' '): return text.center(width, fill_char)
 
 async def run_lyst_cycle_impl(message_queue):
-    global LYST_LAST_PROGRESS_TS
+    global LYST_LAST_PROGRESS_TS, LYST_ACTIVE_TASK
+    LYST_ACTIVE_TASK = asyncio.current_task()
     init_lyst_resume_state()
     SKIPPED_ITEMS.clear()
     begin_lyst_cycle()
@@ -2256,6 +2367,8 @@ async def run_lyst_cycle_impl(message_queue):
         mark_lyst_issue("failed")
         finalize_lyst_run()
         raise
+    finally:
+        LYST_ACTIVE_TASK = None
 
 
 
@@ -2387,6 +2500,19 @@ async def main():
                 await mark_lyst_run_failed("stalled")
             except Exception as exc:
                 logger.warning(f"Failed to persist Lyst stall state: {exc}")
+            step_info = _lyst_step_snapshot()
+            if step_info:
+                logger.error(f"Lyst last step before stall: {step_info}")
+            try:
+                stats = message_queue.stats()
+                logger.error(f"Lyst message queue stats at stall: {stats}")
+            except Exception:
+                pass
+            stack_lines = _format_task_stack(LYST_ACTIVE_TASK)
+            if stack_lines:
+                logger.error("Lyst task stack at stall:")
+                for line in stack_lines:
+                    logger.error(f"  {line}")
             log_lyst_run_progress_summary()
             finalize_lyst_run()
 
