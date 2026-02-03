@@ -1,4 +1,4 @@
-import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, threading, os
+import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, threading
 from pathlib import Path
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple, deque
@@ -20,7 +20,7 @@ from GroteskBotStatus import (
     mark_lyst_issue,
     finalize_lyst_run,
 )
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_CPU_MAX_LOAD, LYST_CPU_THROTTLE_SEC
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -105,30 +105,6 @@ LYST_RESUME_LOCK = asyncio.Lock()
 LYST_ABORT_EVENT = asyncio.Event()
 LYST_RUN_FAILED = False
 LYST_RUN_PROGRESS = {}
-
-def _maybe_throttle_cpu(label: str | None = None):
-    if LYST_CPU_THROTTLE_SEC <= 0:
-        return
-    try:
-        load1, _, _ = os.getloadavg()
-    except Exception:
-        return
-    if load1 > LYST_CPU_MAX_LOAD:
-        tag = f" {label}" if label else ""
-        logger.info(f"CPU throttle{tag}: load1={load1:.2f} > {LYST_CPU_MAX_LOAD:.2f}, sleeping {LYST_CPU_THROTTLE_SEC:.2f}s")
-        time.sleep(LYST_CPU_THROTTLE_SEC)
-
-async def _maybe_throttle_cpu_async(label: str | None = None):
-    if LYST_CPU_THROTTLE_SEC <= 0:
-        return
-    try:
-        load1, _, _ = os.getloadavg()
-    except Exception:
-        return
-    if load1 > LYST_CPU_MAX_LOAD:
-        tag = f" {label}" if label else ""
-        logger.info(f"CPU throttle{tag}: load1={load1:.2f} > {LYST_CPU_MAX_LOAD:.2f}, sleeping {LYST_CPU_THROTTLE_SEC:.2f}s")
-        await asyncio.sleep(LYST_CPU_THROTTLE_SEC)
 
 def build_lyst_context_lines(*, attempt=None, max_retries=None, max_scroll_attempts=None, use_pagination=None):
     lines = [
@@ -520,7 +496,6 @@ def _fetch_image_bytes(image_url: str) -> bytes:
 def process_image(image_url, uah_price, sale_percentage):
     response_bytes = _fetch_image_bytes(image_url)
     img = Image.open(io.BytesIO(response_bytes))
-    _maybe_throttle_cpu("image")
     # If upscaling is disabled, downscale large sources to keep file size under Telegram limit
     if not UPSCALE_IMAGES:
         max_edge = 1280
@@ -543,7 +518,6 @@ def process_image(image_url, uah_price, sale_percentage):
         else:
             width, height = [dim * 2 for dim in img.size]
             img = img.resize((width, height), Image.LANCZOS)
-        _maybe_throttle_cpu("image-upscale")
 
     price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
     padding = max(12, int(width * 0.03))
@@ -1749,7 +1723,6 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             page_num=page if use_pagination else None,
             use_pagination=use_pagination,
         )
-        await _maybe_throttle_cpu_async("page")
         if status == "cloudflare":
             logger.error(f"Cloudflare challenge for {base_url['url_name']} {country} page {page}")
             await update_lyst_resume_entry(
@@ -2181,7 +2154,6 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
         batch = all_shoes[i:i + batch_size]
         await asyncio.gather(*[process_single_shoe(i + j, shoe) for j, shoe in enumerate(batch)])
         _touch_lyst_progress()
-        await _maybe_throttle_cpu_async("batch")
         # Small delay between batches to prevent overwhelming the database
         await asyncio.sleep(0.1)
     

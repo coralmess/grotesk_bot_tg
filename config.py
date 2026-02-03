@@ -24,9 +24,6 @@ UPSCALE_METHOD = os.getenv('UPSCALE_METHOD', 'lanczos').strip().lower()
 BLOCK_RESOURCES = os.getenv('BLOCK_RESOURCES', 'true' if IS_INSTANCE else 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 LYST_HTTP_ONLY = os.getenv('LYST_HTTP_ONLY', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 LYST_HTTP_TIMEOUT_SEC = float(os.getenv('LYST_HTTP_TIMEOUT_SEC', '45'))
-CPU_COUNT = os.cpu_count() or 1
-LYST_CPU_MAX_LOAD = float(os.getenv('LYST_CPU_MAX_LOAD', f"{0.8 * CPU_COUNT:.2f}" if IS_INSTANCE else "999"))
-LYST_CPU_THROTTLE_SEC = float(os.getenv('LYST_CPU_THROTTLE_SEC', '0.5' if IS_INSTANCE else '0'))
 
 # Concurrency tuning (lower on instance to reduce CPU spikes)
 LYST_MAX_BROWSERS = int(os.getenv('LYST_MAX_BROWSERS', '2' if IS_INSTANCE else '6'))
