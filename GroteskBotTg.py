@@ -1387,6 +1387,47 @@ def _format_tasks_snapshot(limit=10):
             break
     return lines
 
+def _describe_task_wait_chain(task, max_depth=6):
+    if task is None:
+        return []
+    lines = []
+    try:
+        coro = task.get_coro()
+    except Exception:
+        return []
+    awaitable = getattr(coro, "cr_await", None)
+    depth = 0
+    seen = set()
+    while awaitable is not None and depth < max_depth:
+        if id(awaitable) in seen:
+            lines.append("  ↳ await chain loop detected")
+            break
+        seen.add(id(awaitable))
+        lines.append(f"  ↳ awaiting {type(awaitable).__name__}: {awaitable!r}")
+        try:
+            if isinstance(awaitable, asyncio.Task):
+                lines.append(
+                    f"    task id={id(awaitable)} done={awaitable.done()} cancelled={awaitable.cancelled()}"
+                )
+                frames = awaitable.get_stack()
+                for frame in frames[-3:]:
+                    try:
+                        lines.append(f"    {frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}")
+                    except Exception:
+                        continue
+                awaitable = getattr(awaitable.get_coro(), "cr_await", None)
+            elif isinstance(awaitable, asyncio.Future):
+                lines.append(
+                    f"    future done={awaitable.done()} cancelled={awaitable.cancelled()}"
+                )
+                awaitable = getattr(awaitable, "_fut_waiter", None) or getattr(awaitable, "cr_await", None)
+            else:
+                awaitable = getattr(awaitable, "cr_await", None)
+        except Exception:
+            break
+        depth += 1
+    return lines
+
 async def get_final_clear_link(initial_url, semaphore, item_name, country, current_item, total_items):
     logger.info(f"Processing final link for {item_name} | Country: {country} | Progress: {current_item}/{total_items}")
     async with (await browser_pool.get_browser()) as browser:
@@ -2354,7 +2395,7 @@ async def run_lyst_cycle_impl(message_queue):
     init_lyst_resume_state()
     SKIPPED_ITEMS.clear()
     begin_lyst_cycle()
-    _touch_lyst_progress()
+    _touch_lyst_progress("run_start")
     try:
         old_data = await load_shoe_data()
         exchange_rates = load_exchange_rates()
@@ -2504,7 +2545,7 @@ async def main():
     async def run_lyst_cycle():
         global LYST_LAST_PROGRESS_TS
         begin_lyst_cycle()
-        _touch_lyst_progress()
+        _touch_lyst_progress("run_start")
         try:
             old_data = await load_shoe_data()
             exchange_rates = load_exchange_rates()
@@ -2548,12 +2589,16 @@ async def main():
 
     try:
         async def _on_lyst_stall(lyst_task=None):
-            mark_lyst_issue("stalled")
-            try:
-                await mark_lyst_run_failed("stalled")
-            except Exception as exc:
-                logger.warning(f"Failed to persist Lyst stall state: {exc}")
             step_info = _lyst_step_snapshot()
+            finalize_hang = bool(step_info and step_info.get("step") == "finalize_run")
+            if finalize_hang:
+                logger.error("Lyst stalled after finalize_run; treating as post-finalize hang")
+            else:
+                mark_lyst_issue("stalled")
+                try:
+                    await mark_lyst_run_failed("stalled")
+                except Exception as exc:
+                    logger.warning(f"Failed to persist Lyst stall state: {exc}")
             if step_info:
                 logger.error(f"Lyst last step before stall: {step_info}")
             try:
@@ -2576,6 +2621,11 @@ async def main():
                 logger.error("Lyst task stack at stall:")
                 for line in stack_lines:
                     logger.error(f"  {line}")
+            wait_chain = _describe_task_wait_chain(task)
+            if wait_chain:
+                logger.error("Lyst await chain at stall:")
+                for line in wait_chain:
+                    logger.error(line)
             else:
                 snapshot = _format_tasks_snapshot()
                 if snapshot:
@@ -2583,7 +2633,8 @@ async def main():
                     for line in snapshot:
                         logger.error(line)
             log_lyst_run_progress_summary()
-            finalize_lyst_run()
+            if not finalize_hang:
+                finalize_lyst_run()
 
         await run_scheduler(
             run_olx=_run_olx_and_mark,
