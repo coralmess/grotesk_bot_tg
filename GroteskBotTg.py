@@ -2231,13 +2231,13 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     new_shoe_count = 0
     semaphore = asyncio.Semaphore(LYST_SHOE_CONCURRENCY)  # Reduce concurrency to prevent database locks
     total_items = len(all_shoes)
-    _touch_lyst_progress()
+    _touch_lyst_progress("process_shoes_start", total_items=total_items)
 
     async def process_single_shoe(i, shoe):
         nonlocal new_shoe_count
         async with semaphore:  # Limit concurrency
             try:
-                _touch_lyst_progress()
+                _touch_lyst_progress("process_shoe", index=i, total_items=total_items)
                 country, name, unique_id = shoe['country'], shoe['name'], shoe['unique_id']
                 key = f"{name}_{unique_id}"
                 sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
@@ -2263,7 +2263,7 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     for i in range(0, len(all_shoes), batch_size):
         batch = all_shoes[i:i + batch_size]
         await asyncio.gather(*[process_single_shoe(i + j, shoe) for j, shoe in enumerate(batch)])
-        _touch_lyst_progress()
+        _touch_lyst_progress("process_shoes_batch", batch_start=i, batch_size=len(batch))
         # Small delay between batches to prevent overwhelming the database
         await asyncio.sleep(0.1)
     
@@ -2275,8 +2275,14 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     for s in removed_shoes:
         old_data[s['key']]['active'] = False
     if removed_shoes:
-        await save_shoe_data_bulk(removed_shoes)
-        _touch_lyst_progress()
+        logger.info(f"Marking {len(removed_shoes)} removed shoes inactive")
+        chunk_size = 500
+        for i in range(0, len(removed_shoes), chunk_size):
+            chunk = removed_shoes[i:i + chunk_size]
+            await save_shoe_data_bulk(chunk)
+            _touch_lyst_progress("removed_shoes_batch", batch_start=i, batch_size=len(chunk), total_removed=len(removed_shoes))
+            await asyncio.sleep(0)
+    _touch_lyst_progress("process_shoes_done", removed_total=len(removed_shoes), new_total=new_shoe_count)
 
 async def process_url(base_url, countries, exchange_rates):
     _touch_lyst_progress()
