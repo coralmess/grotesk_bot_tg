@@ -340,5 +340,13 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Portaille&sort=4",
         "url_name": "Portaille"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=bed%20ford&sort=4",
+        "url_name": "Bed Ford"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Nicolas%20Andreas%20Taralis&sort=4",
+        "url_name": "Nicolas Andreas Taralis"
     }
 ]

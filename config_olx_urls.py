@@ -638,6 +638,10 @@ OLX_URLS = [
         "url_name": "Barazza"
     },
     {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-De-Sede/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "De Sede"
+    },
+    {
         "url": "https://www.olx.ua/uk/dom-i-sad/stroitelstvo-remont/santehnika/q-Foster/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Foster"
     },
@@ -680,5 +684,45 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Portaille/?currency=UAH&search%5Border%5D=created_at:desc", 
         "url_name": "Portaille"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Cappellini/?currency=UAH&search%5Bfilter_float_price:to%5D=50000&search%5Border%5D=created_at:desc",
+        "url_name": "Cappellini"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Ingo-Maurer/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=50000",
+        "url_name": "Ingo Maurer"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Foscarini/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Foscarini"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/stroitelstvo-remont/santehnika/q-agape/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=30000",
+        "url_name": "Agape"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/stroitelstvo-remont/santehnika/q-boffi/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=30000",
+        "url_name": "Boffi"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Bed-Ford/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Bed Ford"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Damir-Doma/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Damir Doma"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Nicolas-Andreas-Taralis/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Nicolas Andreas Taralis"   
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Richard-Ginori/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Richard Ginori"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Arabia-Finland/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Arabia Finland"
     }
 ]
