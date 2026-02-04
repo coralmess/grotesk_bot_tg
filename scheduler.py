@@ -51,6 +51,7 @@ async def run_scheduler(
     olx_task = None
     shafa_task = None
     lyst_task = None
+    lyst_task_started_ts = None
 
     while True:
         try:
@@ -67,13 +68,17 @@ async def run_scheduler(
             if is_running_lyst() and now_ts >= next_lyst_ts:
                 if lyst_task is None or lyst_task.done():
                     lyst_task = asyncio.create_task(run_lyst())
+                    lyst_task_started_ts = time.time()
                     next_lyst_ts = time.time() + _sleep_interval_with_jitter(check_interval_sec, check_jitter_sec)
             elif not is_running_lyst():
                 logger.info("Lyst scraping disabled (IsRunningLyst=false)")
 
             if lyst_task is not None and not lyst_task.done():
                 progress_ts = get_lyst_progress_ts()
-                if progress_ts and (time.time() - progress_ts) > lyst_stall_timeout_sec:
+                effective_ts = progress_ts
+                if lyst_task_started_ts and (not progress_ts or progress_ts < lyst_task_started_ts):
+                    effective_ts = lyst_task_started_ts
+                if effective_ts and (time.time() - effective_ts) > lyst_stall_timeout_sec:
                     logger.error("Lyst task stalled; cancelling")
                     if on_lyst_stall is not None:
                         try:
@@ -96,6 +101,7 @@ async def run_scheduler(
                     if exc:
                         logger.error(f"Lyst task crashed: {exc}")
                 lyst_task = None
+                lyst_task_started_ts = None
             if olx_task is not None and olx_task.done():
                 if olx_task.cancelled():
                     logger.warning("OLX task cancelled")
