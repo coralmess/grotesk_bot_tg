@@ -569,6 +569,27 @@ def process_image(image_url, uah_price, sale_percentage):
         text_y = width + padding + ascent + (line_padding // 2)
         draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
         draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
+    elif height > width and (height / width) < 1.42:
+        # Add side padding to reach target portrait ratio (1:1.42)
+        target_ratio = 1.42
+        target_width = int(round(height / target_ratio))
+        if target_width > width:
+            side_pad_total = target_width - width
+            left_pad = side_pad_total // 2
+            right_pad = side_pad_total - left_pad
+            padded_img = Image.new('RGB', (target_width, height), (255, 255, 255))
+            padded_img.paste(img, (left_pad, 0))
+        else:
+            padded_img = img
+            target_width = width
+
+        bottom_area = text_height + (padding * 2) + line_padding
+        new_img = Image.new('RGB', (target_width, height + bottom_area), (255, 255, 255))
+        new_img.paste(padded_img, (0, 0))
+        draw = ImageDraw.Draw(new_img)
+        text_y = height + padding + ascent + (line_padding // 2)
+        draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
+        draw.text((target_width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
     else:
         # Default: add a bottom bar for text
         bottom_area = text_height + (padding * 2) + line_padding
@@ -1779,13 +1800,19 @@ def extract_shoe_data(card, country, image_fallback_map=None):
         
         # Extract link
         link_elem = None
+        # Prefer tracking links if present
         for a in card.find_all('a', href=True):
             href = a.get('href') or ''
-            if '/track/' in href:
-                continue
-            if any(p in href for p in ['/clothing/', '/shoes/', '/accessories/', '/bags/', '/jewelry/']):
+            if '/track/lead/' in href:
                 link_elem = a
                 break
+        # Fallback to product links
+        if not link_elem:
+            for a in card.find_all('a', href=True):
+                href = a.get('href') or ''
+                if any(p in href for p in ['/clothing/', '/shoes/', '/accessories/', '/bags/', '/jewelry/']):
+                    link_elem = a
+                    break
         if not link_elem:
             link_elem = card.find('a', href=True)
         href = link_elem['href'] if link_elem and 'href' in link_elem.attrs else None
