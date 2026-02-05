@@ -20,6 +20,7 @@ from GroteskBotStatus import (
     mark_lyst_issue,
     finalize_lyst_run,
 )
+from dynamic_sources import add_dynamic_url, detect_source
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC
 from config_lyst import (
     BASE_URLS,
@@ -2232,6 +2233,26 @@ async def command_listener(bot_token, allowed_chat_ids, log_path):
                 command = raw_text.split()[0].split("@")[0].lower()
                 if command in ("/log", "/logs", "/log500"):
                     await send_log_tail(bot, chat_id, log_path, LOG_TAIL_LINES)
+                elif command in ("/add", "/addlink", "/addurl"):
+                    url_match = re.search(r"https?://\\S+", raw_text)
+                    if not url_match:
+                        await bot.send_message(chat_id=chat_id, text="Send a valid URL after the command.")
+                        continue
+                    url = url_match.group(0).strip()
+                    ok, source, url_name = add_dynamic_url(url)
+                    if not source:
+                        await bot.send_message(chat_id=chat_id, text="Unsupported URL. Send an OLX or Shafa link.")
+                        continue
+                    if ok:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"Added {source.upper()} link: {url}\\nName: {url_name}"
+                        )
+                    else:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"{source.upper()} link already exists: {url}\\nName: {url_name}"
+                        )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

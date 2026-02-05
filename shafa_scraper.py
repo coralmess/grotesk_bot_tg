@@ -11,6 +11,7 @@ from html import escape
 from functools import wraps
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
 from config_shafa_urls import SHAFA_URLS
+from dynamic_sources import load_dynamic_urls, merge_sources
 
 try:
     from playwright.async_api import async_playwright, Browser, BrowserContext
@@ -560,7 +561,8 @@ async def run_shafa_scraper():
         async def _guarded_process(entry: Dict[str, Any]):
             async with sem:
                 await _process_entry(entry)
-        if tasks := [_guarded_process(entry) for entry in SHAFA_URLS or []]:
+        sources = merge_sources(SHAFA_URLS or [], load_dynamic_urls("shafa"))
+        if tasks := [_guarded_process(entry) for entry in sources]:
             logger.info(f"Sources: {len(tasks)}")
             await asyncio.gather(*tasks, return_exceptions=True)
         else:

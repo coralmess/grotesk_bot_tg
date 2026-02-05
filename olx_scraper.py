@@ -11,6 +11,7 @@ from html import escape
 from functools import wraps
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, OLX_TASK_CONCURRENCY, OLX_HTTP_HTML_CONCURRENCY, OLX_HTTP_IMAGE_CONCURRENCY, OLX_UPSCALE_CONCURRENCY, OLX_SEND_CONCURRENCY, OLX_HTTP_CONNECTOR_LIMIT
 from config_olx_urls import OLX_URLS
+from dynamic_sources import load_dynamic_urls, merge_sources
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -666,7 +667,8 @@ async def run_olx_scraper():
         async with sem:
             await _process_entry(entry)
     
-    if tasks := [_guarded_process(entry) for entry in OLX_URLS or []]:
+    sources = merge_sources(OLX_URLS or [], load_dynamic_urls("olx"))
+    if tasks := [_guarded_process(entry) for entry in sources]:
         logger.info(f"📊 Processing {len(tasks)} OLX source(s)...")
         await asyncio.gather(*tasks, return_exceptions=True)
     else:
