@@ -2331,7 +2331,7 @@ async def command_listener(bot_token, allowed_chat_ids, log_path):
                 if command in ("/log", "/logs", "/log500"):
                     await send_log_tail(bot, chat_id, log_path, LOG_TAIL_LINES)
                 elif command in ("/add", "/addlink", "/addurl"):
-                    url_match = re.search(r"https?://\\S+", raw_text)
+                    url_match = re.search(r"https?://\S+", raw_text)
                     if not url_match:
                         await bot.send_message(chat_id=chat_id, text="Send a valid URL after the command.")
                         continue
