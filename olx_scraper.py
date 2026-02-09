@@ -552,17 +552,23 @@ async def db_update_source_stats(url: str, streak: int, cycle_count: int):
 async def run_olx_scraper():
     """Main scraper function."""
     logger.info("🚀 OLX Scraper started")
+    errors = []
+    def _add_error(msg: str):
+        if msg:
+            errors.append(str(msg)[:200])
     
     token, default_chat = _clean_token(TELEGRAM_OLX_BOT_TOKEN), _clean_token(DANYLO_DEFAULT_CHAT_ID)
     if not token:
         logger.warning("⚠️  No Telegram bot token configured")
-        return
+        _add_error("No Telegram bot token configured")
+        return "; ".join(dict.fromkeys(errors))
     
     try:
         await db_init()
     except Exception as e:
         logger.error(f"❌ Database initialization failed: {e}")
-        return
+        _add_error(f"DB init failed: {e}")
+        return "; ".join(dict.fromkeys(errors))
     
     bot = Bot(token=token)
     
@@ -587,8 +593,10 @@ async def run_olx_scraper():
             logger.warning(f"⏳ Rate limited for item {item.id}, waiting {e.retry_after}s")
         except TimedOut:
             logger.warning(f"⏱️  Timeout sending item {item.id}")
+            _add_error("Telegram send timeout")
         except Exception as e:
             logger.error(f"❌ Failed to send item {item.id}: {e}")
+            _add_error(f"Send item error: {e}")
     async def _process_entry(entry: Dict[str, Any]):
         nonlocal total_scraped
         # Always send to the single default chat id; ignore any per-entry chat override
@@ -659,8 +667,10 @@ async def run_olx_scraper():
                 
         except aiohttp.ClientError as e:
             logger.error(f"🌐 Network error processing {source_name}: {e}")
+            _add_error(f"{source_name}: network error")
         except Exception as e:
             logger.error(f"❌ Failed to process {source_name}: {e}")
+            _add_error(f"{source_name}: {e}")
     
     sem = asyncio.Semaphore(OLX_TASK_CONCURRENCY)
     async def _guarded_process(entry: Dict[str, Any]):
@@ -676,3 +686,14 @@ async def run_olx_scraper():
     
     logger.info("✅ OLX scraper completed successfully")
     logger.info(f"📈 TOTAL SCRAPED: {total_scraped} items | WITHOUT IMAGES: {total_without_images} items ({(total_without_images/total_scraped*100) if total_scraped > 0 else 0:.1f}%)")
+    if errors:
+        uniq = []
+        for item in errors:
+            if item not in uniq:
+                uniq.append(item)
+            if len(uniq) >= 3:
+                break
+        summary = "; ".join(uniq)
+        logger.warning(f"OLX run errors: {summary}")
+        return summary
+    return ""

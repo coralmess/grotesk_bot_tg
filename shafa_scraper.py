@@ -450,22 +450,30 @@ async def run_shafa_scraper():
     total_scraped = 0
     total_sent = 0
     total_new = 0
+    errors = []
+    def _add_error(msg: str):
+        if msg:
+            errors.append(str(msg)[:200])
     logger.info("SHAFA.UA start")
     if not PLAYWRIGHT_AVAILABLE:
         logger.error("Playwright is not installed. Run: pip install playwright && playwright install chromium")
-        return
+        _add_error("Playwright not installed")
+        return "; ".join(dict.fromkeys(errors))
     token = (TELEGRAM_OLX_BOT_TOKEN or "").strip().strip("'\"")
     default_chat = (DANYLO_DEFAULT_CHAT_ID or "").strip().strip("'\"")
     if not token:
         logger.error("Telegram token not set")
-        return
+        _add_error("Telegram token not set")
+        return "; ".join(dict.fromkeys(errors))
     bot: Optional[Bot] = None
+    summary = ""
     try:
         await asyncio.to_thread(_db_init_sync)
         logger.info("Database ready")
     except Exception as e:
         logger.error(f"Database init failed: {e}")
-        return
+        _add_error(f"DB init failed: {e}")
+        return "; ".join(dict.fromkeys(errors))
     global _playwright_browser, _playwright_instance, _playwright_context, _http_session
     try:
         _playwright_instance = await async_playwright().start()
@@ -474,7 +482,8 @@ async def run_shafa_scraper():
         logger.info("Playwright started")
     except Exception as e:
         logger.error(f"Playwright error: {e}")
-        return
+        _add_error(f"Playwright error: {e}")
+        return "; ".join(dict.fromkeys(errors))
     bot = Bot(token=token)
     async def _send_item_message(bot: Bot, chat_id: str, text: str, item: ShafaItem) -> bool:
         nonlocal total_sent
@@ -488,8 +497,10 @@ async def run_shafa_scraper():
             logger.warning(f"Telegram rate limit hit; waiting {e.retry_after}s")
         except TimedOut:
             logger.warning("Timeout while sending")
+            _add_error("Telegram send timeout")
         except Exception as e:
             logger.error(f"Send failed: {e}")
+            _add_error(f"Send failed: {e}")
         return False
     async def _process_entry(entry: Dict[str, Any]):
         nonlocal total_scraped, total_new
@@ -554,8 +565,10 @@ async def run_shafa_scraper():
             total_new += new_count
         except aiohttp.ClientError as e:
             logger.error(f"Network error: {e}")
+            _add_error("Network error")
         except Exception as e:
             logger.error(f"Processing error: {e}")
+            _add_error(f"Processing error: {e}")
     try:
         sem = asyncio.Semaphore(SHAFA_TASK_CONCURRENCY)
         async def _guarded_process(entry: Dict[str, Any]):
@@ -608,6 +621,16 @@ async def run_shafa_scraper():
         logger.info("Resources cleaned up")
         # Give time for async cleanup to complete
         await asyncio.sleep(0.5)
+    if errors:
+        uniq = []
+        for item in errors:
+            if item not in uniq:
+                uniq.append(item)
+            if len(uniq) >= 3:
+                break
+        summary = "; ".join(uniq)
+        logger.warning(f"SHAFA run errors: {summary}")
+    return summary
 
 if __name__ == "__main__":
     asyncio.run(run_shafa_scraper())

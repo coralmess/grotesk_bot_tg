@@ -15,7 +15,9 @@ from GroteskBotStatus import (
     LAST_SHAFA_RUN_UTC,
     begin_lyst_cycle,
     mark_olx_run,
+    mark_olx_issue,
     mark_shafa_run,
+    mark_shafa_issue,
     mark_lyst_start,
     mark_lyst_issue,
     finalize_lyst_run,
@@ -2357,12 +2359,16 @@ async def command_listener(bot_token, allowed_chat_ids, log_path):
             await asyncio.sleep(5)
 
 async def _run_olx_and_mark():
-    await run_olx_scraper()
-    mark_olx_run()
+    err = await run_olx_scraper()
+    if err:
+        mark_olx_issue(err)
+    mark_olx_run(err if err else None)
 
 async def _run_shafa_and_mark():
-    await run_shafa_scraper()
-    mark_shafa_run()
+    err = await run_shafa_scraper()
+    if err:
+        mark_shafa_issue(err)
+    mark_shafa_run(err if err else None)
 
 # Processing functions
 def filter_duplicates(shoes, exchange_rates):

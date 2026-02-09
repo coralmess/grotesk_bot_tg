@@ -14,6 +14,8 @@ LAST_RUNS_FILE = Path(__file__).with_name("last_runs.json")
 
 LAST_OLX_RUN_UTC = None
 LAST_SHAFA_RUN_UTC = None
+LAST_OLX_RUN_NOTE = ""
+LAST_SHAFA_RUN_NOTE = ""
 LAST_LYST_RUN_START_UTC = None
 LAST_LYST_RUN_END_UTC = None
 LAST_LYST_RUN_OK = None
@@ -24,13 +26,16 @@ _LYST_RUN_STARTED_THIS_CYCLE = False
 
 
 def load_last_runs_from_file():
-    global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC, LAST_LYST_RUN_START_UTC, LAST_LYST_RUN_END_UTC, LAST_LYST_RUN_OK, LAST_LYST_RUN_NOTE
+    global LAST_OLX_RUN_UTC, LAST_SHAFA_RUN_UTC, LAST_OLX_RUN_NOTE, LAST_SHAFA_RUN_NOTE
+    global LAST_LYST_RUN_START_UTC, LAST_LYST_RUN_END_UTC, LAST_LYST_RUN_OK, LAST_LYST_RUN_NOTE
     if not LAST_RUNS_FILE.exists():
         return
     try:
         data = json.loads(LAST_RUNS_FILE.read_text(encoding="utf-8"))
         olx_raw = data.get("last_olx_run_utc")
         shafa_raw = data.get("last_shafa_run_utc")
+        olx_note = data.get("last_olx_run_note")
+        shafa_note = data.get("last_shafa_run_note")
         lyst_raw = data.get("last_lyst_run_start_utc")
         lyst_end_raw = data.get("last_lyst_run_end_utc")
         lyst_ok = data.get("last_lyst_run_ok")
@@ -39,6 +44,10 @@ def load_last_runs_from_file():
             LAST_OLX_RUN_UTC = datetime.fromisoformat(olx_raw)
         if shafa_raw:
             LAST_SHAFA_RUN_UTC = datetime.fromisoformat(shafa_raw)
+        if isinstance(olx_note, str):
+            LAST_OLX_RUN_NOTE = olx_note
+        if isinstance(shafa_note, str):
+            LAST_SHAFA_RUN_NOTE = shafa_note
         if lyst_raw:
             LAST_LYST_RUN_START_UTC = datetime.fromisoformat(lyst_raw)
         if lyst_end_raw:
@@ -56,6 +65,8 @@ def save_last_runs_to_file():
         payload = {
             "last_olx_run_utc": LAST_OLX_RUN_UTC.isoformat() if LAST_OLX_RUN_UTC else None,
             "last_shafa_run_utc": LAST_SHAFA_RUN_UTC.isoformat() if LAST_SHAFA_RUN_UTC else None,
+            "last_olx_run_note": LAST_OLX_RUN_NOTE,
+            "last_shafa_run_note": LAST_SHAFA_RUN_NOTE,
             "last_lyst_run_start_utc": LAST_LYST_RUN_START_UTC.isoformat() if LAST_LYST_RUN_START_UTC else None,
             "last_lyst_run_end_utc": LAST_LYST_RUN_END_UTC.isoformat() if LAST_LYST_RUN_END_UTC else None,
             "last_lyst_run_ok": LAST_LYST_RUN_OK,
@@ -66,15 +77,31 @@ def save_last_runs_to_file():
         pass
 
 
-def mark_olx_run():
-    global LAST_OLX_RUN_UTC
+def mark_olx_run(note: str | None = None):
+    global LAST_OLX_RUN_UTC, LAST_OLX_RUN_NOTE
     LAST_OLX_RUN_UTC = datetime.now(timezone.utc)
+    LAST_OLX_RUN_NOTE = note or ""
     save_last_runs_to_file()
 
 
-def mark_shafa_run():
-    global LAST_SHAFA_RUN_UTC
+def mark_shafa_run(note: str | None = None):
+    global LAST_SHAFA_RUN_UTC, LAST_SHAFA_RUN_NOTE
     LAST_SHAFA_RUN_UTC = datetime.now(timezone.utc)
+    LAST_SHAFA_RUN_NOTE = note or ""
+    save_last_runs_to_file()
+
+
+def mark_olx_issue(note: str):
+    global LAST_OLX_RUN_NOTE
+    if note:
+        LAST_OLX_RUN_NOTE = note
+    save_last_runs_to_file()
+
+
+def mark_shafa_issue(note: str):
+    global LAST_SHAFA_RUN_NOTE
+    if note:
+        LAST_SHAFA_RUN_NOTE = note
     save_last_runs_to_file()
 
 
@@ -153,6 +180,8 @@ def _format_status_text(start_ts: float, *, lyst_stale_after_sec: int | None = N
         uptime_str = f"{days}d {hours}h"
     olx_str = LAST_OLX_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_OLX_RUN_UTC else "never"
     shafa_str = LAST_SHAFA_RUN_UTC.astimezone(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S') if LAST_SHAFA_RUN_UTC else "never"
+    olx_note = f" ({LAST_OLX_RUN_NOTE})" if LAST_OLX_RUN_NOTE else ""
+    shafa_note = f" ({LAST_SHAFA_RUN_NOTE})" if LAST_SHAFA_RUN_NOTE else ""
 
     lyst_time = "never"
     if LAST_LYST_RUN_OK is None and LAST_LYST_RUN_START_UTC:
@@ -184,8 +213,8 @@ def _format_status_text(start_ts: float, *, lyst_stale_after_sec: int | None = N
         "✅ <b>Grotesk Bot OK</b>\n"
         f"⏱ Uptime: {uptime_str}\n"
         f"🕒 Last update (Kyiv): {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"🧾 Last OLX run: {olx_str}\n"
-        f"🧾 Last SHAFA run: {shafa_str}\n"
+        f"🧾 Last OLX run: {olx_str}{olx_note}\n"
+        f"🧾 Last SHAFA run: {shafa_str}{shafa_note}\n"
         f"{lyst_icon} Last LYST run: {lyst_time}{lyst_note}"
     )
 
