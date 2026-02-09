@@ -1,4 +1,4 @@
-import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, threading
+import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, threading, hashlib
 from pathlib import Path
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple, deque
@@ -196,6 +196,16 @@ class ColoredFormatter(logging.Formatter):
 class TelegramMessageQueue:
     def __init__(self, bot_token):
         self.queue, self.bot_token, self.pending_messages = asyncio.Queue(), bot_token, {}
+        self.recent_sent = {}
+
+    def _fingerprint(self, chat_id, message, image_url, uah_price, sale_percentage):
+        payload = f"{chat_id}|{message}|{image_url or ''}|{uah_price or ''}|{sale_percentage or ''}"
+        return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _prune_recent(self, now_ts, window_sec):
+        expired = [k for k, ts in self.recent_sent.items() if now_ts - ts > window_sec]
+        for k in expired:
+            self.recent_sent.pop(k, None)
 
     async def add_message(self, chat_id, message, image_url=None, uah_price=None, sale_percentage=None):
         message_id = str(uuid.uuid4())
@@ -206,9 +216,18 @@ class TelegramMessageQueue:
     async def process_queue(self):
         while True:
             message_id, chat_id, message, image_url, uah_price, sale_percentage = await self.queue.get()
+            now_ts = time.time()
+            fingerprint = self._fingerprint(chat_id, message, image_url, uah_price, sale_percentage)
+            self._prune_recent(now_ts, 1800)
+            if fingerprint in self.recent_sent:
+                self.pending_messages[message_id] = True
+                await asyncio.sleep(1)
+                continue
             success = await send_telegram_message(self.bot_token, chat_id, message, image_url, uah_price, sale_percentage)
             self.pending_messages[message_id] = success
-            if not success:
+            if success:
+                self.recent_sent[fingerprint] = time.time()
+            else:
                 await self.queue.put((message_id, chat_id, message, image_url, uah_price, sale_percentage))
             await asyncio.sleep(1)
 
@@ -2229,7 +2248,8 @@ async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah
             await asyncio.sleep(e.retry_after)
         except TimedOut:
             logger.warning(f"Request timed out on attempt {attempt + 1}")
-            await asyncio.sleep(3 * (attempt + 1))
+            logger.warning("Assuming Telegram delivered message despite timeout to avoid duplicates")
+            return True
         except Exception as e:
             logger.error(f"Error sending Telegram message (attempt {attempt + 1}): {e}")
             if attempt == max_retries - 1:
