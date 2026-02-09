@@ -108,6 +108,8 @@ LYST_RESUME_LOCK = asyncio.Lock()
 LYST_ABORT_EVENT = asyncio.Event()
 LYST_RUN_FAILED = False
 LYST_RUN_PROGRESS = {}
+LYST_HTTP_ONLY_ENABLED = LYST_HTTP_ONLY
+LYST_HTTP_ONLY_DISABLE_REASON = ""
 
 def build_lyst_context_lines(*, attempt=None, max_retries=None, max_scroll_attempts=None, use_pagination=None):
     lines = [
@@ -121,6 +123,8 @@ def build_lyst_context_lines(*, attempt=None, max_retries=None, max_scroll_attem
         f"image_extra_scrolls: {LYST_IMAGE_EXTRA_SCROLLS}",
         f"image_settle_passes: {LYST_IMAGE_SETTLE_PASSES}",
         f"lyst_http_only: {LYST_HTTP_ONLY}",
+        f"lyst_http_only_enabled: {LYST_HTTP_ONLY_ENABLED}",
+        f"lyst_http_only_disabled_reason: {LYST_HTTP_ONLY_DISABLE_REASON}",
         f"lyst_http_timeout_sec: {LYST_HTTP_TIMEOUT_SEC}",
         f"lyst_page_timeout_sec: {LYST_PAGE_TIMEOUT_SEC}",
         f"lyst_url_timeout_sec: {LYST_URL_TIMEOUT_SEC}",
@@ -131,6 +135,18 @@ def build_lyst_context_lines(*, attempt=None, max_retries=None, max_scroll_attem
         f"live_mode: {LIVE_MODE}",
     ]
     return lines
+
+def reset_lyst_http_only_state():
+    global LYST_HTTP_ONLY_ENABLED, LYST_HTTP_ONLY_DISABLE_REASON
+    LYST_HTTP_ONLY_ENABLED = LYST_HTTP_ONLY
+    LYST_HTTP_ONLY_DISABLE_REASON = ""
+
+def disable_lyst_http_only(reason: str):
+    global LYST_HTTP_ONLY_ENABLED, LYST_HTTP_ONLY_DISABLE_REASON
+    if LYST_HTTP_ONLY_ENABLED:
+        LYST_HTTP_ONLY_ENABLED = False
+        LYST_HTTP_ONLY_DISABLE_REASON = reason or "disabled"
+        logger.warning(f"LYST HTTP-only disabled for this run: {LYST_HTTP_ONLY_DISABLE_REASON}")
 
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
@@ -330,6 +346,30 @@ class LystContextPool:
             await ctx.close()
         except Exception:
             pass
+
+    async def reset_browser(self):
+        try:
+            for ctx in list(self._contexts.values()):
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+            self._contexts.clear()
+        except Exception:
+            pass
+        try:
+            if self._browser:
+                await self._browser.close()
+        except Exception:
+            pass
+        self._browser = await self._playwright.chromium.launch(
+            headless=not LIVE_MODE,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
+        )
 
 lyst_context_pool = LystContextPool()
 
@@ -864,6 +904,7 @@ async def get_page_content_http(
                 )
             except Exception:
                 pass
+            disable_lyst_http_only("cloudflare challenge")
             raise LystCloudflareChallenge()
         if not content.strip():
             if http_attempt <= 2:
@@ -871,6 +912,8 @@ async def get_page_content_http(
                 continue
             raise RuntimeError("http_only_empty_content")
         if status_code >= 400:
+            if status_code in (403, 410, 429):
+                disable_lyst_http_only(f"http_status_{status_code}")
             if status_code in (408, 429, 500, 502, 503, 504) and http_attempt <= 2:
                 await asyncio.sleep(2)
                 continue
@@ -948,6 +991,13 @@ def is_target_closed_error(exc: Exception) -> bool:
     msg = str(exc)
     return "Target page, context or browser has been closed" in msg or "TargetClosedError" in msg
 
+def is_pipe_closed_error(exc: Exception) -> bool:
+    msg = str(exc)
+    if not msg:
+        return False
+    lowered = msg.lower()
+    return "pipe closed" in lowered or "os.write(pipe, data)" in lowered or "epipe" in lowered
+
 async def get_page_content(
     url,
     country,
@@ -958,7 +1008,7 @@ async def get_page_content(
     max_retries=None,
     use_pagination=None,
 ):
-    if LYST_HTTP_ONLY:
+    if LYST_HTTP_ONLY_ENABLED:
         try:
             content = await get_page_content_http(
                 url,
@@ -980,6 +1030,8 @@ async def get_page_content(
             if url_name or page_num is not None:
                 suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
             logger.warning(f"LYST HTTP-only failed, falling back to Playwright for {url}{suffix} | {exc}")
+    elif LYST_HTTP_ONLY and not LYST_HTTP_ONLY_ENABLED:
+        logger.info("LYST HTTP-only disabled for this run; using Playwright")
     await lyst_context_pool.init()
     sem = lyst_context_pool.get_country_semaphore(country)
     async with sem:
@@ -1156,8 +1208,18 @@ async def get_page_content(
                 pass
             raise
         except Exception as exc:
-            reason = "target closed" if "Target page, context or browser has been closed" in str(exc) else f"exception: {exc}"
-            prefix = "lyst_target_closed" if reason == "target closed" else "lyst_error"
+            if is_pipe_closed_error(exc):
+                reason = "pipe closed"
+            elif "Target page, context or browser has been closed" in str(exc):
+                reason = "target closed"
+            else:
+                reason = f"exception: {exc}"
+            if reason == "pipe closed":
+                prefix = "lyst_pipe_closed"
+            elif reason == "target closed":
+                prefix = "lyst_target_closed"
+            else:
+                prefix = "lyst_error"
             now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
             log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
             final_url = None
@@ -1186,7 +1248,9 @@ async def get_page_content(
                 )
             except Exception:
                 pass
-            if is_target_closed_error(exc):
+            if is_pipe_closed_error(exc):
+                await lyst_context_pool.reset_browser()
+            elif is_target_closed_error(exc):
                 await lyst_context_pool.reset_context(country)
             raise
         finally:
@@ -2442,6 +2506,7 @@ async def run_lyst_cycle_impl(message_queue):
     LYST_ACTIVE_TASK = asyncio.current_task()
     init_lyst_resume_state()
     SKIPPED_ITEMS.clear()
+    reset_lyst_http_only_state()
     begin_lyst_cycle()
     _touch_lyst_progress("run_start")
     try:
@@ -2592,6 +2657,7 @@ async def main():
 
     async def run_lyst_cycle():
         global LYST_LAST_PROGRESS_TS
+        reset_lyst_http_only_state()
         begin_lyst_cycle()
         _touch_lyst_progress("run_start")
         try:
