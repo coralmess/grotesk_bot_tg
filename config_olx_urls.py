@@ -740,5 +740,13 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Mackage/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
         "url_name": "Mackage"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-sealup/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Sealup"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Sasquatchfabrix/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Sasquatchfabrix"
     }
 ]

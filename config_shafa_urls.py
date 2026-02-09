@@ -364,5 +364,13 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/men?price_to=10000&search_text=Mackage%20&sort=4",
         "url_name": "Mackage"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=sealup&sort=4",
+        "url_name": "Sealup"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Sasquatchfabrix&sort=4",
+        "url_name": "Sasquatchfabrix"
     }
 ]
