@@ -348,5 +348,21 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Nicolas%20Andreas%20Taralis&sort=4",
         "url_name": "Nicolas Andreas Taralis"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Connolly&sort=4",
+        "url_name": "Connolly"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Oyuna&sort=4",
+        "url_name": "Oyuna"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Ceccarelli&sort=4",
+        "url_name": "Ceccarelli"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?price_to=10000&search_text=Mackage%20&sort=4",
+        "url_name": "Mackage"
     }
 ]

@@ -724,5 +724,21 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Arabia-Finland/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Arabia Finland"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Connolly/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Connolly"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Oyuna/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Oyuna"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Ceccarelli/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Ceccarelli"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Mackage/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Mackage"
     }
 ]
