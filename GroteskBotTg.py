@@ -1402,6 +1402,17 @@ async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=
 def is_lyst_domain(url):
     return 'lyst.com' in urllib.parse.urlparse(url).netloc
 
+def _normalize_lyst_product_link(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if not parsed.scheme or not parsed.netloc:
+            return url
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', ''))
+    except Exception:
+        return url
+
 def extract_embedded_url(url):
     parsed = urllib.parse.urlparse(url); qs = urllib.parse.parse_qs(parsed.query)
     for p in ('URL','murl','destination','url'):
@@ -1865,25 +1876,27 @@ def extract_shoe_data(card, country, image_fallback_map=None):
         
         # Extract link
         link_elem = None
-        # Prefer tracking links if present
+        track_href = None
+        product_href = None
         for a in card.find_all('a', href=True):
             href = a.get('href') or ''
-            if '/track/lead/' in href:
-                link_elem = a
+            if not track_href and '/track/lead/' in href:
+                track_href = href
+            if not product_href and any(p in href for p in ['/clothing/', '/shoes/', '/accessories/', '/bags/', '/jewelry/']):
+                product_href = href
+            if track_href and product_href:
                 break
-        # Fallback to product links
-        if not link_elem:
-            for a in card.find_all('a', href=True):
-                href = a.get('href') or ''
-                if any(p in href for p in ['/clothing/', '/shoes/', '/accessories/', '/bags/', '/jewelry/']):
-                    link_elem = a
-                    break
-        if not link_elem:
+        href = track_href or product_href
+        if not href:
             link_elem = card.find('a', href=True)
-        href = link_elem['href'] if link_elem and 'href' in link_elem.attrs else None
+            href = link_elem['href'] if link_elem and 'href' in link_elem.attrs else None
         full_url = f"https://www.lyst.com{href}" if href and href.startswith('/') else href if href and href.startswith('http') else None
-        if not unique_id and full_url:
-            unique_id = str(uuid.uuid5(uuid.NAMESPACE_URL, full_url))
+        product_url = None
+        if product_href:
+            product_url = f"https://www.lyst.com{product_href}" if product_href.startswith('/') else product_href
+        canonical_for_id = _normalize_lyst_product_link(product_url or full_url)
+        if not unique_id and canonical_for_id:
+            unique_id = str(uuid.uuid5(uuid.NAMESPACE_URL, canonical_for_id))
 
         # Extract image
         img_elem = (
