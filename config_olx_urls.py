@@ -449,10 +449,10 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Fedeli/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
         "url_name": "Fedeli"
     },
-    {
-        "url": "https://www.olx.ua/uk/moda-i-stil/q-helmut-lang/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
-        "url_name": "Helmut Lang"
-    },
+    # {
+    #     "url": "https://www.olx.ua/uk/moda-i-stil/q-helmut-lang/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+    #     "url_name": "Helmut Lang"
+    # },
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Veilance/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Veilance"
