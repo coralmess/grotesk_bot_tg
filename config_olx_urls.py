@@ -748,9 +748,5 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Sasquatchfabrix/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Sasquatchfabrix"
-    },
-    {
-        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-obuv/q-Carpe-Diem/?currency=UAH&search%5Border%5D=created_at:desc",
-        "url_name": "Carpe Diem"
-    },
+    }
 ]
