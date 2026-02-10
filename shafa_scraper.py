@@ -9,7 +9,7 @@ from PIL import Image
 import io, asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
 from functools import wraps
-from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
+from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_UPSCALE_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
 from config_shafa_urls import SHAFA_URLS
 from dynamic_sources import load_dynamic_urls, merge_sources
 
@@ -37,6 +37,7 @@ BASE_SHAFA = "https://shafa.ua"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
 _HTTP_SEMAPHORE = asyncio.Semaphore(SHAFA_HTTP_CONCURRENCY)
 _SEND_SEMAPHORE = asyncio.Semaphore(SHAFA_SEND_CONCURRENCY)
+_UPSCALE_SEMAPHORE = asyncio.Semaphore(SHAFA_UPSCALE_CONCURRENCY)
 _PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(SHAFA_PLAYWRIGHT_CONCURRENCY)  # Limit concurrent browser instances
 _http_session: Optional[aiohttp.ClientSession] = None
 _playwright_browser: Optional[Browser] = None
@@ -270,12 +271,14 @@ def build_message(item: ShafaItem, prev: Optional[Dict[str, Any]], source_name: 
         f"🔗 {open_link}"
     )
 
-def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048) -> Optional[bytes]:
+def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048, min_upscale_dim: int = 720) -> Optional[bytes]:
     try:
         im = Image.open(io.BytesIO(img_bytes))
         if im.mode not in ("RGB", "L"):
             im = im.convert("RGB")
         w, h = im.size
+        if max(w, h) >= min_upscale_dim:
+            return None
         new_w, new_h = int(w * scale), int(h * scale)
         longer = max(new_w, new_h)
         if longer > max_dim:
@@ -292,8 +295,9 @@ def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int
         logger.error(f"Image upscale failed: {e}")
         return None
 
-async def _upscale_image_bytes(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048) -> Optional[bytes]:
-    return await asyncio.to_thread(_upscale_image_bytes_sync, img_bytes, scale, max_dim)
+async def _upscale_image_bytes(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048, min_upscale_dim: int = 720) -> Optional[bytes]:
+    async with _UPSCALE_SEMAPHORE:
+        return await asyncio.to_thread(_upscale_image_bytes_sync, img_bytes, scale, max_dim, min_upscale_dim)
 
 @async_retry(max_retries=3, backoff_base=1.0)
 async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
@@ -326,19 +330,11 @@ async def _send_photo_by_bytes(bot: Bot, chat_id: str, photo_bytes: bytes, capti
         await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(photo_bytes), caption=caption, parse_mode=ParseMode.HTML)
     return True
 
-@async_retry(max_retries=3, backoff_base=2.0)
-async def _send_photo_by_url(bot: Bot, chat_id: str, photo_url: str, caption: str) -> bool:
-    async with _SEND_SEMAPHORE:
-        await bot.send_photo(chat_id=chat_id, photo=photo_url, caption=caption, parse_mode=ParseMode.HTML)
-    return True
-
 async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
     if not image_url or not _is_valid_image_url(image_url):
         logger.info("Text only (no photo)")
         result = await send_message(bot, chat_id, caption)
         return result if result is not None else False
-    if (result := await _send_photo_by_url(bot, chat_id, image_url, caption)) is not None:
-        return result
     if not (raw := await _download_bytes(image_url)):
         logger.warning("Photo not downloaded; sending text")
         result = await send_message(bot, chat_id, caption)
