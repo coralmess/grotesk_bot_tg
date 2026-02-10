@@ -305,10 +305,10 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/list/user/83Rzs/",
         "url_name": "Гоша"
     },
-    {
-        "url": "https://www.olx.ua/uk/list/user/4XOGU/",
-        "url_name": "Андрій"
-    },
+    # {
+    #     "url": "https://www.olx.ua/uk/list/user/4XOGU/",
+    #     "url_name": "Андрій"
+    # },
     {
         "url": "https://www.olx.ua/uk/list/user/2fnjBw/",
         "url_name": "Євгенія'"
@@ -345,10 +345,10 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/list/q-paola-zani/?search%5Border%5D=created_at:desc",
         "url_name": "Paola Zani"
     },
-     {
-        "url": "https://www.olx.ua/uk/list/user/1OyGf/",
-        "url_name": "Сергій Олігарх"
-    },
+    # {
+    #     "url": "https://www.olx.ua/uk/list/user/1OyGf/",
+    #     "url_name": "Сергій Олігарх"
+    # },
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Frette/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Frette"
