@@ -161,6 +161,10 @@ async def _ensure_status_message(bot: Bot, chat_id: int) -> int:
         STATUS_MSG_FILE.write_text(str(msg.message_id), encoding="utf-8")
     except Exception:
         pass
+    try:
+        await bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id, disable_notification=True)
+    except Exception:
+        pass
     return msg.message_id
 
 
@@ -232,10 +236,20 @@ async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600, 
         except Exception:
             # If edit fails (message deleted or not found), send a new one and persist its id
             try:
+                old_message_id = message_id
                 msg = await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
                 message_id = msg.message_id
                 try:
                     STATUS_MSG_FILE.write_text(str(message_id), encoding="utf-8")
+                except Exception:
+                    pass
+                try:
+                    if old_message_id and old_message_id != message_id:
+                        await bot.unpin_chat_message(chat_id=chat_id, message_id=old_message_id)
+                except Exception:
+                    pass
+                try:
+                    await bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
                 except Exception:
                     pass
             except Exception:
