@@ -68,7 +68,7 @@ RULES: Dict[float, Rule] = {
 
 VALID_QUEUES = sorted(RULES.keys())
 
-GEN_RULE, YEST_RULE, YEST_SCHEDULE = range(3)
+GEN_RULE, YEST_RULE, YEST_SCHEDULE, SHIFT_CHOICE = range(4)
 
 
 def format_queue_value(value: float) -> str:
@@ -240,6 +240,17 @@ def schedules_equal(
         if left_norm.get(group, []) != right_norm.get(group, []):
             return False
     return True
+
+
+def shift_schedule(
+    schedule: Dict[str, List[Tuple[int, int]]],
+    offset_minutes: int,
+) -> Dict[str, List[Tuple[int, int]]]:
+    shifted: Dict[str, List[Tuple[int, int]]] = {}
+    for group in GROUPS:
+        intervals = schedule.get(group, [])
+        shifted[group] = shift_intervals(intervals, offset_minutes)
+    return shifted
 
 
 def normalize_queue_value(raw: str) -> float | None:
@@ -1850,6 +1861,72 @@ async def handle_yesterday_schedule(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text(humanize_error(exc, q=q, from_yesterday=True))
         return ConversationHandler.END
 
+    new_text = format_schedule(new_schedule)
+    old_text = format_schedule(schedule)
+    if q in (5.0, 5.5) and new_text == old_text:
+        max_shift = 5 if q == 5.5 else 4
+        context.user_data["shift_schedule"] = new_schedule
+        context.user_data["shift_slot_minutes"] = slot_minutes
+        context.user_data["shift_max"] = max_shift
+        await update.message.reply_text(
+            "⚠️ Увага ⚠️\n"
+            "Якщо робити графік з однаковими годинами відключень з учора на сьогодні для "
+            "всіх підгруп, то завтрашній графік вийде ідентичним. Можемо згенерувати "
+            "новий графік такий як і був учора, а можемо змістити його на певну кількість "
+            f"годин (від 1 до {max_shift}) — так не у всіх буде однакова кількість "
+            "відключень включно з тими, що вже є вчора до кінця дня, але графіки будуть "
+            "нові і все ще з рівномірними відключеннями і включеннями для всіх.\n\n"
+            "Якщо ви хочете отримати ідентичний графік — напишіть 0.\n"
+            f"Якщо ви бажаєте отримати інший графік — напишіть число від 1 до {max_shift}."
+        )
+        return SHIFT_CHOICE
+
+    await update.message.reply_text(new_text)
+    await send_off_counts(update, new_schedule, slot_minutes)
+    try:
+        image = render_schedule_image(build_intervals_for_image(new_schedule), GROUPS)
+        await update.message.reply_photo(photo=image)
+    except Exception as exc:
+        logger.exception("Failed to render schedule image: %s", exc)
+
+    return ConversationHandler.END
+
+
+async def handle_shift_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip().replace(",", ".")
+    max_shift = context.user_data.get("shift_max")
+    schedule = context.user_data.get("shift_schedule")
+    slot_minutes = context.user_data.get("shift_slot_minutes")
+    if schedule is None or slot_minutes is None or max_shift is None:
+        await update.message.reply_text("Не знайдено очікуваного розкладу. Почніть спочатку.")
+        return ConversationHandler.END
+
+    try:
+        value = float(text)
+    except ValueError:
+        await update.message.reply_text(
+            f"Вкажіть число 0 або від 1 до {int(max_shift)}."
+        )
+        return SHIFT_CHOICE
+
+    if abs(value - round(value)) > 1e-6:
+        await update.message.reply_text(
+            f"Вкажіть ціле число 0 або від 1 до {int(max_shift)}."
+        )
+        return SHIFT_CHOICE
+
+    hours = int(round(value))
+    if hours < 0 or hours > int(max_shift):
+        await update.message.reply_text(
+            f"Вкажіть число 0 або від 1 до {int(max_shift)}."
+        )
+        return SHIFT_CHOICE
+
+    if hours == 0:
+        new_schedule = schedule
+    else:
+        new_schedule = shift_schedule(schedule, hours * 60)
+
     await update.message.reply_text(format_schedule(new_schedule))
     await send_off_counts(update, new_schedule, slot_minutes)
     try:
@@ -1858,6 +1935,9 @@ async def handle_yesterday_schedule(update: Update, context: ContextTypes.DEFAUL
     except Exception as exc:
         logger.exception("Failed to render schedule image: %s", exc)
 
+    context.user_data.pop("shift_schedule", None)
+    context.user_data.pop("shift_slot_minutes", None)
+    context.user_data.pop("shift_max", None)
     return ConversationHandler.END
 
 
@@ -1917,6 +1997,7 @@ def main() -> None:
             GEN_RULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_generate_rule)],
             YEST_RULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yesterday_rule)],
             YEST_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yesterday_schedule)],
+            SHIFT_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_shift_choice)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
