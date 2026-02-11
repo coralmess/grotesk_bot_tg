@@ -1028,11 +1028,19 @@ def build_schedule_from_yesterday(
                 forced_max_windows = 2
             elif most_common == (180, 180):
                 forced_max_windows = 3
+            elif most_common is not None:
+                forced_max_windows = rng.choice([2, 3])
+            else:
+                forced_max_windows = rng.choice([2, 3])
         if q == 4.0:
             if most_common == (120, 180, 180):
                 forced_max_windows = 2
             elif most_common == (240, 240):
                 forced_max_windows = 3
+            elif most_common is not None:
+                forced_max_windows = rng.choice([2, 3])
+            else:
+                forced_max_windows = rng.choice([2, 3])
     last_schedule: Dict[str, List[Tuple[int, int]]] | None = None
     last_error: Exception | None = None
     for attempt in range(max_attempts):
