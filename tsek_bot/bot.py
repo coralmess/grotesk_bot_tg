@@ -137,8 +137,8 @@ def humanize_error(
 
     if msg == "No valid intervals found in yesterday schedule.":
         return (
-            "У повідомленні не знайшла жодного діапазону часу. "
-            "Надішліть розклад у форматі, як бот надсилає."
+            "У повідомленні не знайдено жодного діапазону часу. "
+            "Надішліть розклад у форматі, як надсилає бот."
         )
 
     if msg in (
@@ -1741,7 +1741,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         resize_keyboard=True,
     )
     text = (
-        "Вітаю! Я генерую графік відключень.\n"
+        "Вітаю! Я генерую графіки відключень.\n"
         "Команда: /generate <кількість_відключених_черг>\n"
         "Команда: /yesterday <кількість_відключених_черг> (розклад наступним повідомленням)\n"
         f"Доступні значення: {values}"
@@ -1816,7 +1816,7 @@ async def handle_yesterday_rule(update: Update, context: ContextTypes.DEFAULT_TY
         return YEST_RULE
 
     context.user_data["yesterday_q"] = q
-    await update.message.reply_text("Надішліть вчорашній розклад у такому ж форматі, як бот надсилає.")
+    await update.message.reply_text("Надішліть вчорашній розклад у такому ж форматі, як надсилає бот.")
     return YEST_SCHEDULE
 
 
