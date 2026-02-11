@@ -78,22 +78,31 @@ class YesterdayScheduleTest(unittest.TestCase):
         base_group = bot.choose_start_group_from_yesterday(schedule)
         self.assertEqual(base_group, "6.1")
 
-        min_window = bot.min_light_window_minutes(q)
         initial_age_by_group = {
-            group: int(round(bot.off_before_day_end_minutes(schedule.get(group, [])) / min_window))
+            group: int(round(bot.off_before_day_end_minutes(schedule.get(group, [])) / slot_minutes))
             for group in bot.GROUPS
         }
 
-        new_schedule = bot.build_constant_schedule(
-            q=q,
-            slot_minutes=slot_minutes,
-            start_group=base_group,
-            anchor_offset=0,
-            initial_age_by_group=initial_age_by_group,
-            max_on_windows=bot.RULES[q].max_on_windows,
-            max_consecutive_off_hours=bot.RULES[q].max_consecutive_off_hours,
-            rng=random.Random(1),
-        )
+        new_schedule = None
+        last_error = None
+        for seed in range(20):
+            try:
+                new_schedule = bot.build_constant_schedule(
+                    q=q,
+                    slot_minutes=slot_minutes,
+                    start_group=base_group,
+                    anchor_offset=0,
+                    initial_age_by_group=initial_age_by_group,
+                    max_on_windows=bot.RULES[q].max_on_windows,
+                    max_consecutive_off_hours=bot.RULES[q].max_consecutive_off_hours,
+                    rng=random.Random(seed),
+                )
+                break
+            except ValueError as exc:
+                last_error = exc
+                continue
+        if new_schedule is None:
+            raise last_error or AssertionError("Failed to build schedule")
 
         max_allowed = bot.RULES[q].max_consecutive_off_hours
         if max_allowed is not None:

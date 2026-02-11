@@ -174,10 +174,6 @@ SHAFA_URLS = [
         "url_name": "Barena Venezia"
     },
     {
-        "url": "https://shafa.ua/uk/clothes?search_text=Cornelian%20Taurus&sort=4",
-        "url_name": "Cornelian Taurus"
-    },
-    {
         "url": "https://shafa.ua/uk/men?search_text=Attachment%20&sort=4",
         "url_name": "Attachment"
     },
@@ -380,5 +376,21 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Tagliovivo&sort=4",
         "url_name": "Tagliovivo"
+    },
+    {
+        "url": "https://shafa.ua/uk/brands/drakes?sort=4",
+        "url_name": "Drakes"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Paul%20Harnden&sort=4",
+        "url_name": "Paul Harnden"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Forme%20d%27Expression&sort=4",
+        "url_name": "Forme d'Expression"
+    },
+    {   
+        "url": "https://shafa.ua/uk/clothes?search_text=Cornelian%20Taurus&sort=4",
+        "url_name": "Cornelian Taurus"
     }
 ]

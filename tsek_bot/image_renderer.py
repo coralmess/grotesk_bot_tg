@@ -131,8 +131,10 @@ def render_schedule_image(
     box_width = (usable_width - (max_boxes - 1) * box_gap) / max_boxes
     box_height = row_height - 26
     box_y_pad = (row_height - box_height) // 2
-    text_pad_x = 10
-    text_gap_y = 6
+    text_pad_x = 12
+    text_gap_y = 10
+    min_time_size = 18
+    min_dur_size = 14
 
     # Rows
     for idx, group in enumerate(groups):
@@ -172,25 +174,41 @@ def render_schedule_image(
             time_text = format_interval_image(start, end)
             dur_text = duration_text(start, end)
 
-            time_bbox = draw.textbbox((0, 0), time_text, font=box_time_font)
+            content_width = box_width - text_pad_x * 2
+
+            time_font = box_time_font
+            time_bbox = draw.textbbox((0, 0), time_text, font=time_font)
             time_w = time_bbox[2] - time_bbox[0]
             time_h = time_bbox[3] - time_bbox[1]
+            if time_w > content_width:
+                scale = content_width / max(1, time_w)
+                new_size = max(min_time_size, int(time_font.size * scale))
+                time_font = load_font(FONT_BOLD, new_size)
+                time_bbox = draw.textbbox((0, 0), time_text, font=time_font)
+                time_w = time_bbox[2] - time_bbox[0]
+                time_h = time_bbox[3] - time_bbox[1]
 
-            dur_bbox = draw.textbbox((0, 0), dur_text, font=box_dur_font)
+            dur_font = box_dur_font
+            dur_bbox = draw.textbbox((0, 0), dur_text, font=dur_font)
             dur_w = dur_bbox[2] - dur_bbox[0]
             dur_h = dur_bbox[3] - dur_bbox[1]
+            if dur_w > content_width:
+                scale = content_width / max(1, dur_w)
+                new_size = max(min_dur_size, int(dur_font.size * scale))
+                dur_font = load_font(FONT_BOLD, new_size)
+                dur_bbox = draw.textbbox((0, 0), dur_text, font=dur_font)
+                dur_w = dur_bbox[2] - dur_bbox[0]
+                dur_h = dur_bbox[3] - dur_bbox[1]
 
             total_text_h = time_h + text_gap_y + dur_h
             time_y = box_y + (box_height - total_text_h) / 2
             dur_y = time_y + time_h + text_gap_y
 
-            time_x = box_x + (box_width - time_w) / 2
-            time_x = max(box_x + text_pad_x, min(time_x, box_x + box_width - text_pad_x - time_w))
-            draw.text((time_x, time_y), time_text, font=box_time_font, fill=text_color)
+            time_x = box_x + text_pad_x + (content_width - time_w) / 2
+            draw.text((time_x, time_y), time_text, font=time_font, fill=text_color)
 
-            dur_x = box_x + (box_width - dur_w) / 2
-            dur_x = max(box_x + text_pad_x, min(dur_x, box_x + box_width - text_pad_x - dur_w))
-            draw.text((dur_x, dur_y), dur_text, font=box_dur_font, fill=text_color)
+            dur_x = box_x + text_pad_x + (content_width - dur_w) / 2
+            draw.text((dur_x, dur_y), dur_text, font=dur_font, fill=text_color)
 
     buffer = BytesIO()
     img.save(buffer, format="PNG")

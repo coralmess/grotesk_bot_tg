@@ -756,5 +756,13 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/list/q-Tagliovivo/?search%5Border%5D=created_at:desc",
         "url_name": "Tagliovivo"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Paul-Harnden/?search%5Border%5D=created_at:desc",
+        "url_name": "Paul Harnden"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Forme-d'Expression/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Forme d'Expression"
     }
 ]

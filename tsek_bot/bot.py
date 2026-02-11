@@ -77,11 +77,11 @@ def format_queue_value(value: float) -> str:
 
 def min_windows_needed_for_rule(q: float) -> int:
     rule = RULES[q]
-    min_window_minutes = min_light_window_minutes(q)
-    if rule.light_hours <= 0 or min_window_minutes <= 0:
+    if rule.light_hours <= 0:
         return 0
-    min_window_hours = min_window_minutes / 60
-    return int(math.ceil(rule.light_hours / min_window_hours))
+    if q >= 6.0:
+        return 0
+    return 2
 
 
 def humanize_error(
@@ -218,6 +218,28 @@ def example_yesterday_format_message() -> str:
         "Головне, щоб були рядки з 'Черга X.Y' і час у форматі 00:00 - 00:00 "
         "(хвилини тільки 00 або 30)._"
     )
+
+
+def normalize_schedule(
+    schedule: Dict[str, List[Tuple[int, int]]],
+) -> Dict[str, List[Tuple[int, int]]]:
+    normalized: Dict[str, List[Tuple[int, int]]] = {}
+    for group in GROUPS:
+        intervals = schedule.get(group, [])
+        normalized[group] = normalize_for_display(intervals)
+    return normalized
+
+
+def schedules_equal(
+    left: Dict[str, List[Tuple[int, int]]],
+    right: Dict[str, List[Tuple[int, int]]],
+) -> bool:
+    left_norm = normalize_schedule(left)
+    right_norm = normalize_schedule(right)
+    for group in GROUPS:
+        if left_norm.get(group, []) != right_norm.get(group, []):
+            return False
+    return True
 
 
 def normalize_queue_value(raw: str) -> float | None:
@@ -434,11 +456,12 @@ def build_constant_schedule(
     if on_count <= 0:
         return {group: [(0, MINUTES_PER_DAY)] for group in GROUPS}
 
-    block_minutes = min_light_window_minutes(q)
+    min_window_minutes = min_light_window_minutes(q)
+    block_minutes = slot_minutes
     if block_minutes <= 0:
         return {group: [(0, MINUTES_PER_DAY)] for group in GROUPS}
 
-    if block_minutes % slot_minutes != 0:
+    if min_window_minutes > 0 and min_window_minutes % block_minutes != 0:
         raise ValueError("Invalid slot size for the configured light window.")
 
     blocks_per_day = MINUTES_PER_DAY // block_minutes
@@ -453,6 +476,32 @@ def build_constant_schedule(
     if max_on_windows is not None and max_on_windows < min_windows:
         raise ValueError("Max on-windows менше за мінімально дозволені 2 вікна.")
     max_windows = max_on_windows if max_on_windows is not None else blocks_per_group
+    if max_on_windows is not None and q < 6.0:
+        min_windows = max(min_windows, max_windows)
+    min_run_blocks = 1
+    if min_window_minutes > 0:
+        min_run_blocks = max(1, min_window_minutes // block_minutes)
+    if max_windows <= 0:
+        max_windows = blocks_per_group
+
+    windows_count = max_windows
+    while windows_count > min_windows and windows_count * min_run_blocks > blocks_per_group:
+        windows_count -= 1
+    if windows_count * min_run_blocks > blocks_per_group:
+        raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
+    target_run_blocks = max(min_run_blocks, int(math.ceil(blocks_per_group / windows_count)))
+
+    run_plans: Dict[str, List[int]] = {}
+    for group in GROUPS:
+        lengths = [min_run_blocks for _ in range(windows_count)]
+        remaining_blocks = blocks_per_group - min_run_blocks * windows_count
+        if remaining_blocks > 0:
+            indices = list(range(windows_count))
+            rng.shuffle(indices)
+            for i in range(remaining_blocks):
+                lengths[indices[i % windows_count]] += 1
+        rng.shuffle(lengths)
+        run_plans[group] = lengths
     max_off_blocks = None
     if max_consecutive_off_hours is not None:
         max_off_blocks = int((max_consecutive_off_hours * 60) // block_minutes)
@@ -462,7 +511,7 @@ def build_constant_schedule(
     order_index = {group: idx for idx, group in enumerate(ordered_groups)}
 
     if anchor_offset is None:
-        anchor_offset = rng.randrange(0, block_minutes, slot_minutes)
+        anchor_offset = rng.randrange(0, block_minutes, block_minutes)
     anchor_offset = anchor_offset % block_minutes
     if min_windows > 0 and anchor_offset != 0:
         anchor_offset = 0
@@ -491,10 +540,25 @@ def build_constant_schedule(
             start_idx = base_order.index(start_group) if start_group in base_order else 0
             base_order = base_order[start_idx:] + base_order[:start_idx]
 
+        if blocks_per_group < min_windows * min_run_blocks:
+            raise ValueError("Неможливо забезпечити мінімум 2 вікна світла.")
+        windows_per_group = min(
+            max_windows,
+            blocks_per_group // min_run_blocks if min_run_blocks > 0 else blocks_per_group,
+        )
+        if windows_per_group < min_windows:
+            raise ValueError("Неможливо забезпечити мінімум 2 вікна світла.")
+        base_len = blocks_per_group // windows_per_group
+        remainder = blocks_per_group % windows_per_group
+        run_lengths = [base_len + 1] * remainder + [base_len] * (windows_per_group - remainder)
+        if any(length < min_run_blocks for length in run_lengths):
+            raise ValueError("Неможливо забезпечити мінімум 2 вікна світла.")
+
         block_on_groups: List[List[str]] = []
-        for _ in range(blocks_per_group):
+        for run_len in run_lengths:
             for group in base_order:
-                block_on_groups.append([group])
+                for _ in range(run_len):
+                    block_on_groups.append([group])
 
         on_intervals: Dict[str, List[Tuple[int, int]]] = {group: [] for group in GROUPS}
         for block_idx, groups in enumerate(block_on_groups):
@@ -527,12 +591,25 @@ def build_constant_schedule(
             max_off = max(end - start for group in GROUPS for start, end in schedule[group])
             if max_off > max_consecutive_off_hours * 60:
                 raise ValueError("Перевищено max_consecutive_off_hours.")
+        for group in GROUPS:
+            for start, end in extract_light_windows(schedule[group]):
+                if end - start < min_window_minutes:
+                    raise ValueError("Неможливо забезпечити мінімум 2 вікна світла.")
         return schedule
 
     remaining: Dict[str, int] = {group: blocks_per_group for group in GROUPS}
     run_len: Dict[str, int] = {group: 0 for group in GROUPS}
     windows_used: Dict[str, int] = {group: 0 for group in GROUPS}
+    run_plan_index: Dict[str, int] = {group: 0 for group in GROUPS}
+    run_goal: Dict[str, int] = {group: 0 for group in GROUPS}
     block_on_groups: List[List[str]] = []
+
+    def next_run_len(group: str) -> int:
+        idx = run_plan_index.get(group, 0)
+        plan = run_plans.get(group, [])
+        if idx >= len(plan):
+            return 0
+        return plan[idx]
 
     for block_idx in range(blocks_per_day):
         blocks_left = blocks_per_day - block_idx
@@ -549,14 +626,80 @@ def build_constant_schedule(
         selected: List[str] = []
         if block_idx == 0 and remaining.get(start_group, 0) > 0:
             selected.append(start_group)
+
+        if max_windows is not None:
+            for group in GROUPS:
+                if (
+                    run_len[group] == 0
+                    and windows_used[group] >= max_windows
+                    and remaining.get(group, 0) > 0
+                ):
+                    raise ValueError("Неможливо побудувати розклад з цим max_on_windows.")
+        must_keep = []
+        if max_windows is not None:
+            must_keep = [
+                group
+                for group in GROUPS
+                if run_len[group] > 0
+                and windows_used[group] >= max_windows
+                and remaining.get(group, 0) > 0
+            ]
+        must_keep.sort(
+            key=lambda g: (-(block_idx - last_on[g]), order_index[g], rng.random())
+        )
+        for group in must_keep:
+            if group not in selected:
+                selected.append(group)
+
+        must_continue = [
+            group
+            for group in GROUPS
+            if run_len[group] > 0
+            and run_len[group] < run_goal[group]
+            and remaining.get(group, 0) > 0
+        ]
+        must_continue.sort(
+            key=lambda g: (
+                -off_run.get(g, 0),
+                -(block_idx - last_on[g]),
+                order_index[g],
+                rng.random(),
+            )
+        )
+        for group in must_continue:
+            if group not in selected:
+                selected.append(group)
+
         if max_off_blocks is not None:
             must_on = [
                 group
                 for group in GROUPS
                 if remaining[group] > 0 and off_run.get(group, 0) >= max_off_blocks
             ]
-            must_on.sort(key=lambda g: (-(block_idx - last_on[g]), order_index[g]))
+            must_on.sort(
+                key=lambda g: (
+                    -off_run.get(g, 0),
+                    -(block_idx - last_on[g]),
+                    order_index[g],
+                    rng.random(),
+                )
+            )
             for group in must_on:
+                if group not in selected:
+                    selected.append(group)
+            urgent_off = [
+                group
+                for group in GROUPS
+                if remaining.get(group, 0) > 0
+                and off_run.get(group, 0) >= max_off_blocks - 1
+                and group not in selected
+            ]
+            urgent_off.sort(
+                key=lambda g: (-off_run.get(g, 0), order_index[g], rng.random())
+            )
+            for group in urgent_off:
+                if len(selected) >= on_count:
+                    break
                 if group not in selected:
                     selected.append(group)
         for group in mandatory:
@@ -566,26 +709,61 @@ def build_constant_schedule(
                 selected.append(group)
 
         if len(selected) > on_count:
-            selected = selected[:on_count]
+            raise ValueError("Cannot build schedule with equal light windows.")
 
         candidates = [
             group for group in GROUPS if remaining[group] > 0 and group not in selected
         ]
+        for group in GROUPS:
+            if (
+                run_len[group] == 0
+                and windows_used[group] < min_windows
+                and blocks_left < next_run_len(group)
+            ):
+                raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
         must_start = [
             group
             for group in candidates
             if run_len[group] == 0
             and windows_used[group] < min_windows
             and windows_used[group] < max_windows
+            and blocks_left >= next_run_len(group)
         ]
-        must_start.sort(key=lambda g: (-(block_idx - last_on[g]), order_index[g]))
-
-        continuing = [group for group in candidates if run_len[group] > 0]
-        continuing.sort(
+        must_start.sort(
             key=lambda g: (
-                -run_len[g],
+                -off_run.get(g, 0),
                 -(block_idx - last_on[g]),
                 order_index[g],
+                rng.random(),
+            )
+        )
+
+        continuing = [
+            group
+            for group in candidates
+            if run_len[group] > 0 and run_len[group] < run_goal[group]
+        ]
+        continuing.sort(
+            key=lambda g: (
+                -(run_goal[g] - run_len[g]),
+                -off_run.get(g, 0),
+                -(block_idx - last_on[g]),
+                order_index[g],
+                rng.random(),
+            )
+        )
+
+        overrun = [
+            group
+            for group in candidates
+            if run_len[group] > 0 and run_len[group] >= run_goal[group]
+        ]
+        overrun.sort(
+            key=lambda g: (
+                -off_run.get(g, 0),
+                -(block_idx - last_on[g]),
+                order_index[g],
+                rng.random(),
             )
         )
 
@@ -595,8 +773,16 @@ def build_constant_schedule(
             if run_len[group] == 0
             and group not in must_start
             and windows_used[group] < max_windows
+            and blocks_left >= next_run_len(group)
         ]
-        starters.sort(key=lambda g: (-(block_idx - last_on[g]), order_index[g]))
+        starters.sort(
+            key=lambda g: (
+                -off_run.get(g, 0),
+                -(block_idx - last_on[g]),
+                order_index[g],
+                rng.random(),
+            )
+        )
         needed = on_count - len(selected)
         if needed > 0:
             for group in must_start:
@@ -616,6 +802,12 @@ def build_constant_schedule(
                 if group not in selected:
                     selected.append(group)
                     needed -= 1
+            for group in overrun:
+                if needed <= 0:
+                    break
+                if group not in selected:
+                    selected.append(group)
+                    needed -= 1
 
         if len(selected) != on_count:
             raise ValueError("Cannot build schedule with equal light windows.")
@@ -624,6 +816,11 @@ def build_constant_schedule(
         for group in GROUPS:
             if group in selected_set:
                 if run_len[group] == 0:
+                    goal = next_run_len(group)
+                    if goal <= 0:
+                        raise ValueError("Cannot build schedule with equal light windows.")
+                    run_goal[group] = goal
+                    run_plan_index[group] += 1
                     windows_used[group] += 1
                 remaining[group] -= 1
                 last_on[group] = block_idx
@@ -666,6 +863,10 @@ def build_constant_schedule(
             raise ValueError("Неможливо забезпечити мінімум 2 вікна світла.")
         if max_on_windows is not None and windows_used[group] > max_windows:
             raise ValueError("Перевищено max_on_windows.")
+        if min_window_minutes > 0:
+            for start, end in extract_light_windows(schedule[group]):
+                if end - start < min_window_minutes:
+                    raise ValueError("Неможливо забезпечити мінімум 2 вікна світла.")
 
     return schedule
 
@@ -774,6 +975,92 @@ def parse_yesterday_schedule(lines: List[str]) -> Tuple[Dict[str, List[Tuple[int
     if not any(schedule[group] for group in GROUPS):
         raise ValueError("No valid intervals found in yesterday schedule.")
     return schedule, slot_minutes
+
+
+def build_schedule_from_yesterday(
+    schedule: Dict[str, List[Tuple[int, int]]],
+    q: float,
+    slot_minutes: int,
+    rng: random.Random,
+    max_attempts: int = 8,
+) -> Dict[str, List[Tuple[int, int]]]:
+    base_group = choose_start_group_from_yesterday(schedule)
+    min_window = min_light_window_minutes(q)
+    anchor_offset = 0 if min_window > 0 else None
+
+    initial_age_by_group: Dict[str, int] | None = None
+    priority_minutes_by_group: Dict[str, int] | None = None
+    if min_window > 0:
+        initial_age_by_group = {}
+        priority_minutes_by_group = {}
+        for group in GROUPS:
+            off_minutes = off_before_day_end_minutes(schedule.get(group, []))
+            initial_age_by_group[group] = int(round(off_minutes / min_window))
+            priority_minutes_by_group[group] = off_minutes
+
+    max_off = max(
+        off_before_day_end_minutes(schedule.get(group, [])) for group in GROUPS
+    )
+    order = rotate_groups("6.1")
+    candidates = [group for group in order if off_before_day_end_minutes(schedule.get(group, [])) == max_off]
+    if base_group in candidates:
+        start_idx = candidates.index(base_group)
+        candidates = candidates[start_idx:] + candidates[:start_idx]
+
+    rule = RULES[q]
+    forced_max_windows: int | None = None
+    if q in (4.0, 4.5):
+        pattern_counts: Dict[Tuple[int, ...], int] = {}
+        for group in GROUPS:
+            light_lengths = [
+                end - start
+                for start, end in extract_light_windows(schedule.get(group, []))
+            ]
+            if not light_lengths:
+                continue
+            key = tuple(sorted(light_lengths))
+            pattern_counts[key] = pattern_counts.get(key, 0) + 1
+        most_common = None
+        if pattern_counts:
+            most_common = max(pattern_counts.items(), key=lambda item: item[1])[0]
+        if q == 4.5:
+            if most_common == (120, 120, 120):
+                forced_max_windows = 2
+            elif most_common == (180, 180):
+                forced_max_windows = 3
+        if q == 4.0:
+            if most_common == (120, 180, 180):
+                forced_max_windows = 2
+            elif most_common == (240, 240):
+                forced_max_windows = 3
+    last_schedule: Dict[str, List[Tuple[int, int]]] | None = None
+    last_error: Exception | None = None
+    for attempt in range(max_attempts):
+        start_group = candidates[attempt % len(candidates)] if candidates else base_group
+        local_rng = random.Random(rng.random())
+        try:
+            new_schedule = build_constant_schedule(
+                q=q,
+                slot_minutes=slot_minutes,
+                start_group=start_group,
+                anchor_offset=anchor_offset,
+                initial_age_by_group=initial_age_by_group,
+                priority_minutes_by_group=priority_minutes_by_group if min_window > 0 else None,
+                max_on_windows=forced_max_windows if forced_max_windows is not None else rule.max_on_windows,
+                max_consecutive_off_hours=rule.max_consecutive_off_hours,
+                rng=local_rng,
+            )
+        except ValueError as exc:
+            last_error = exc
+            continue
+        last_schedule = new_schedule
+        if not schedules_equal(schedule, new_schedule):
+            return new_schedule
+    if last_schedule is not None:
+        return last_schedule
+    if last_error:
+        raise last_error
+    return schedule
 
 
 def choose_offset_for_yesterday(
@@ -1544,33 +1831,12 @@ async def handle_yesterday_schedule(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("Не знайдено кількість черг. Почніть спочатку.")
         return ConversationHandler.END
 
-    rng = random.Random()
-
-    base_group = choose_start_group_from_yesterday(schedule)
-    min_window = min_light_window_minutes(q)
-    anchor_offset = 0 if min_window > 0 else None
-
-    initial_age_by_group: Dict[str, int] | None = None
-    if min_window > 0:
-        initial_age_by_group = {}
-        priority_minutes_by_group: Dict[str, int] = {}
-        for group in GROUPS:
-            off_minutes = off_before_day_end_minutes(schedule.get(group, []))
-            initial_age_by_group[group] = int(round(off_minutes / min_window))
-            priority_minutes_by_group[group] = off_minutes
-
-    rule = RULES[q]
     try:
-        new_schedule = build_constant_schedule(
+        new_schedule = build_schedule_from_yesterday(
+            schedule=schedule,
             q=q,
             slot_minutes=slot_minutes,
-            start_group=base_group,
-            anchor_offset=anchor_offset,
-            initial_age_by_group=initial_age_by_group,
-            priority_minutes_by_group=priority_minutes_by_group if min_window > 0 else None,
-            max_on_windows=rule.max_on_windows,
-            max_consecutive_off_hours=rule.max_consecutive_off_hours,
-            rng=rng,
+            rng=random.Random(),
         )
     except ValueError as exc:
         await update.message.reply_text(humanize_error(exc, q=q, from_yesterday=True))
