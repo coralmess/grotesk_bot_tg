@@ -372,5 +372,13 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Sasquatchfabrix&sort=4",
         "url_name": "Sasquatchfabrix"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Aleksandr%20Manamis&sort=4",
+        "url_name": "Aleksandr Manamis"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Tagliovivo&sort=4",
+        "url_name": "Tagliovivo"
     }
 ]

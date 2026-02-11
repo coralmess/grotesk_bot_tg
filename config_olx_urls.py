@@ -748,5 +748,13 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Sasquatchfabrix/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Sasquatchfabrix"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Aleksandr-Manamis/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Aleksandr Manamis"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Tagliovivo/?search%5Border%5D=created_at:desc",
+        "url_name": "Tagliovivo"
     }
 ]
