@@ -237,10 +237,10 @@ class YesterdayNotSameTest(unittest.TestCase):
             pattern_counts[key] = pattern_counts.get(key, 0) + 1
         if pattern_counts:
             most_common = max(pattern_counts.items(), key=lambda item: item[1])[0]
-            if most_common == (120, 180, 180):
-                expected_lengths = [240, 240]
-            elif most_common == (240, 240):
+            if most_common[0] == 240:
                 expected_lengths = [120, 180, 180]
+            else:
+                expected_lengths = [240, 240]
         for group in bot.GROUPS:
             light_lengths = [
                 end - start for start, end in bot.extract_light_windows(new_schedule[group])

@@ -461,6 +461,7 @@ def build_constant_schedule(
     priority_minutes_by_group: Dict[str, int] | None = None,
     max_on_windows: int | None = None,
     max_consecutive_off_hours: float | None = None,
+    force_windows_count: int | None = None,
     rng: random.Random,
 ) -> Dict[str, List[Tuple[int, int]]]:
     on_count = on_queue_count(q)
@@ -487,19 +488,24 @@ def build_constant_schedule(
     if max_on_windows is not None and max_on_windows < min_windows:
         raise ValueError("Max on-windows менше за мінімально дозволені 2 вікна.")
     max_windows = max_on_windows if max_on_windows is not None else blocks_per_group
-    if max_on_windows is not None and q < 6.0:
-        min_windows = max(min_windows, max_windows)
     min_run_blocks = 1
     if min_window_minutes > 0:
         min_run_blocks = max(1, min_window_minutes // block_minutes)
     if max_windows <= 0:
         max_windows = blocks_per_group
 
-    windows_count = max_windows
-    while windows_count > min_windows and windows_count * min_run_blocks > blocks_per_group:
-        windows_count -= 1
-    if windows_count * min_run_blocks > blocks_per_group:
+    if force_windows_count is not None:
+        min_windows = force_windows_count
+        max_windows = force_windows_count
+
+    feasible_windows = [
+        w
+        for w in range(min_windows, max_windows + 1)
+        if w * min_run_blocks <= blocks_per_group
+    ]
+    if not feasible_windows:
         raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
+    windows_count = rng.choice(feasible_windows)
     target_run_blocks = max(min_run_blocks, int(math.ceil(blocks_per_group / windows_count)))
 
     run_plans: Dict[str, List[int]] = {}
@@ -1052,6 +1058,12 @@ def build_schedule_from_yesterday(
                 forced_max_windows = rng.choice([2, 3])
             else:
                 forced_max_windows = rng.choice([2, 3])
+
+    if q == 4.0 and forced_max_windows is None and most_common is not None:
+        if most_common[0] == 240:
+            forced_max_windows = 3
+        else:
+            forced_max_windows = 2
     last_schedule: Dict[str, List[Tuple[int, int]]] | None = None
     last_error: Exception | None = None
     for attempt in range(max_attempts):
@@ -1067,6 +1079,7 @@ def build_schedule_from_yesterday(
                 priority_minutes_by_group=priority_minutes_by_group if min_window > 0 else None,
                 max_on_windows=forced_max_windows if forced_max_windows is not None else rule.max_on_windows,
                 max_consecutive_off_hours=rule.max_consecutive_off_hours,
+                force_windows_count=forced_max_windows,
                 rng=local_rng,
             )
         except ValueError as exc:
@@ -1868,16 +1881,14 @@ async def handle_yesterday_schedule(update: Update, context: ContextTypes.DEFAUL
         context.user_data["shift_schedule"] = new_schedule
         context.user_data["shift_slot_minutes"] = slot_minutes
         context.user_data["shift_max"] = max_shift
+        title = "⚠️ Увага ⚠️"
         await update.message.reply_text(
-            "⚠️ Увага ⚠️\n"
-            "Якщо робити графік з однаковими годинами відключень з учора на сьогодні для "
-            "всіх підгруп, то завтрашній графік вийде ідентичним. Можемо згенерувати "
-            "новий графік такий як і був учора, а можемо змістити його на певну кількість "
-            f"годин (від 1 до {max_shift}) — так не у всіх буде однакова кількість "
-            "відключень включно з тими, що вже є вчора до кінця дня, але графіки будуть "
-            "нові і все ще з рівномірними відключеннями і включеннями для всіх.\n\n"
-            "Якщо ви хочете отримати ідентичний графік — напишіть 0.\n"
-            f"Якщо ви бажаєте отримати інший графік — напишіть число від 1 до {max_shift}."
+            f"<b>     {title}</b>\n"
+            "Щоб люди не сиділи без світла завтра в той самий час що і вчора, графік можна змістити.\n\n"
+            "Напишіть 0, якщо хочете залишити все точно так, як було вчора.\n\n"
+            f"Напишіть цифру від 1 до {max_shift}, якщо хочете змістити час вимкнень на кілька годин. "
+            "Це зробить для деяких підгруп графік з більш довгими відключеннями, враховуючи ті години відключень що вони вже мають до кінця вчорашнього дня, але новий графік буде відрізнятись від учорашнього і кількість годин зі світлом все ще буде рівною для всіх.",
+            parse_mode="HTML",
         )
         return SHIFT_CHOICE
 
