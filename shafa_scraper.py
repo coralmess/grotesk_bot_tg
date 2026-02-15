@@ -271,31 +271,76 @@ def build_message(item: ShafaItem, prev: Optional[Dict[str, Any]], source_name: 
         f"🔗 {open_link}"
     )
 
-def _upscale_image_bytes_sync(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048, min_upscale_dim: int = 720) -> Optional[bytes]:
+def _upscale_image_bytes_sync(
+    img_bytes: bytes,
+    scale: float = 2.0,
+    max_dim: int = 5000,
+    min_upscale_dim: int = 1280,
+) -> Optional[bytes]:
     try:
         im = Image.open(io.BytesIO(img_bytes))
         if im.mode not in ("RGB", "L"):
             im = im.convert("RGB")
         w, h = im.size
-        if max(w, h) >= min_upscale_dim:
+        # Upscale when the smaller side is below threshold.
+        if min(w, h) >= min_upscale_dim:
             return None
-        new_w, new_h = int(w * scale), int(h * scale)
-        longer = max(new_w, new_h)
-        if longer > max_dim:
-            ratio = max_dim / float(longer)
-            new_w, new_h = int(new_w * ratio), int(new_h * ratio)
-        if new_w <= 0 or new_h <= 0:
-            new_w, new_h = w, h
-        im_up = im.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
-        out = io.BytesIO()
-        im_up.save(out, format="JPEG", quality=92, optimize=True)
-        out.seek(0)
-        return out.getvalue()
+        def _fits_telegram(width: int, height: int) -> bool:
+            if width <= 0 or height <= 0:
+                return False
+            if width + height > 10000:
+                return False
+            ratio = max(width / float(height), height / float(width))
+            return ratio <= 20.0
+
+        def _encode_for_telegram(image: Image.Image) -> Optional[bytes]:
+            max_bytes = 10 * 1024 * 1024
+            for quality in (98, 95, 92, 88, 84, 80):
+                out = io.BytesIO()
+                image.save(out, format="JPEG", quality=quality, subsampling=0, optimize=False)
+                data = out.getvalue()
+                if len(data) <= max_bytes:
+                    return data
+            return None
+
+        for factor in (3.0, 2.5, 2.0):
+            new_w, new_h = int(w * factor), int(h * factor)
+            longer = max(new_w, new_h)
+            if longer > max_dim:
+                ratio = max_dim / float(longer)
+                new_w, new_h = int(new_w * ratio), int(new_h * ratio)
+            if not _fits_telegram(new_w, new_h):
+                continue
+
+            im_up = im.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
+            data = _encode_for_telegram(im_up)
+            if data is not None:
+                return data
+
+            # If quality alone is not enough for size limits, step dimensions down slightly.
+            trial = im_up
+            for _ in range(6):
+                dw = max(1, int(trial.width * 0.9))
+                dh = max(1, int(trial.height * 0.9))
+                if (dw, dh) == trial.size:
+                    break
+                trial = trial.resize((dw, dh), resample=Image.Resampling.LANCZOS)
+                if not _fits_telegram(dw, dh):
+                    continue
+                data = _encode_for_telegram(trial)
+                if data is not None:
+                    return data
+        return None
     except Exception as e:
         logger.error(f"Image upscale failed: {e}")
         return None
 
-async def _upscale_image_bytes(img_bytes: bytes, scale: float = 2.0, max_dim: int = 2048, min_upscale_dim: int = 720) -> Optional[bytes]:
+async def _upscale_image_bytes(
+    img_bytes: bytes,
+    scale: float = 2.0,
+    max_dim: int = 5000,
+    min_upscale_dim: int = 1280,
+) -> Optional[bytes]:
     async with _UPSCALE_SEMAPHORE:
         return await asyncio.to_thread(_upscale_image_bytes_sync, img_bytes, scale, max_dim, min_upscale_dim)
 

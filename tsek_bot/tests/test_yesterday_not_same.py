@@ -227,7 +227,6 @@ class YesterdayNotSameTest(unittest.TestCase):
 
         self.assertFalse(bot.schedules_equal(schedule, new_schedule))
 
-        expected_lengths = [120, 180, 180]
         pattern_counts = {}
         for group in bot.GROUPS:
             light_lengths = [
@@ -235,17 +234,20 @@ class YesterdayNotSameTest(unittest.TestCase):
             ]
             key = tuple(sorted(light_lengths))
             pattern_counts[key] = pattern_counts.get(key, 0) + 1
-        if pattern_counts:
-            most_common = max(pattern_counts.items(), key=lambda item: item[1])[0]
-            if most_common[0] == 240:
-                expected_lengths = [120, 180, 180]
-            else:
-                expected_lengths = [240, 240]
+        most_common = max(pattern_counts.items(), key=lambda item: item[1])[0]
+        expected_windows = 3 if len(most_common) == 2 else 2
+
+        allowed_patterns = [
+            tuple(sorted(int(round(h * 60)) for h in pattern))
+            for pattern in bot.LIGHT_PATTERNS_BY_QUEUE[q]
+            if len(pattern) == expected_windows
+        ]
         for group in bot.GROUPS:
             light_lengths = [
                 end - start for start, end in bot.extract_light_windows(new_schedule[group])
             ]
-            self.assertEqual(sorted(light_lengths), expected_lengths)
+            self.assertEqual(len(light_lengths), expected_windows)
+            self.assertIn(tuple(sorted(light_lengths)), allowed_patterns)
 
     def test_yesterday_schedule_is_not_reused_for_q45(self):
         lines = [line.strip() for line in YESTERDAY_TEXT_Q45_222.splitlines() if line.strip()]
@@ -261,12 +263,18 @@ class YesterdayNotSameTest(unittest.TestCase):
 
         self.assertFalse(bot.schedules_equal(schedule, new_schedule))
 
-        expected_lengths = [180, 180]
+        expected_windows = 2
+        allowed_patterns = [
+            tuple(sorted(int(round(h * 60)) for h in pattern))
+            for pattern in bot.LIGHT_PATTERNS_BY_QUEUE[q]
+            if len(pattern) == expected_windows
+        ]
         for group in bot.GROUPS:
             light_lengths = [
                 end - start for start, end in bot.extract_light_windows(new_schedule[group])
             ]
-            self.assertEqual(sorted(light_lengths), expected_lengths)
+            self.assertEqual(len(light_lengths), expected_windows)
+            self.assertIn(tuple(sorted(light_lengths)), allowed_patterns)
 
     def test_yesterday_schedule_is_not_reused_for_q45_reverse(self):
         lines = [line.strip() for line in YESTERDAY_TEXT_Q45_33.splitlines() if line.strip()]
@@ -282,12 +290,18 @@ class YesterdayNotSameTest(unittest.TestCase):
 
         self.assertFalse(bot.schedules_equal(schedule, new_schedule))
 
-        expected_lengths = [120, 120, 120]
+        expected_windows = 3
+        allowed_patterns = [
+            tuple(sorted(int(round(h * 60)) for h in pattern))
+            for pattern in bot.LIGHT_PATTERNS_BY_QUEUE[q]
+            if len(pattern) == expected_windows
+        ]
         for group in bot.GROUPS:
             light_lengths = [
                 end - start for start, end in bot.extract_light_windows(new_schedule[group])
             ]
-            self.assertEqual(sorted(light_lengths), expected_lengths)
+            self.assertEqual(len(light_lengths), expected_windows)
+            self.assertIn(tuple(sorted(light_lengths)), allowed_patterns)
 
 
 

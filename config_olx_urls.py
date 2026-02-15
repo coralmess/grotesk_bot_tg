@@ -102,7 +102,7 @@ OLX_URLS = [
         "url_name": "Alessi"
     },
     {
-        "url": "https://www.olx.ua/uk/dom-i-sad/q-Vitra/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url": "https://www.olx.ua/uk/dom-i-sad/mebel/q-vitra/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Vitra"
     },
     {
@@ -764,5 +764,21 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Forme-d'Expression/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Forme d'Expression"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Inverallan/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Inverallan"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Fumito-Ganryu/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Fumito Ganryu"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Hed-Mayner/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Hed Mayner"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Polyploid/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Polyploid"
     }
 ]

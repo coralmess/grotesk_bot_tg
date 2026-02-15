@@ -392,5 +392,21 @@ SHAFA_URLS = [
     {   
         "url": "https://shafa.ua/uk/clothes?search_text=Cornelian%20Taurus&sort=4",
         "url_name": "Cornelian Taurus"
+    },
+    {
+        "url":"https://shafa.ua/uk/clothes?search_text=Inverallan&sort=4",
+        "url_name": "Inverallan"
+    },
+    {
+        "url":"https://shafa.ua/uk/clothes?search_text=Fumito%20Ganryu&sort=4",
+        "url_name": "Fumito Ganryu"
+    },
+    {
+        "url":"https://shafa.ua/uk/clothes?search_text=Hed%20Mayner&sort=4",
+        "url_name": "Hed Mayner"
+    },
+    {
+        "url":"https://shafa.ua/uk/clothes?search_text=Polyploid&sort=4",
+        "url_name": "Polyploid"
     }
 ]

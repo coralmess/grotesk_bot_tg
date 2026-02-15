@@ -1,10 +1,10 @@
+import asyncio
 import logging
 import math
 import random
 import re
 import sys
 from pathlib import Path
-from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
@@ -21,6 +21,15 @@ from telegram.ext import (
     filters,
 )
 from config import TELEGRAM_TSEK_BOT_TOKEN
+from tsek_bot.constants import (
+    MINUTES_PER_DAY,
+    GROUPS,
+    SHOW_LIGHT_WINDOWS_ON_IMAGE,
+    RULES,
+    VALID_QUEUES,
+    LIGHT_PATTERNS_BY_QUEUE,
+    MIN_LIGHT_WINDOW_BY_QUEUE,
+)
 
 try:
     from tsek_bot.image_renderer import render_schedule_image
@@ -34,45 +43,46 @@ logging.basicConfig(
 logger = logging.getLogger("tsek_schedule_bot")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-MINUTES_PER_DAY = 24 * 60
-GROUPS = [f"{i}.{j}" for i in range(1, 7) for j in (1, 2)]
 GROUP_RE = re.compile(r"Черга\s+([1-6]\.[12])", re.IGNORECASE)
 TIME_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})")
 
-SHOW_LIGHT_WINDOWS_ON_IMAGE = True
-
-
-@dataclass(frozen=True)
-class Rule:
-    queues: float
-    light_hours: float
-    dark_hours: float
-    min_break_hours: float | None
-    max_consecutive_off_hours: float | None
-    max_on_windows: int | None = None
-
-
-RULES: Dict[float, Rule] = {
-    6.0: Rule(queues=6.0, light_hours=0, dark_hours=24, min_break_hours=0, max_consecutive_off_hours=None),
-    5.5: Rule(queues=5.5, light_hours=2, dark_hours=22, min_break_hours=1, max_consecutive_off_hours=11, max_on_windows=2),
-    5.0: Rule(queues=5.0, light_hours=4, dark_hours=20, min_break_hours=2, max_consecutive_off_hours=10, max_on_windows=2),
-    4.5: Rule(queues=4.5, light_hours=6, dark_hours=18, min_break_hours=2, max_consecutive_off_hours=9, max_on_windows=3),
-    4.0: Rule(queues=4.0, light_hours=8, dark_hours=16, min_break_hours=2, max_consecutive_off_hours=8, max_on_windows=3),
-    3.5: Rule(queues=3.5, light_hours=10, dark_hours=14, min_break_hours=4, max_consecutive_off_hours=7, max_on_windows=3),
-    3.0: Rule(queues=3.0, light_hours=12, dark_hours=12, min_break_hours=4, max_consecutive_off_hours=6, max_on_windows=3),
-    2.5: Rule(queues=2.5, light_hours=14, dark_hours=10, min_break_hours=4, max_consecutive_off_hours=5, max_on_windows=4),
-    2.0: Rule(queues=2.0, light_hours=16, dark_hours=8, min_break_hours=4, max_consecutive_off_hours=4, max_on_windows=3),
-    1.5: Rule(queues=1.5, light_hours=18, dark_hours=6, min_break_hours=None, max_consecutive_off_hours=3, max_on_windows=2),
-    1.0: Rule(queues=1.0, light_hours=20, dark_hours=4, min_break_hours=None, max_consecutive_off_hours=2, max_on_windows=2),
-}
-
-VALID_QUEUES = sorted(RULES.keys())
-
-GEN_RULE, YEST_RULE, YEST_SCHEDULE, SHIFT_CHOICE = range(4)
+GEN_RULE, YEST_RULE, YEST_SCHEDULE, YEST_PATTERN, SHIFT_CHOICE = range(5)
 
 
 def format_queue_value(value: float) -> str:
     return str(value).rstrip("0").rstrip(".")
+
+
+def format_pattern_value(value: float) -> str:
+    return str(value).rstrip("0").rstrip(".")
+
+
+def format_light_pattern(pattern: Tuple[float, ...]) -> str:
+    return "+".join(format_pattern_value(x) for x in pattern)
+
+
+def parse_light_pattern_input(text: str) -> Tuple[float, ...] | None:
+    raw = text.strip().replace(" ", "").replace(",", ".")
+    if not raw:
+        return None
+    chunks = raw.split("+")
+    if not chunks:
+        return None
+    parsed: List[float] = []
+    for chunk in chunks:
+        if not chunk:
+            return None
+        try:
+            value = float(chunk)
+        except ValueError:
+            return None
+        if value <= 0:
+            return None
+        rounded = round(value * 2) / 2
+        if abs(rounded - value) > 1e-6:
+            return None
+        parsed.append(rounded)
+    return tuple(parsed)
 
 
 def min_windows_needed_for_rule(q: float) -> int:
@@ -91,24 +101,42 @@ def humanize_error(
     from_yesterday: bool = False,
 ) -> str:
     msg = str(exc)
-    schedule_error_msgs = {
-        "Invalid slot size for the configured light window.",
-        "Invalid block size.",
-        "Cannot distribute light evenly with these settings.",
-        "Cannot build schedule with equal light windows.",
-        "Неможливо побудувати розклад з цим max_on_windows.",
-        "Перевищено max_on_windows.",
-        "Max on-windows менше за мінімально дозволені 2 вікна.",
-        "Неможливо забезпечити мінімум 2 вікна світла.",
-        "Не вдалося побудувати розклад.",
-    }
-    if msg in schedule_error_msgs and q is not None and q in RULES:
+
+    if msg in (
+        "Invalid time format.",
+        "Invalid time value.",
+    ):
+        return (
+            "Неправильний формат часу. Приклад: 08:00 - 12:00. "
+            "Хвилини можуть бути лише 00 або 30."
+        )
+
+    if msg == "No valid intervals found in yesterday schedule.":
+        return (
+            "У повідомленні не знайшла жодного діапазону часу. "
+            "Надішліть розклад у форматі, як бот надсилає."
+        )
+
+    if "Invalid slot size" in msg or "Invalid block size" in msg:
+        return (
+            "У розкладі є час, який не підходить під крок 30 хвилин або 1 година. "
+            "Перевірте, щоб часи були кратні 30 хвилинам."
+        )
+
+    if "Cannot distribute light evenly" in msg:
+        return "Не можу рівномірно розподілити години світла для всіх груп."
+
+    if q is not None and q in RULES:
         rule = RULES[q]
         min_window_minutes = min_light_window_minutes(q)
         if (
             rule.max_on_windows is not None
             and min_window_minutes > 0
             and min_windows_needed_for_rule(q) > rule.max_on_windows
+            and (
+                "max_on_windows" in msg
+                or "Cannot build schedule" in msg
+            )
         ):
             min_windows_needed = min_windows_needed_for_rule(q)
             min_window_hours = int(min_window_minutes // 60)
@@ -118,83 +146,42 @@ def humanize_error(
                 else rule.light_hours
             )
             return (
-                "Не виходить скласти рівний графік для значення "
-                f"{format_queue_value(q)}. За правилом світло має бути "
-                f"{light_hours} год на добу, і кожне увімкнення повинно тривати "
-                f"не менше {min_window_hours} год. Тому потрібно щонайменше "
-                f"{min_windows_needed} увімкнення, а правило дозволяє лише "
-                f"{rule.max_on_windows}. Через це рівний графік скласти неможливо."
+                "Не можу побудувати розклад для правила "
+                f"{format_queue_value(q)}. За цим правилом світла має бути "
+                f"{light_hours} год на добу, а мінімальна тривалість одного "
+                f"вікна світла — {min_window_hours} год. Це означає, що потрібно "
+                f"щонайменше {min_windows_needed} вікна, але дозволено лише "
+                f"{rule.max_on_windows}. Спробуйте інше правило або формат."
             )
 
-    if msg in (
-        "Invalid time format.",
-        "Invalid time value.",
-    ):
-        return (
-            "Не можу прочитати час. Пишіть так: 08:00 - 12:00. "
-            "Хвилини можуть бути лише 00 або 30."
-        )
-
-    if msg == "No valid intervals found in yesterday schedule.":
-        return (
-            "У повідомленні не знайдено жодного діапазону часу. "
-            "Надішліть розклад у форматі, як надсилає бот."
-        )
-
-    if msg in (
-        "Invalid slot size for the configured light window.",
-        "Invalid block size.",
-    ):
-        return (
-            "Не можу скласти графік з таким кроком часу. "
-            "Спробуйте інше значення або інший розклад."
-        )
-
-    if msg == "Cannot distribute light evenly with these settings.":
-        return (
-            "Не виходить поділити світло порівну між усіма чергами "
-            "за цими правилами."
-        )
-
-    if msg in (
-        "Cannot build schedule with equal light windows.",
-        "Неможливо побудувати розклад з цим max_on_windows.",
-        "Перевищено max_on_windows.",
-        "Max on-windows менше за мінімально дозволені 2 вікна.",
-        "Неможливо забезпечити мінімум 2 вікна світла.",
+    if (
+        "Cannot build schedule" in msg
+        or "max_on_windows" in msg
     ):
         if from_yesterday:
             return (
-                "Не вийшло скласти новий графік на основі вчорашнього. "
-                "У цьому розкладі не можна рівно розподілити світло між усіма "
-                "чергами так, щоб виконати всі правила. Спробуйте інший "
-                "вчорашній розклад або інше значення."
+                "Не можу побудувати графік за вчорашнім розкладом. "
+                "Ліміт «максимум без світла» рахується тільки в межах нового дня, "
+                "але з цими вікнами все одно не виходить скласти рівний графік. "
+                "Спробуйте інший розклад або інше правило."
             )
         return (
-            "Не вийшло скласти рівний графік за цими правилами. "
-            "Спробуйте інше значення."
+            "Не можу побудувати графік за цими параметрами. "
+            "Спробуйте інше правило."
         )
 
-    if msg in (
-        "Перевищено max_consecutive_off_hours.",
-    ):
+    if "max_consecutive_off_hours" in msg:
         if q is not None and q in RULES and RULES[q].max_consecutive_off_hours:
             max_hours = RULES[q].max_consecutive_off_hours
             return (
-                "Виходить занадто довге відключення для однієї черги. "
-                f"За правилом максимум {max_hours} год поспіль."
+                "Перевищено максимальну тривалість відключення. "
+                f"За правилом не можна більше ніж {max_hours} год підряд."
             )
-        return "Виходить занадто довге відключення для однієї черги."
-
-    if msg == "Не вдалося побудувати розклад.":
-        return (
-            "На жаль, не вдалося скласти графік. "
-            "Спробуйте інше значення або інший розклад."
-        )
+        return "Перевищено максимальну тривалість відключення."
 
     return (
-        "На жаль, не вдалося скласти графік. "
-        "Спробуйте інше значення або інший розклад."
+        "Не знаю, як побудувати графік для цих умов. "
+        "Спробуйте інше правило або розклад."
     )
 
 
@@ -228,6 +215,14 @@ def normalize_schedule(
         intervals = schedule.get(group, [])
         normalized[group] = normalize_for_display(intervals)
     return normalized
+
+
+def detect_slot_minutes(schedule: Dict[str, List[Tuple[int, int]]]) -> int:
+    for intervals in schedule.values():
+        for start, end in intervals:
+            if start % 60 != 0 or end % 60 != 0:
+                return 30
+    return 60
 
 
 def schedules_equal(
@@ -275,11 +270,69 @@ def on_queue_count(q: float) -> int:
 
 
 def min_light_window_minutes(q: float) -> int:
-    if q >= 6.0:
-        return 0
-    if q >= 5.5:
+    hours = MIN_LIGHT_WINDOW_BY_QUEUE.get(q, 0.0)
+    return int(round(hours * 60))
+
+
+def needs_half_hour_slot(q: float) -> bool:
+    if min_light_window_minutes(q) % 60 != 0:
+        return True
+    for pattern in LIGHT_PATTERNS_BY_QUEUE.get(q, []):
+        if any(abs(length - round(length)) > 1e-6 for length in pattern):
+            return True
+    return False
+
+
+def pattern_slot_minutes(pattern: Tuple[float, ...] | None) -> int:
+    if not pattern:
         return 60
-    return 120
+    for length in pattern:
+        if abs(length - round(length)) > 1e-6:
+            return 30
+    return 60
+
+
+def light_pattern_candidates(
+    *,
+    q: float,
+    allowed_window_counts: set[int] | None = None,
+    slot_minutes: int | None = None,
+) -> List[Tuple[float, ...]]:
+    patterns = LIGHT_PATTERNS_BY_QUEUE.get(q, [])
+    if not patterns:
+        return []
+    rule = RULES[q]
+    min_hours = MIN_LIGHT_WINDOW_BY_QUEUE.get(q, 0.0)
+    filtered: List[Tuple[float, ...]] = []
+    for pattern in patterns:
+        if allowed_window_counts is not None and len(pattern) not in allowed_window_counts:
+            continue
+        if abs(sum(pattern) - rule.light_hours) > 1e-6:
+            continue
+        if any(length + 1e-6 < min_hours for length in pattern):
+            continue
+        if slot_minutes is not None:
+            if any(int(round(length * 60)) % slot_minutes != 0 for length in pattern):
+                continue
+        filtered.append(pattern)
+    return filtered
+
+
+def pick_light_pattern(
+    *,
+    q: float,
+    rng: random.Random,
+    allowed_window_counts: set[int] | None = None,
+    slot_minutes: int | None = None,
+) -> Tuple[float, ...] | None:
+    filtered = light_pattern_candidates(
+        q=q,
+        allowed_window_counts=allowed_window_counts,
+        slot_minutes=slot_minutes,
+    )
+    if not filtered:
+        return None
+    return rng.choice(filtered)
 
 
 def rotate_groups(start_group: str) -> List[str]:
@@ -462,6 +515,7 @@ def build_constant_schedule(
     max_on_windows: int | None = None,
     max_consecutive_off_hours: float | None = None,
     force_windows_count: int | None = None,
+    light_pattern: Tuple[float, ...] | None = None,
     rng: random.Random,
 ) -> Dict[str, List[Tuple[int, int]]]:
     on_count = on_queue_count(q)
@@ -472,9 +526,6 @@ def build_constant_schedule(
     block_minutes = slot_minutes
     if block_minutes <= 0:
         return {group: [(0, MINUTES_PER_DAY)] for group in GROUPS}
-
-    if min_window_minutes > 0 and min_window_minutes % block_minutes != 0:
-        raise ValueError("Invalid slot size for the configured light window.")
 
     blocks_per_day = MINUTES_PER_DAY // block_minutes
     if blocks_per_day <= 0:
@@ -490,7 +541,7 @@ def build_constant_schedule(
     max_windows = max_on_windows if max_on_windows is not None else blocks_per_group
     min_run_blocks = 1
     if min_window_minutes > 0:
-        min_run_blocks = max(1, min_window_minutes // block_minutes)
+        min_run_blocks = max(1, int(math.ceil(min_window_minutes / block_minutes)))
     if max_windows <= 0:
         max_windows = blocks_per_group
 
@@ -498,27 +549,47 @@ def build_constant_schedule(
         min_windows = force_windows_count
         max_windows = force_windows_count
 
-    feasible_windows = [
-        w
-        for w in range(min_windows, max_windows + 1)
-        if w * min_run_blocks <= blocks_per_group
-    ]
-    if not feasible_windows:
-        raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
-    windows_count = rng.choice(feasible_windows)
-    target_run_blocks = max(min_run_blocks, int(math.ceil(blocks_per_group / windows_count)))
-
     run_plans: Dict[str, List[int]] = {}
-    for group in GROUPS:
-        lengths = [min_run_blocks for _ in range(windows_count)]
-        remaining_blocks = blocks_per_group - min_run_blocks * windows_count
-        if remaining_blocks > 0:
-            indices = list(range(windows_count))
-            rng.shuffle(indices)
-            for i in range(remaining_blocks):
-                lengths[indices[i % windows_count]] += 1
-        rng.shuffle(lengths)
-        run_plans[group] = lengths
+    if light_pattern is not None:
+        pattern_blocks = [int(round(length * 60 / block_minutes)) for length in light_pattern]
+        if any(length <= 0 for length in pattern_blocks):
+            raise ValueError("Invalid slot size for the configured light window.")
+        if sum(pattern_blocks) != blocks_per_group:
+            raise ValueError("Cannot distribute light evenly with these settings.")
+        if any(length < min_run_blocks for length in pattern_blocks):
+            raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
+        windows_count = len(pattern_blocks)
+        if max_on_windows is not None and windows_count > max_on_windows:
+            raise ValueError("Перевищено max_on_windows.")
+        min_windows = windows_count
+        max_windows = windows_count
+        if force_windows_count is not None and force_windows_count != windows_count:
+            raise ValueError("Cannot build schedule with equal light windows.")
+        for group in GROUPS:
+            lengths = list(pattern_blocks)
+            rng.shuffle(lengths)
+            run_plans[group] = lengths
+    else:
+        feasible_windows = [
+            w
+            for w in range(min_windows, max_windows + 1)
+            if w * min_run_blocks <= blocks_per_group
+        ]
+        if not feasible_windows:
+            raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
+        windows_count = rng.choice(feasible_windows)
+
+        for group in GROUPS:
+            lengths = [min_run_blocks for _ in range(windows_count)]
+            remaining_blocks = blocks_per_group - min_run_blocks * windows_count
+            if remaining_blocks > 0:
+                indices = list(range(windows_count))
+                rng.shuffle(indices)
+                for i in range(remaining_blocks):
+                    lengths[indices[i % windows_count]] += 1
+            rng.shuffle(lengths)
+            run_plans[group] = lengths
+
     max_off_blocks = None
     if max_consecutive_off_hours is not None:
         max_off_blocks = int((max_consecutive_off_hours * 60) // block_minutes)
@@ -558,18 +629,32 @@ def build_constant_schedule(
             base_order = base_order[start_idx:] + base_order[:start_idx]
 
         if blocks_per_group < min_windows * min_run_blocks:
-            raise ValueError("Неможливо забезпечити мінімум 2 вікна світла.")
-        windows_per_group = min(
-            max_windows,
-            blocks_per_group // min_run_blocks if min_run_blocks > 0 else blocks_per_group,
-        )
-        if windows_per_group < min_windows:
-            raise ValueError("Неможливо забезпечити мінімум 2 вікна світла.")
-        base_len = blocks_per_group // windows_per_group
-        remainder = blocks_per_group % windows_per_group
-        run_lengths = [base_len + 1] * remainder + [base_len] * (windows_per_group - remainder)
-        if any(length < min_run_blocks for length in run_lengths):
-            raise ValueError("Неможливо забезпечити мінімум 2 вікна світла.")
+            raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
+        if light_pattern is not None:
+            pattern_blocks = [int(round(length * 60 / block_minutes)) for length in light_pattern]
+            if any(length <= 0 for length in pattern_blocks):
+                raise ValueError("Invalid slot size for the configured light window.")
+            if any(length < min_run_blocks for length in pattern_blocks):
+                raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
+            windows_per_group = len(pattern_blocks)
+            if windows_per_group < min_windows:
+                raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
+            if max_windows is not None and windows_per_group > max_windows:
+                raise ValueError("Перевищено max_on_windows.")
+            run_lengths = list(pattern_blocks)
+            rng.shuffle(run_lengths)
+        else:
+            windows_per_group = min(
+                max_windows,
+                blocks_per_group // min_run_blocks if min_run_blocks > 0 else blocks_per_group,
+            )
+            if windows_per_group < min_windows:
+                raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
+            base_len = blocks_per_group // windows_per_group
+            remainder = blocks_per_group % windows_per_group
+            run_lengths = [base_len + 1] * remainder + [base_len] * (windows_per_group - remainder)
+            if any(length < min_run_blocks for length in run_lengths):
+                raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
 
         block_on_groups: List[List[str]] = []
         for run_len in run_lengths:
@@ -651,7 +736,7 @@ def build_constant_schedule(
                     and windows_used[group] >= max_windows
                     and remaining.get(group, 0) > 0
                 ):
-                    raise ValueError("Неможливо побудувати розклад з цим max_on_windows.")
+                    raise ValueError("Перевищено max_on_windows.")
         must_keep = []
         if max_windows is not None:
             must_keep = [
@@ -721,7 +806,7 @@ def build_constant_schedule(
                     selected.append(group)
         for group in mandatory:
             if run_len[group] == 0 and windows_used[group] >= max_windows:
-                raise ValueError("Неможливо побудувати розклад з цим max_on_windows.")
+                raise ValueError("Перевищено max_on_windows.")
             if group not in selected:
                 selected.append(group)
 
@@ -891,27 +976,50 @@ def build_constant_schedule(
 def build_schedule(
     *,
     q: float,
-    slot_minutes: int,
+    slot_minutes: int | None,
     rng: random.Random | None = None,
 ) -> Dict[str, List[Tuple[int, int]]]:
     rng = rng or random.Random()
     rule = RULES[q]
+    preferred_slot = slot_minutes
+    if preferred_slot is None and needs_half_hour_slot(q):
+        preferred_slot = 30
     last_error: Exception | None = None
-    for _ in range(20):
-        start_group = rng.choice(GROUPS)
-        try:
-            return build_constant_schedule(
-                q=q,
-                slot_minutes=slot_minutes,
-                start_group=start_group,
-                anchor_offset=None,
-                max_on_windows=rule.max_on_windows,
-                max_consecutive_off_hours=rule.max_consecutive_off_hours,
-                rng=rng,
-            )
-        except ValueError as exc:
-            last_error = exc
-            continue
+    patterns = light_pattern_candidates(
+        q=q,
+        slot_minutes=preferred_slot,
+    )
+    if not patterns and q < 6.0 and LIGHT_PATTERNS_BY_QUEUE.get(q):
+        raise ValueError("Cannot build schedule with equal light windows.")
+    if not patterns:
+        patterns = [None]
+
+    pattern_order = patterns[:]
+    rng.shuffle(pattern_order)
+    attempts_per_pattern = 160
+    for pattern in pattern_order:
+        resolved_slot = preferred_slot
+        if resolved_slot is None:
+            resolved_slot = pattern_slot_minutes(pattern)
+        if resolved_slot == 60 and needs_half_hour_slot(q):
+            resolved_slot = 30
+        for _ in range(attempts_per_pattern):
+            local_rng = random.Random(rng.random())
+            start_group = local_rng.choice(GROUPS)
+            try:
+                return build_constant_schedule(
+                    q=q,
+                    slot_minutes=resolved_slot,
+                    start_group=start_group,
+                    anchor_offset=None,
+                    max_on_windows=rule.max_on_windows,
+                    max_consecutive_off_hours=rule.max_consecutive_off_hours,
+                    light_pattern=pattern,
+                    rng=local_rng,
+                )
+            except ValueError as exc:
+                last_error = exc
+                continue
     if last_error:
         raise last_error
     raise ValueError("Не вдалося побудувати розклад.")
@@ -1000,7 +1108,10 @@ def build_schedule_from_yesterday(
     slot_minutes: int,
     rng: random.Random,
     max_attempts: int = 8,
+    allowed_patterns: List[Tuple[float, ...]] | None = None,
 ) -> Dict[str, List[Tuple[int, int]]]:
+    if slot_minutes == 60 and needs_half_hour_slot(q):
+        slot_minutes = 30
     base_group = choose_start_group_from_yesterday(schedule)
     min_window = min_light_window_minutes(q)
     anchor_offset = 0 if min_window > 0 else None
@@ -1025,7 +1136,9 @@ def build_schedule_from_yesterday(
         candidates = candidates[start_idx:] + candidates[:start_idx]
 
     rule = RULES[q]
-    forced_max_windows: int | None = None
+    preferred_windows: int | None = None
+    fallback_windows: int | None = None
+    most_common: Tuple[int, ...] | None = None
     if q in (4.0, 4.5):
         pattern_counts: Dict[Tuple[int, ...], int] = {}
         for group in GROUPS:
@@ -1037,57 +1150,87 @@ def build_schedule_from_yesterday(
                 continue
             key = tuple(sorted(light_lengths))
             pattern_counts[key] = pattern_counts.get(key, 0) + 1
-        most_common = None
         if pattern_counts:
             most_common = max(pattern_counts.items(), key=lambda item: item[1])[0]
-        if q == 4.5:
-            if most_common == (120, 120, 120):
-                forced_max_windows = 2
-            elif most_common == (180, 180):
-                forced_max_windows = 3
-            elif most_common is not None:
-                forced_max_windows = rng.choice([2, 3])
+        if most_common is not None:
+            if len(most_common) == 2:
+                preferred_windows = 3
+                fallback_windows = 2
+            elif len(most_common) == 3:
+                preferred_windows = 2
+                fallback_windows = 3
             else:
-                forced_max_windows = rng.choice([2, 3])
-        if q == 4.0:
-            if most_common == (120, 180, 180):
-                forced_max_windows = 2
-            elif most_common == (240, 240):
-                forced_max_windows = 3
-            elif most_common is not None:
-                forced_max_windows = rng.choice([2, 3])
-            else:
-                forced_max_windows = rng.choice([2, 3])
-
-    if q == 4.0 and forced_max_windows is None and most_common is not None:
-        if most_common[0] == 240:
-            forced_max_windows = 3
+                preferred_windows = rng.choice([2, 3])
+                fallback_windows = 2 if preferred_windows == 3 else 3
         else:
-            forced_max_windows = 2
+            preferred_windows = rng.choice([2, 3])
+            fallback_windows = 2 if preferred_windows == 3 else 3
+
+    if allowed_patterns is not None:
+        possible = light_pattern_candidates(
+            q=q,
+            allowed_window_counts=None,
+            slot_minutes=slot_minutes,
+        )
+        possible_set = {tuple(p) for p in possible}
+        patterns = [tuple(p) for p in allowed_patterns if tuple(p) in possible_set]
+    elif preferred_windows is not None:
+        primary_patterns = light_pattern_candidates(
+            q=q,
+            allowed_window_counts={preferred_windows},
+            slot_minutes=slot_minutes,
+        )
+        secondary_patterns = light_pattern_candidates(
+            q=q,
+            allowed_window_counts={fallback_windows} if fallback_windows is not None else None,
+            slot_minutes=slot_minutes,
+        )
+        # If preferred bucket has only one possible shape, keep randomness by allowing fallback shapes too.
+        if len(primary_patterns) <= 1 and secondary_patterns:
+            patterns = primary_patterns + [
+                pat for pat in secondary_patterns if pat not in primary_patterns
+            ]
+        else:
+            patterns = primary_patterns
+    else:
+        patterns = light_pattern_candidates(
+            q=q,
+            allowed_window_counts=None,
+            slot_minutes=slot_minutes,
+        )
+    if not patterns and q < 6.0 and LIGHT_PATTERNS_BY_QUEUE.get(q):
+        raise ValueError("Cannot build schedule with equal light windows.")
+    if not patterns:
+        patterns = [None]
+
+    pattern_order = patterns[:]
+    rng.shuffle(pattern_order)
+    attempts_per_pattern = max(40, max_attempts * 20)
     last_schedule: Dict[str, List[Tuple[int, int]]] | None = None
     last_error: Exception | None = None
-    for attempt in range(max_attempts):
-        start_group = candidates[attempt % len(candidates)] if candidates else base_group
-        local_rng = random.Random(rng.random())
-        try:
-            new_schedule = build_constant_schedule(
-                q=q,
-                slot_minutes=slot_minutes,
-                start_group=start_group,
-                anchor_offset=anchor_offset,
-                initial_age_by_group=initial_age_by_group,
-                priority_minutes_by_group=priority_minutes_by_group if min_window > 0 else None,
-                max_on_windows=forced_max_windows if forced_max_windows is not None else rule.max_on_windows,
-                max_consecutive_off_hours=rule.max_consecutive_off_hours,
-                force_windows_count=forced_max_windows,
-                rng=local_rng,
-            )
-        except ValueError as exc:
-            last_error = exc
-            continue
-        last_schedule = new_schedule
-        if not schedules_equal(schedule, new_schedule):
-            return new_schedule
+    for pattern in pattern_order:
+        for attempt in range(attempts_per_pattern):
+            start_group = candidates[attempt % len(candidates)] if candidates else base_group
+            local_rng = random.Random(rng.random())
+            try:
+                new_schedule = build_constant_schedule(
+                    q=q,
+                    slot_minutes=slot_minutes,
+                    start_group=start_group,
+                    anchor_offset=anchor_offset,
+                    initial_age_by_group=initial_age_by_group,
+                    priority_minutes_by_group=priority_minutes_by_group if min_window > 0 else None,
+                    max_on_windows=rule.max_on_windows,
+                    max_consecutive_off_hours=rule.max_consecutive_off_hours,
+                    light_pattern=pattern,
+                    rng=local_rng,
+                )
+            except ValueError as exc:
+                last_error = exc
+                continue
+            last_schedule = new_schedule
+            if not schedules_equal(schedule, new_schedule):
+                return new_schedule
     if last_schedule is not None:
         return last_schedule
     if last_error:
@@ -1801,7 +1944,7 @@ async def handle_generate_rule(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         schedule = build_schedule(
             q=q,
-            slot_minutes=60,
+            slot_minutes=None,
             rng=random.Random(),
         )
     except ValueError as exc:
@@ -1809,7 +1952,8 @@ async def handle_generate_rule(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
 
     await update.message.reply_text(format_schedule(schedule))
-    await send_off_counts(update, schedule, 60)
+    slot_minutes = detect_slot_minutes(schedule)
+    await send_off_counts(update, schedule, slot_minutes)
     try:
         image = render_schedule_image(build_intervals_for_image(schedule), GROUPS)
         await update.message.reply_photo(photo=image)
@@ -1863,12 +2007,39 @@ async def handle_yesterday_schedule(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("Не знайдено кількість черг. Почніть спочатку.")
         return ConversationHandler.END
 
+    if slot_minutes == 60 and needs_half_hour_slot(q):
+        slot_minutes = 30
+
+    available_patterns = light_pattern_candidates(
+        q=q,
+        allowed_window_counts=None,
+        slot_minutes=slot_minutes,
+    )
+    if not available_patterns and q < 6.0 and LIGHT_PATTERNS_BY_QUEUE.get(q):
+        await update.message.reply_text("Для цього правила не знайдено жодного валідного шаблону світла.")
+        return ConversationHandler.END
+
+    context.user_data["yesterday_schedule"] = schedule
+    context.user_data["yesterday_slot_minutes"] = slot_minutes
+    context.user_data["yesterday_available_patterns"] = available_patterns
+
+    if available_patterns:
+        variants = ", ".join(format_light_pattern(p) for p in available_patterns)
+        await update.message.reply_text(
+            "Оберіть шаблон вікон світла.\n"
+            f"Варіанти: {variants}, Навмання\n"
+            "Надішліть один варіант у форматі 2+2+2 або слово Навмання."
+        )
+        return YEST_PATTERN
+
+    # For rules with no pattern table (e.g. 6.0), continue with default generation.
     try:
         new_schedule = build_schedule_from_yesterday(
             schedule=schedule,
             q=q,
             slot_minutes=slot_minutes,
             rng=random.Random(),
+            allowed_patterns=None,
         )
     except ValueError as exc:
         await update.message.reply_text(humanize_error(exc, q=q, from_yesterday=True))
@@ -1900,6 +2071,84 @@ async def handle_yesterday_schedule(update: Update, context: ContextTypes.DEFAUL
     except Exception as exc:
         logger.exception("Failed to render schedule image: %s", exc)
 
+    return ConversationHandler.END
+
+
+async def handle_yesterday_pattern(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = (update.message.text or "").strip()
+    q = context.user_data.get("yesterday_q")
+    schedule = context.user_data.get("yesterday_schedule")
+    slot_minutes = context.user_data.get("yesterday_slot_minutes")
+    available_patterns = context.user_data.get("yesterday_available_patterns", [])
+    if q is None or schedule is None or slot_minutes is None:
+        await update.message.reply_text("Не знайдено дані для генерації. Почніть спочатку.")
+        return ConversationHandler.END
+
+    pattern_text = text.casefold()
+    if pattern_text == "навмання":
+        allowed_patterns = available_patterns
+    else:
+        parsed = parse_light_pattern_input(text)
+        if parsed is None:
+            variants = ", ".join(format_light_pattern(p) for p in available_patterns)
+            await update.message.reply_text(
+                "Невірний формат шаблону.\n"
+                f"Варіанти: {variants}, Навмання"
+            )
+            return YEST_PATTERN
+        normalized = tuple(round(v * 2) / 2 for v in parsed)
+        allowed_set = {tuple(p) for p in available_patterns}
+        if normalized not in allowed_set:
+            variants = ", ".join(format_light_pattern(p) for p in available_patterns)
+            await update.message.reply_text(
+                "Такого шаблону немає для цього правила.\n"
+                f"Варіанти: {variants}, Навмання"
+            )
+            return YEST_PATTERN
+        allowed_patterns = [normalized]
+
+    try:
+        new_schedule = build_schedule_from_yesterday(
+            schedule=schedule,
+            q=q,
+            slot_minutes=slot_minutes,
+            rng=random.Random(),
+            max_attempts=30,
+            allowed_patterns=allowed_patterns,
+        )
+    except ValueError as exc:
+        await update.message.reply_text(humanize_error(exc, q=q, from_yesterday=True))
+        return ConversationHandler.END
+
+    new_text = format_schedule(new_schedule)
+    old_text = format_schedule(schedule)
+    if q in (5.0, 5.5) and new_text == old_text:
+        max_shift = 5 if q == 5.5 else 4
+        context.user_data["shift_schedule"] = new_schedule
+        context.user_data["shift_slot_minutes"] = slot_minutes
+        context.user_data["shift_max"] = max_shift
+        title = "⚠️ Увага ⚠️"
+        await update.message.reply_text(
+            f"<b>     {title}</b>\n"
+            "Щоб люди не сиділи без світла завтра в той самий час що і вчора, графік можна змістити.\n\n"
+            "Напишіть 0, якщо хочете залишити все точно так, як було вчора.\n\n"
+            f"Напишіть цифру від 1 до {max_shift}, якщо хочете змістити час вимкнень на кілька годин. "
+            "Це зробить для деяких підгруп графік з більш довгими відключеннями, враховуючи ті години відключень що вони вже мають до кінця вчорашнього дня, але новий графік буде відрізнятись від учорашнього і кількість годин зі світлом все ще буде рівною для всіх.",
+            parse_mode="HTML",
+        )
+        return SHIFT_CHOICE
+
+    await update.message.reply_text(new_text)
+    await send_off_counts(update, new_schedule, slot_minutes)
+    try:
+        image = render_schedule_image(build_intervals_for_image(new_schedule), GROUPS)
+        await update.message.reply_photo(photo=image)
+    except Exception as exc:
+        logger.exception("Failed to render schedule image: %s", exc)
+
+    context.user_data.pop("yesterday_schedule", None)
+    context.user_data.pop("yesterday_slot_minutes", None)
+    context.user_data.pop("yesterday_available_patterns", None)
     return ConversationHandler.END
 
 
@@ -1973,7 +2222,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         schedule = build_schedule(
             q=q,
-            slot_minutes=60,
+            slot_minutes=None,
             rng=random.Random(),
         )
     except ValueError as exc:
@@ -1981,7 +2230,8 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await update.message.reply_text(format_schedule(schedule))
-    await send_off_counts(update, schedule, 60)
+    slot_minutes = detect_slot_minutes(schedule)
+    await send_off_counts(update, schedule, slot_minutes)
     try:
         image = render_schedule_image(build_intervals_for_image(schedule), GROUPS)
         await update.message.reply_photo(photo=image)
@@ -2008,6 +2258,7 @@ def main() -> None:
             GEN_RULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_generate_rule)],
             YEST_RULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yesterday_rule)],
             YEST_SCHEDULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yesterday_schedule)],
+            YEST_PATTERN: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_yesterday_pattern)],
             SHIFT_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_shift_choice)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -2015,7 +2266,21 @@ def main() -> None:
     app.add_handler(conversation)
 
     logger.info("TSEK schedule bot started.")
-    app.run_polling()
+
+    async def runner() -> None:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+
+    asyncio.run(runner())
 
 
 if __name__ == "__main__":
