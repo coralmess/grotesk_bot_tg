@@ -30,6 +30,8 @@ from tsek_bot.constants import (
     LIGHT_PATTERNS_BY_QUEUE,
     MIN_LIGHT_WINDOW_BY_QUEUE,
     MIXED_PATTERN_FALLBACKS,
+    YESTERDAY_SUCCESS_CANDIDATE_TARGET,
+    YESTERDAY_MIXED_PATTERN_RETRIES,
 )
 
 try:
@@ -293,6 +295,108 @@ def overlap_light_minutes_between_days(
     return overlap_slots * slot_minutes
 
 
+def improvement_light_minutes_against_yesterday(
+    yesterday_schedule: Dict[str, List[Tuple[int, int]]],
+    today_schedule: Dict[str, List[Tuple[int, int]]],
+    slot_minutes: int,
+) -> Tuple[int, int]:
+    # Improvement metric used by yesterday-vs-today optimization:
+    # for each group count minutes where yesterday was OFF and today is ON.
+    # Returns:
+    # - minimum improvement among groups (fairness floor),
+    # - total improvement across all groups (global utility).
+    off_y = build_off_slot_flags(yesterday_schedule, slot_minutes)
+    off_t = build_off_slot_flags(today_schedule, slot_minutes)
+    per_group: List[int] = []
+    for group in GROUPS:
+        improved_slots = 0
+        for oy, ot in zip(off_y[group], off_t[group]):
+            if oy == 1 and ot == 0:
+                improved_slots += 1
+        per_group.append(improved_slots * slot_minutes)
+    return min(per_group), sum(per_group)
+
+
+def schedule_score_against_yesterday(
+    *,
+    yesterday_schedule: Dict[str, List[Tuple[int, int]]],
+    today_schedule: Dict[str, List[Tuple[int, int]]],
+    q: float,
+    slot_minutes: int,
+    shift_minutes: int,
+    max_consecutive_off_hours: float | None,
+) -> Tuple[int, ...]:
+    # Unified score for comparing candidate schedules.
+    # Lower tuple is better.
+    #
+    # We always penalize boundary-limit violations first:
+    # boundary_limit = max(global_yesterday_tail, today's max_consecutive_off_hours).
+    # This lets us keep cross-day behavior reasonable without over-constraining
+    # days where yesterday already ended with long outages.
+    #
+    # Then apply user-selected policy:
+    # - Variant 1 (if boundary exceeds today's max for any group):
+    #   prioritize lower today's peak OFF.
+    # - Variant 2 (otherwise):
+    #   prioritize new light hours vs yesterday (total-first, then fairness),
+    #   then reduce overlap / maximize shift.
+    today_rule_max = (
+        int(round(max_consecutive_off_hours * 60))
+        if max_consecutive_off_hours is not None
+        else 0
+    )
+    global_yesterday_max = global_yesterday_tail_max_minutes(yesterday_schedule)
+    boundary_limit = (
+        max(global_yesterday_max, today_rule_max)
+        if max_consecutive_off_hours is not None
+        else global_yesterday_max
+    )
+
+    boundary_max = max_cross_day_boundary_off_minutes(yesterday_schedule, today_schedule)
+    over_boundary_limit = max(0, boundary_max - boundary_limit)
+    over_today_rule = (
+        max(0, boundary_max - today_rule_max)
+        if max_consecutive_off_hours is not None
+        else 0
+    )
+    today_peak = max_consecutive_in_schedule(today_schedule)
+    overlap = overlap_light_minutes_between_days(
+        yesterday_schedule,
+        today_schedule,
+        slot_minutes,
+    )
+    min_improvement, total_improvement = improvement_light_minutes_against_yesterday(
+        yesterday_schedule,
+        today_schedule,
+        slot_minutes,
+    )
+    distance = min(shift_minutes, MINUTES_PER_DAY - shift_minutes)
+
+    # Requested policy:
+    # - If any cross-day boundary OFF > today's max -> variant 1 priority (lower today's peak first).
+    # - Else variant 2 priority (maximize shift/new light vs yesterday first).
+    if over_today_rule > 0:
+        return (
+            over_boundary_limit,
+            over_today_rule,
+            today_peak,
+            -total_improvement,
+            -min_improvement,
+            overlap,
+            -distance,
+        )
+
+    return (
+        over_boundary_limit,
+        0,
+        -total_improvement,
+        -min_improvement,
+        overlap,
+        -distance,
+        today_peak,
+    )
+
+
 def max_consecutive_off_minutes_two_days(
     day_a: Dict[str, List[Tuple[int, int]]],
     day_b: Dict[str, List[Tuple[int, int]]],
@@ -315,6 +419,40 @@ def max_consecutive_off_minutes_two_days(
     return max_slots * slot_minutes
 
 
+def off_at_day_start_minutes(off_intervals: List[Tuple[int, int]]) -> int:
+    # Measures OFF streak that starts at 00:00 in today's schedule.
+    # Needed for "yesterday tail + today head" boundary calculation.
+    intervals = normalize_for_display(off_intervals)
+    if intervals and intervals[0][0] == 0:
+        return intervals[0][1] - intervals[0][0]
+    return 0
+
+
+def max_cross_day_boundary_off_minutes(
+    yesterday_schedule: Dict[str, List[Tuple[int, int]]],
+    today_schedule: Dict[str, List[Tuple[int, int]]],
+) -> int:
+    # Boundary metric only: longest OFF stretch that crosses midnight
+    # between yesterday and today for any group.
+    max_len = 0
+    for group in GROUPS:
+        tail = off_before_day_end_minutes(yesterday_schedule.get(group, []))
+        head = off_at_day_start_minutes(today_schedule.get(group, []))
+        max_len = max(max_len, tail + head)
+    return max_len
+
+
+def global_yesterday_tail_max_minutes(
+    yesterday_schedule: Dict[str, List[Tuple[int, int]]],
+) -> int:
+    # One global yesterday reference cap agreed with user.
+    # Used in boundary_limit = max(global_yesterday_tail_max, today_rule_max).
+    return max(
+        off_before_day_end_minutes(yesterday_schedule.get(group, []))
+        for group in GROUPS
+    )
+
+
 def optimize_shift_against_yesterday(
     *,
     yesterday_schedule: Dict[str, List[Tuple[int, int]]],
@@ -323,51 +461,51 @@ def optimize_shift_against_yesterday(
     slot_minutes: int,
     max_consecutive_off_hours: float | None,
 ) -> Tuple[Dict[str, List[Tuple[int, int]]], int, int]:
-    # Try all day shifts and pick the one with minimal light overlap vs yesterday,
-    # while preserving the 48-hour max consecutive off-hours limit.
-    max_allowed_minutes = (
-        int(round(max_consecutive_off_hours * 60))
-        if max_consecutive_off_hours is not None
-        else None
-    )
-    best_schedule = new_schedule
-    best_shift = 0
-    best_overlap = overlap_light_minutes_between_days(
+    # Tries all day shifts (step = slot_minutes) and picks the best one by
+    # schedule_score_against_yesterday. This is intentionally exhaustive over
+    # shifts so we do not miss a better anti-overlap position.
+    baseline_overlap = overlap_light_minutes_between_days(
         yesterday_schedule,
         new_schedule,
         slot_minutes,
     )
-    best_distance = 0
-
     if not schedule_has_valid_display_light_windows(new_schedule, q):
-        # Keep original result untouched if it already violates display constraints;
-        # caller can still surface an explicit generation error.
-        return new_schedule, 0, best_overlap
+        return new_schedule, 0, baseline_overlap
 
-    for shift in range(slot_minutes, MINUTES_PER_DAY, slot_minutes):
-        shifted = shift_schedule(new_schedule, shift)
+    best_schedule = new_schedule
+    best_shift = 0
+    best_overlap = baseline_overlap
+    best_score = schedule_score_against_yesterday(
+        yesterday_schedule=yesterday_schedule,
+        today_schedule=new_schedule,
+        q=q,
+        slot_minutes=slot_minutes,
+        shift_minutes=0,
+        max_consecutive_off_hours=max_consecutive_off_hours,
+    )
+
+    for shift in range(0, MINUTES_PER_DAY, slot_minutes):
+        shifted = new_schedule if shift == 0 else shift_schedule(new_schedule, shift)
+        # Skip shifts that break visible window constraints after midnight split.
         if not schedule_has_valid_display_light_windows(shifted, q):
             continue
-        if max_allowed_minutes is not None:
-            max_off_2d = max_consecutive_off_minutes_two_days(
+        score = schedule_score_against_yesterday(
+            yesterday_schedule=yesterday_schedule,
+            today_schedule=shifted,
+            q=q,
+            slot_minutes=slot_minutes,
+            shift_minutes=shift,
+            max_consecutive_off_hours=max_consecutive_off_hours,
+        )
+        if score < best_score:
+            best_score = score
+            best_schedule = shifted
+            best_shift = shift
+            best_overlap = overlap_light_minutes_between_days(
                 yesterday_schedule,
                 shifted,
                 slot_minutes,
             )
-            if max_off_2d > max_allowed_minutes:
-                continue
-        overlap = overlap_light_minutes_between_days(
-            yesterday_schedule,
-            shifted,
-            slot_minutes,
-        )
-        # Tie-breaker: keep the largest circular shift to maximize temporal separation.
-        distance = min(shift, MINUTES_PER_DAY - shift)
-        if overlap < best_overlap or (overlap == best_overlap and distance > best_distance):
-            best_schedule = shifted
-            best_shift = shift
-            best_overlap = overlap
-            best_distance = distance
 
     return best_schedule, best_shift, best_overlap
 
@@ -1336,6 +1474,10 @@ def build_mixed_pattern_schedule_from_yesterday(
     max_attempts: int,
     target_pattern: Tuple[float, ...],
 ) -> Dict[str, List[Tuple[int, int]]] | None:
+    # Specialized constructor for user-selected "hard" patterns
+    # (e.g. 4.5 -> 2.5+3.5, 5.0 -> 1.5+2.5).
+    # Goal: keep maximum possible number of groups on the selected target pattern,
+    # and use configured fallbacks only when target-only is infeasible.
     available_patterns = light_pattern_candidates(
         q=q,
         allowed_window_counts=None,
@@ -1364,6 +1506,8 @@ def build_mixed_pattern_schedule_from_yesterday(
     best_schedule: Dict[str, List[Tuple[int, int]]] | None = None
 
     for target_count in range(total_groups, -1, -1):
+        # Start from "all groups use target pattern" and relax down.
+        # First feasible level is the best possible by target-count.
         remaining = total_groups - target_count
         splits = iter_count_splits(remaining, len(fallback_patterns))
         # Try concentrated fallback mixes first, they usually converge faster.
@@ -1394,6 +1538,8 @@ def build_mixed_pattern_schedule_from_yesterday(
                 }
 
                 if target_count > 0 and pattern_by_group.get(start_group) != target:
+                    # Keep start group on target when possible to reduce bias against
+                    # the group that waited longest by yesterday priority.
                     target_group = next(
                         (group for group, pattern in pattern_by_group.items() if pattern == target),
                         None,
@@ -1534,34 +1680,79 @@ def build_schedule_from_yesterday(
     if not patterns:
         patterns = [None]
 
-    last_schedule: Dict[str, List[Tuple[int, int]]] | None = None
+    # High-confidence search mode:
+    # do not return first feasible schedule; evaluate many feasible candidates
+    # and return the best by policy score.
+    success_target = max(
+        120,
+        min(YESTERDAY_SUCCESS_CANDIDATE_TARGET, max_attempts * 25),
+    )
+    considered_candidates = 0
+    best_schedule: Dict[str, List[Tuple[int, int]]] | None = None
+    best_score: Tuple[int, ...] | None = None
+
+    def consider_candidate(raw_schedule: Dict[str, List[Tuple[int, int]]]) -> None:
+        # Every raw candidate is additionally shift-optimized and then scored.
+        # This guarantees fair comparison between candidates under same policy.
+        nonlocal considered_candidates, best_schedule, best_score
+        optimized, shift_minutes, _ = optimize_shift_against_yesterday(
+            yesterday_schedule=schedule,
+            new_schedule=raw_schedule,
+            q=q,
+            slot_minutes=slot_minutes,
+            max_consecutive_off_hours=rule.max_consecutive_off_hours,
+        )
+        is_non_equal = 0 if not schedules_equal(schedule, optimized) else 1
+        score = (
+            # Strongly prefer non-identical result to avoid repeating yesterday.
+            is_non_equal,
+            *schedule_score_against_yesterday(
+                yesterday_schedule=schedule,
+                today_schedule=optimized,
+                q=q,
+                slot_minutes=slot_minutes,
+                shift_minutes=shift_minutes,
+                max_consecutive_off_hours=rule.max_consecutive_off_hours,
+            ),
+        )
+        if best_score is None or score < best_score:
+            best_score = score
+            best_schedule = optimized
+        considered_candidates += 1
+
     if (
         allowed_patterns is not None
         and len(allowed_patterns) == 1
         and patterns
         and patterns[0] is not None
     ):
-        mixed_schedule = build_mixed_pattern_schedule_from_yesterday(
-            schedule=schedule,
-            q=q,
-            slot_minutes=slot_minutes,
-            rng=rng,
-            base_group=base_group,
-            candidates=candidates,
-            anchor_offset=anchor_offset,
-            initial_age_by_group=initial_age_by_group,
-            priority_minutes_by_group=priority_minutes_by_group if min_window > 0 else None,
-            max_attempts=max_attempts,
-            target_pattern=patterns[0],
-        )
-        if mixed_schedule is not None:
-            last_schedule = mixed_schedule
-            if not schedules_equal(schedule, mixed_schedule):
-                return mixed_schedule
+        # When user fixed one pattern, run extra mixed-pattern attempts.
+        # This increases chance of keeping the selected pattern for most groups
+        # while still finding a globally better schedule.
+        for _ in range(max(1, YESTERDAY_MIXED_PATTERN_RETRIES)):
+            mixed_schedule = build_mixed_pattern_schedule_from_yesterday(
+                schedule=schedule,
+                q=q,
+                slot_minutes=slot_minutes,
+                rng=random.Random(rng.random()),
+                base_group=base_group,
+                candidates=candidates,
+                anchor_offset=anchor_offset,
+                initial_age_by_group=initial_age_by_group,
+                priority_minutes_by_group=priority_minutes_by_group if min_window > 0 else None,
+                max_attempts=max_attempts,
+                target_pattern=patterns[0],
+            )
+            if mixed_schedule is not None:
+                consider_candidate(mixed_schedule)
+            # Early stop only after we already found a non-identical candidate
+            # and reached confidence budget.
+            if considered_candidates >= success_target and best_score is not None and best_score[0] == 0:
+                break
 
     pattern_order = patterns[:]
     rng.shuffle(pattern_order)
-    attempts_per_pattern = max(40, max_attempts * 20)
+    attempts_per_pattern = max(60, max_attempts * 30)
     last_error: Exception | None = None
     for pattern in pattern_order:
         for attempt in range(attempts_per_pattern):
@@ -1583,11 +1774,14 @@ def build_schedule_from_yesterday(
             except ValueError as exc:
                 last_error = exc
                 continue
-            last_schedule = new_schedule
-            if not schedules_equal(schedule, new_schedule):
-                return new_schedule
-    if last_schedule is not None:
-        return last_schedule
+            consider_candidate(new_schedule)
+            if considered_candidates >= success_target and best_score is not None and best_score[0] == 0:
+                break
+        if considered_candidates >= success_target and best_score is not None and best_score[0] == 0:
+            break
+
+    if best_schedule is not None:
+        return best_schedule
     if last_error:
         raise last_error
     return schedule
@@ -2474,23 +2668,6 @@ async def handle_yesterday_pattern(update: Update, context: ContextTypes.DEFAULT
     except ValueError as exc:
         await update.message.reply_text(humanize_error(exc, q=q, from_yesterday=True))
         return ConversationHandler.END
-
-    if q in (5.0, 5.5):
-        # For high-off rules we post-optimize by shifting to reduce day-to-day repetition
-        # without violating the 48-hour consecutive-off cap.
-        new_schedule, best_shift, best_overlap = optimize_shift_against_yesterday(
-            yesterday_schedule=schedule,
-            new_schedule=new_schedule,
-            q=q,
-            slot_minutes=slot_minutes,
-            max_consecutive_off_hours=RULES[q].max_consecutive_off_hours,
-        )
-        logger.info(
-            "Applied overlap optimization for q=%s: shift=%s min, overlap=%s min",
-            q,
-            best_shift,
-            best_overlap,
-        )
 
     new_text = format_schedule(new_schedule)
     old_text = format_schedule(schedule)

@@ -129,6 +129,67 @@ YESTERDAY_Q5 = """
 20:30 - 00:00
 """
 
+TODAY_Q5_BOUNDARY_HIGH = """
+Графік відключень:
+🔹 Черга 1.1
+00:00 - 05:30
+07:30 - 17:00
+19:00 - 00:00
+
+🔹 Черга 1.2
+00:00 - 09:00
+10:30 - 20:30
+23:00 - 00:00
+
+🔹 Черга 2.1
+00:00 - 09:00
+11:30 - 21:30
+23:00 - 00:00
+
+🔹 Черга 2.2
+00:00 - 01:30
+03:00 - 13:00
+15:30 - 00:00
+
+🔹 Черга 3.1
+00:30 - 10:30
+13:00 - 23:00
+
+🔹 Черга 3.2
+01:30 - 11:30
+13:00 - 23:00
+
+🔹 Черга 4.1
+00:00 - 07:00
+09:00 - 18:30
+20:30 - 00:00
+
+🔹 Черга 4.2
+00:00 - 00:30
+03:00 - 13:00
+14:30 - 00:00
+
+🔹 Черга 5.1
+00:00 - 03:00
+05:30 - 15:30
+17:00 - 00:00
+
+🔹 Черга 5.2
+00:00 - 07:30
+09:00 - 19:00
+21:30 - 00:00
+
+🔹 Черга 6.1
+00:00 - 03:00
+05:00 - 14:30
+16:30 - 00:00
+
+🔹 Черга 6.2
+00:00 - 05:00
+07:00 - 16:30
+18:30 - 00:00
+"""
+
 
 class MixedPatternsTest(unittest.TestCase):
     def assert_schedule_matches_rules(self, schedule, q: float, slot_minutes: int) -> None:
@@ -219,6 +280,32 @@ class MixedPatternsTest(unittest.TestCase):
             self.assertLessEqual(len(lights), max_windows)
             for start, end in lights:
                 self.assertGreaterEqual(end - start, min_window)
+
+    def test_q5_variant1_prefers_lower_today_peak_when_boundary_is_high(self):
+        yesterday_lines = [line.strip() for line in YESTERDAY_Q5.splitlines() if line.strip()]
+        yesterday, slot_minutes = bot.parse_yesterday_schedule(yesterday_lines)
+
+        today_lines = [line.strip() for line in TODAY_Q5_BOUNDARY_HIGH.splitlines() if line.strip()]
+        today_raw, _ = bot.parse_yesterday_schedule(today_lines)
+        # +60 min shift creates cross-day boundary > 10h for at least one subgroup.
+        today = bot.shift_schedule(today_raw, 60)
+
+        today_rule_max = int(bot.RULES[5.0].max_consecutive_off_hours * 60)
+        baseline_boundary = bot.max_cross_day_boundary_off_minutes(yesterday, today)
+        self.assertGreater(baseline_boundary, today_rule_max)
+
+        baseline_today_peak = bot.max_consecutive_in_schedule(today)
+        optimized, _, _ = bot.optimize_shift_against_yesterday(
+            yesterday_schedule=yesterday,
+            new_schedule=today,
+            q=5.0,
+            slot_minutes=slot_minutes,
+            max_consecutive_off_hours=bot.RULES[5.0].max_consecutive_off_hours,
+        )
+        optimized_today_peak = bot.max_consecutive_in_schedule(optimized)
+
+        self.assertTrue(bot.schedule_has_valid_display_light_windows(optimized, 5.0))
+        self.assertLessEqual(optimized_today_peak, baseline_today_peak)
 
 
 if __name__ == "__main__":

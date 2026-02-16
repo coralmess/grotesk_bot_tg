@@ -126,8 +126,11 @@ LIGHT_PATTERNS_BY_QUEUE: Dict[float, List[Tuple[float, ...]]] = {
     ],
 }
 
-# For some user-selected templates the solver may require mixing with other
-# valid templates. Mapping:
+# Some templates are often unsatisfiable when applied to all 12 groups at once.
+# This map allows controlled mixing:
+# if user selects target_template, solver can keep as many target groups as possible
+# and fill the rest with listed fallback templates, while still satisfying hard rules.
+# Mapping format:
 # queue -> {target_template: [fallback_templates...]}
 MIXED_PATTERN_FALLBACKS: Dict[float, Dict[Tuple[float, ...], List[Tuple[float, ...]]]] = {
     4.5: {
@@ -143,3 +146,11 @@ MIXED_PATTERN_FALLBACKS: Dict[float, Dict[Tuple[float, ...], List[Tuple[float, .
         ],
     },
 }
+
+# Search budget for yesterday-based optimization.
+# The solver now ranks many feasible candidates and returns the best score,
+# so these values control quality vs latency.
+# - SUCCESS_CANDIDATE_TARGET: how many successful candidates we try to score.
+# - MIXED_PATTERN_RETRIES: extra independent attempts for mixed-pattern synthesis.
+YESTERDAY_SUCCESS_CANDIDATE_TARGET = 700
+YESTERDAY_MIXED_PATTERN_RETRIES = 8
