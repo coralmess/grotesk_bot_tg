@@ -29,6 +29,7 @@ from tsek_bot.constants import (
     VALID_QUEUES,
     LIGHT_PATTERNS_BY_QUEUE,
     MIN_LIGHT_WINDOW_BY_QUEUE,
+    MIXED_PATTERN_FALLBACKS,
 )
 
 try:
@@ -83,6 +84,14 @@ def parse_light_pattern_input(text: str) -> Tuple[float, ...] | None:
             return None
         parsed.append(rounded)
     return tuple(parsed)
+
+
+def normalize_pattern(pattern: Tuple[float, ...]) -> Tuple[float, ...]:
+    return tuple(round(v * 2) / 2 for v in pattern)
+
+
+def pattern_lengths_to_minutes(pattern: Tuple[float, ...]) -> Tuple[int, ...]:
+    return tuple(int(round(length * 60)) for length in pattern)
 
 
 def min_windows_needed_for_rule(q: float) -> int:
@@ -248,6 +257,121 @@ def shift_schedule(
     return shifted
 
 
+def build_off_slot_flags(
+    schedule: Dict[str, List[Tuple[int, int]]],
+    slot_minutes: int,
+) -> Dict[str, List[int]]:
+    # Build a fixed-size binary timeline per group (1 = off, 0 = on).
+    # This makes cross-day constraints and overlap scoring cheap and deterministic.
+    if slot_minutes <= 0 or MINUTES_PER_DAY % slot_minutes != 0:
+        raise ValueError("Invalid slot size.")
+    slots_per_day = MINUTES_PER_DAY // slot_minutes
+    flags: Dict[str, List[int]] = {group: [0] * slots_per_day for group in GROUPS}
+    for group in GROUPS:
+        for start, end in normalize_for_display(schedule.get(group, [])):
+            start_slot = max(0, start // slot_minutes)
+            end_slot = min(slots_per_day, end // slot_minutes)
+            for slot in range(start_slot, end_slot):
+                flags[group][slot] = 1
+    return flags
+
+
+def overlap_light_minutes_between_days(
+    day_a: Dict[str, List[Tuple[int, int]]],
+    day_b: Dict[str, List[Tuple[int, int]]],
+    slot_minutes: int,
+) -> int:
+    # Minimize this metric to avoid repeating the same "light-at-home" hours
+    # on consecutive days for the same subgroup.
+    off_a = build_off_slot_flags(day_a, slot_minutes)
+    off_b = build_off_slot_flags(day_b, slot_minutes)
+    overlap_slots = 0
+    for group in GROUPS:
+        for off1, off2 in zip(off_a[group], off_b[group]):
+            if off1 == 0 and off2 == 0:
+                overlap_slots += 1
+    return overlap_slots * slot_minutes
+
+
+def max_consecutive_off_minutes_two_days(
+    day_a: Dict[str, List[Tuple[int, int]]],
+    day_b: Dict[str, List[Tuple[int, int]]],
+    slot_minutes: int,
+) -> int:
+    # Validate max consecutive off-hours on the 48-hour boundary (yesterday + today),
+    # not only inside the new day.
+    off_a = build_off_slot_flags(day_a, slot_minutes)
+    off_b = build_off_slot_flags(day_b, slot_minutes)
+    max_slots = 0
+    for group in GROUPS:
+        streak = 0
+        for state in off_a[group] + off_b[group]:
+            if state == 1:
+                streak += 1
+                if streak > max_slots:
+                    max_slots = streak
+            else:
+                streak = 0
+    return max_slots * slot_minutes
+
+
+def optimize_shift_against_yesterday(
+    *,
+    yesterday_schedule: Dict[str, List[Tuple[int, int]]],
+    new_schedule: Dict[str, List[Tuple[int, int]]],
+    q: float,
+    slot_minutes: int,
+    max_consecutive_off_hours: float | None,
+) -> Tuple[Dict[str, List[Tuple[int, int]]], int, int]:
+    # Try all day shifts and pick the one with minimal light overlap vs yesterday,
+    # while preserving the 48-hour max consecutive off-hours limit.
+    max_allowed_minutes = (
+        int(round(max_consecutive_off_hours * 60))
+        if max_consecutive_off_hours is not None
+        else None
+    )
+    best_schedule = new_schedule
+    best_shift = 0
+    best_overlap = overlap_light_minutes_between_days(
+        yesterday_schedule,
+        new_schedule,
+        slot_minutes,
+    )
+    best_distance = 0
+
+    if not schedule_has_valid_display_light_windows(new_schedule, q):
+        # Keep original result untouched if it already violates display constraints;
+        # caller can still surface an explicit generation error.
+        return new_schedule, 0, best_overlap
+
+    for shift in range(slot_minutes, MINUTES_PER_DAY, slot_minutes):
+        shifted = shift_schedule(new_schedule, shift)
+        if not schedule_has_valid_display_light_windows(shifted, q):
+            continue
+        if max_allowed_minutes is not None:
+            max_off_2d = max_consecutive_off_minutes_two_days(
+                yesterday_schedule,
+                shifted,
+                slot_minutes,
+            )
+            if max_off_2d > max_allowed_minutes:
+                continue
+        overlap = overlap_light_minutes_between_days(
+            yesterday_schedule,
+            shifted,
+            slot_minutes,
+        )
+        # Tie-breaker: keep the largest circular shift to maximize temporal separation.
+        distance = min(shift, MINUTES_PER_DAY - shift)
+        if overlap < best_overlap or (overlap == best_overlap and distance > best_distance):
+            best_schedule = shifted
+            best_shift = shift
+            best_overlap = overlap
+            best_distance = distance
+
+    return best_schedule, best_shift, best_overlap
+
+
 def normalize_queue_value(raw: str) -> float | None:
     try:
         value = float(raw.replace(",", "."))
@@ -272,6 +396,27 @@ def on_queue_count(q: float) -> int:
 def min_light_window_minutes(q: float) -> int:
     hours = MIN_LIGHT_WINDOW_BY_QUEUE.get(q, 0.0)
     return int(round(hours * 60))
+
+
+def schedule_has_valid_display_light_windows(
+    schedule: Dict[str, List[Tuple[int, int]]],
+    q: float,
+) -> bool:
+    rule = RULES[q]
+    min_window = min_light_window_minutes(q)
+    min_windows = min_windows_needed_for_rule(q)
+    max_windows = rule.max_on_windows
+
+    for group in GROUPS:
+        lights = extract_light_windows(schedule.get(group, []))
+        if len(lights) < min_windows:
+            return False
+        if max_windows is not None and len(lights) > max_windows:
+            return False
+        for start, end in lights:
+            if end - start < min_window:
+                return False
+    return True
 
 
 def needs_half_hour_slot(q: float) -> bool:
@@ -333,6 +478,55 @@ def pick_light_pattern(
     if not filtered:
         return None
     return rng.choice(filtered)
+
+
+def fallback_patterns_for_target(
+    *,
+    q: float,
+    target_pattern: Tuple[float, ...],
+    available_patterns: List[Tuple[float, ...]],
+) -> List[Tuple[float, ...]]:
+    normalized_target = normalize_pattern(target_pattern)
+    configured = MIXED_PATTERN_FALLBACKS.get(q, {}).get(normalized_target, [])
+    available_set = {normalize_pattern(pattern) for pattern in available_patterns}
+    if configured:
+        return [
+            normalize_pattern(pattern)
+            for pattern in configured
+            if normalize_pattern(pattern) in available_set
+        ]
+    return [
+        normalize_pattern(pattern)
+        for pattern in available_patterns
+        if normalize_pattern(pattern) != normalized_target
+    ]
+
+
+def iter_count_splits(total: int, buckets: int) -> List[Tuple[int, ...]]:
+    if buckets <= 0:
+        return [tuple()] if total == 0 else []
+    if buckets == 1:
+        return [(total,)]
+    result: List[Tuple[int, ...]] = []
+    for first in range(total + 1):
+        for tail in iter_count_splits(total - first, buckets - 1):
+            result.append((first,) + tail)
+    return result
+
+
+def count_groups_with_pattern(
+    schedule: Dict[str, List[Tuple[int, int]]],
+    pattern: Tuple[float, ...],
+) -> int:
+    target = tuple(sorted(pattern_lengths_to_minutes(pattern)))
+    matched = 0
+    for group in GROUPS:
+        lengths = tuple(
+            sorted(end - start for start, end in extract_light_windows(schedule.get(group, [])))
+        )
+        if lengths == target:
+            matched += 1
+    return matched
 
 
 def rotate_groups(start_group: str) -> List[str]:
@@ -516,6 +710,7 @@ def build_constant_schedule(
     max_consecutive_off_hours: float | None = None,
     force_windows_count: int | None = None,
     light_pattern: Tuple[float, ...] | None = None,
+    light_pattern_by_group: Dict[str, Tuple[float, ...]] | None = None,
     rng: random.Random,
 ) -> Dict[str, List[Tuple[int, int]]]:
     on_count = on_queue_count(q)
@@ -550,7 +745,28 @@ def build_constant_schedule(
         max_windows = force_windows_count
 
     run_plans: Dict[str, List[int]] = {}
-    if light_pattern is not None:
+    if light_pattern is not None and light_pattern_by_group is not None:
+        raise ValueError("Cannot mix single and per-group light patterns.")
+
+    if light_pattern_by_group is not None:
+        for group in GROUPS:
+            pattern = light_pattern_by_group.get(group)
+            if pattern is None:
+                raise ValueError("Missing light pattern for subgroup.")
+            pattern_blocks = [int(round(length * 60 / block_minutes)) for length in pattern]
+            if any(length <= 0 for length in pattern_blocks):
+                raise ValueError("Invalid slot size for the configured light window.")
+            if sum(pattern_blocks) != blocks_per_group:
+                raise ValueError("Cannot distribute light evenly with these settings.")
+            if any(length < min_run_blocks for length in pattern_blocks):
+                raise ValueError("Неможливо забезпечити мінімальну тривалість вікна світла.")
+            windows_count = len(pattern_blocks)
+            if max_on_windows is not None and windows_count > max_on_windows:
+                raise ValueError("Перевищено max_on_windows.")
+            lengths = list(pattern_blocks)
+            rng.shuffle(lengths)
+            run_plans[group] = lengths
+    elif light_pattern is not None:
         pattern_blocks = [int(round(length * 60 / block_minutes)) for length in light_pattern]
         if any(length <= 0 for length in pattern_blocks):
             raise ValueError("Invalid slot size for the configured light window.")
@@ -616,6 +832,8 @@ def build_constant_schedule(
             last_on[group] = -age
 
     if on_count == 1:
+        if light_pattern_by_group is not None:
+            raise ValueError("Per-group light patterns are not supported for this rule.")
         if priority_minutes_by_group is None:
             priority_minutes_by_group = {group: 0 for group in GROUPS}
         priority_order = rotate_groups("6.1")
@@ -829,6 +1047,7 @@ def build_constant_schedule(
             if run_len[group] == 0
             and windows_used[group] < min_windows
             and windows_used[group] < max_windows
+            and next_run_len(group) > 0
             and blocks_left >= next_run_len(group)
         ]
         must_start.sort(
@@ -875,6 +1094,7 @@ def build_constant_schedule(
             if run_len[group] == 0
             and group not in must_start
             and windows_used[group] < max_windows
+            and next_run_len(group) > 0
             and blocks_left >= next_run_len(group)
         ]
         starters.sort(
@@ -1102,6 +1322,117 @@ def parse_yesterday_schedule(lines: List[str]) -> Tuple[Dict[str, List[Tuple[int
     return schedule, slot_minutes
 
 
+def build_mixed_pattern_schedule_from_yesterday(
+    *,
+    schedule: Dict[str, List[Tuple[int, int]]],
+    q: float,
+    slot_minutes: int,
+    rng: random.Random,
+    base_group: str,
+    candidates: List[str],
+    anchor_offset: int | None,
+    initial_age_by_group: Dict[str, int] | None,
+    priority_minutes_by_group: Dict[str, int] | None,
+    max_attempts: int,
+    target_pattern: Tuple[float, ...],
+) -> Dict[str, List[Tuple[int, int]]] | None:
+    available_patterns = light_pattern_candidates(
+        q=q,
+        allowed_window_counts=None,
+        slot_minutes=slot_minutes,
+    )
+    if not available_patterns:
+        return None
+
+    target = normalize_pattern(target_pattern)
+    normalized_available = [normalize_pattern(pattern) for pattern in available_patterns]
+    if target not in normalized_available:
+        return None
+
+    fallback_patterns = fallback_patterns_for_target(
+        q=q,
+        target_pattern=target,
+        available_patterns=normalized_available,
+    )
+    if not fallback_patterns:
+        return None
+
+    rule = RULES[q]
+    total_groups = len(GROUPS)
+    attempts_per_split = max(30, max_attempts * 10)
+    max_target = -1
+    best_schedule: Dict[str, List[Tuple[int, int]]] | None = None
+
+    for target_count in range(total_groups, -1, -1):
+        remaining = total_groups - target_count
+        splits = iter_count_splits(remaining, len(fallback_patterns))
+        # Try concentrated fallback mixes first, they usually converge faster.
+        splits = sorted(
+            splits,
+            key=lambda split: (
+                sum(1 for value in split if value > 0),
+                -max(split) if split else 0,
+            ),
+        )
+
+        for split in splits:
+            pattern_pool: List[Tuple[float, ...]] = [target] * target_count
+            for idx, count in enumerate(split):
+                pattern_pool.extend([fallback_patterns[idx]] * count)
+            if len(pattern_pool) != total_groups:
+                continue
+
+            for attempt in range(attempts_per_split):
+                local_rng = random.Random(rng.random())
+                start_group = candidates[attempt % len(candidates)] if candidates else base_group
+
+                local_rng.shuffle(pattern_pool)
+                groups_order = GROUPS[:]
+                local_rng.shuffle(groups_order)
+                pattern_by_group = {
+                    group: pattern_pool[idx] for idx, group in enumerate(groups_order)
+                }
+
+                if target_count > 0 and pattern_by_group.get(start_group) != target:
+                    target_group = next(
+                        (group for group, pattern in pattern_by_group.items() if pattern == target),
+                        None,
+                    )
+                    if target_group is not None:
+                        pattern_by_group[target_group], pattern_by_group[start_group] = (
+                            pattern_by_group[start_group],
+                            pattern_by_group[target_group],
+                        )
+
+                try:
+                    candidate_schedule = build_constant_schedule(
+                        q=q,
+                        slot_minutes=slot_minutes,
+                        start_group=start_group,
+                        anchor_offset=anchor_offset,
+                        initial_age_by_group=initial_age_by_group,
+                        priority_minutes_by_group=priority_minutes_by_group,
+                        max_on_windows=rule.max_on_windows,
+                        max_consecutive_off_hours=rule.max_consecutive_off_hours,
+                        light_pattern_by_group=pattern_by_group,
+                        rng=local_rng,
+                    )
+                except ValueError:
+                    continue
+
+                candidate_target = count_groups_with_pattern(candidate_schedule, target)
+                if candidate_target > max_target:
+                    max_target = candidate_target
+                    best_schedule = candidate_schedule
+                if candidate_target == target_count and not schedules_equal(schedule, candidate_schedule):
+                    return candidate_schedule
+
+        if best_schedule is not None and max_target == target_count:
+            return best_schedule
+
+    return best_schedule
+
+
 def build_schedule_from_yesterday(
     schedule: Dict[str, List[Tuple[int, int]]],
     q: float,
@@ -1203,10 +1534,34 @@ def build_schedule_from_yesterday(
     if not patterns:
         patterns = [None]
 
+    last_schedule: Dict[str, List[Tuple[int, int]]] | None = None
+    if (
+        allowed_patterns is not None
+        and len(allowed_patterns) == 1
+        and patterns
+        and patterns[0] is not None
+    ):
+        mixed_schedule = build_mixed_pattern_schedule_from_yesterday(
+            schedule=schedule,
+            q=q,
+            slot_minutes=slot_minutes,
+            rng=rng,
+            base_group=base_group,
+            candidates=candidates,
+            anchor_offset=anchor_offset,
+            initial_age_by_group=initial_age_by_group,
+            priority_minutes_by_group=priority_minutes_by_group if min_window > 0 else None,
+            max_attempts=max_attempts,
+            target_pattern=patterns[0],
+        )
+        if mixed_schedule is not None:
+            last_schedule = mixed_schedule
+            if not schedules_equal(schedule, mixed_schedule):
+                return mixed_schedule
+
     pattern_order = patterns[:]
     rng.shuffle(pattern_order)
     attempts_per_pattern = max(40, max_attempts * 20)
-    last_schedule: Dict[str, List[Tuple[int, int]]] | None = None
     last_error: Exception | None = None
     for pattern in pattern_order:
         for attempt in range(attempts_per_pattern):
@@ -2119,6 +2474,23 @@ async def handle_yesterday_pattern(update: Update, context: ContextTypes.DEFAULT
     except ValueError as exc:
         await update.message.reply_text(humanize_error(exc, q=q, from_yesterday=True))
         return ConversationHandler.END
+
+    if q in (5.0, 5.5):
+        # For high-off rules we post-optimize by shifting to reduce day-to-day repetition
+        # without violating the 48-hour consecutive-off cap.
+        new_schedule, best_shift, best_overlap = optimize_shift_against_yesterday(
+            yesterday_schedule=schedule,
+            new_schedule=new_schedule,
+            q=q,
+            slot_minutes=slot_minutes,
+            max_consecutive_off_hours=RULES[q].max_consecutive_off_hours,
+        )
+        logger.info(
+            "Applied overlap optimization for q=%s: shift=%s min, overlap=%s min",
+            q,
+            best_shift,
+            best_overlap,
+        )
 
     new_text = format_schedule(new_schedule)
     old_text = format_schedule(schedule)

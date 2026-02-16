@@ -408,5 +408,33 @@ SHAFA_URLS = [
     {
         "url":"https://shafa.ua/uk/clothes?search_text=Polyploid&sort=4",
         "url_name": "Polyploid"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/verkhniaia-odezhda?search_text=Stewart&sort=4",
+        "url_name": "Stewart (leather jackets)"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Christian%20Peau&sort=4",
+        "url_name": "Christian Peau"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Scott%20Charters&sort=4",
+        "url_name": "Scott Charters"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Fortela&sort=4",
+        "url_name": "Fortela"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Destin%20Surl&sort=4",
+        "url_name": "Destin Surl"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Backlash%20&sort=4",
+        "url_name": "Backlash"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/obuv?search_text=Fiorentini%20Baker&sizes=241&sizes=174&sizes=239&sizes=176&sizes=240&sizes=175&sort=4",
+        "url_name": "Fiorentini Baker"
     }
 ]

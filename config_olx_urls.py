@@ -780,5 +780,41 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Polyploid/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Polyploid"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/verhnyaya-odezhda/q-Stewart/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Stewart (leather jackets)"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Doriani/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Doriani"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Polyploid/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Christian Peau"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Scott-Charters/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Scott Charters"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-obuv/q-Buttero/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Buttero"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Gallotti-Radice/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Gallotti Radice"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-fortela/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Fortela"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Destin-Surl/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Destin Surl"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Backlash/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Backlash"
     }
 ]

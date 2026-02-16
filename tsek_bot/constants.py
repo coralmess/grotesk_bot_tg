@@ -125,3 +125,21 @@ LIGHT_PATTERNS_BY_QUEUE: Dict[float, List[Tuple[float, ...]]] = {
         (10.0, 10.0),
     ],
 }
+
+# For some user-selected templates the solver may require mixing with other
+# valid templates. Mapping:
+# queue -> {target_template: [fallback_templates...]}
+MIXED_PATTERN_FALLBACKS: Dict[float, Dict[Tuple[float, ...], List[Tuple[float, ...]]]] = {
+    4.5: {
+        (2.5, 3.5): [
+            (2.0, 4.0),
+            (3.0, 3.0),
+            (2.0, 2.0, 2.0),
+        ],
+    },
+    5.0: {
+        (1.5, 2.5): [
+            (2.0, 2.0),
+        ],
+    },
+}
