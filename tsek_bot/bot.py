@@ -1498,6 +1498,14 @@ def format_interval(start: int, end: int) -> str:
     return f"{start_text} - {end_text}"
 
 
+def format_duration_uk(minutes: int) -> str:
+    hours = minutes // 60
+    mins = minutes % 60
+    if hours > 0:
+        return f"{hours} год {mins:02d} хв"
+    return f"{mins} хв"
+
+
 def parse_time_to_minutes(token: str) -> int:
     parts = token.split(":")
     if len(parts) != 2:
@@ -1566,6 +1574,60 @@ def parse_selected_groups(text: str) -> List[str]:
     return selected
 
 
+def normalize_selected_groups_key(groups: List[str] | Tuple[str, ...]) -> str:
+    order_index = {group: idx for idx, group in enumerate(GROUPS)}
+    unique = sorted(set(groups), key=lambda group: order_index.get(group, 999))
+    return ",".join(unique)
+
+
+def enumerate_feasible_extra_group_schedules(
+    *,
+    current_schedule: Dict[str, List[Tuple[int, int]]],
+    q: float,
+    update_from_minutes: int,
+    extra_group_count: int,
+    max_attempts_per_variant: int = 400,
+) -> Dict[str, Dict[str, List[Tuple[int, int]]]]:
+    feasible: Dict[str, Dict[str, List[Tuple[int, int]]]] = {}
+    if extra_group_count <= 0:
+        return feasible
+
+    for combo in itertools.combinations(GROUPS, extra_group_count):
+        try:
+            candidate, _ = build_midday_updated_schedule(
+                current_schedule=current_schedule,
+                q=q,
+                update_from_minutes=update_from_minutes,
+                extra_light_groups=list(combo),
+                rng=random.Random(0),
+                max_attempts=max_attempts_per_variant,
+            )
+        except ValueError:
+            continue
+        key = normalize_selected_groups_key(combo)
+        feasible[key] = candidate
+    return feasible
+
+
+async def reply_text_in_chunks(update: Update, text: str, chunk_limit: int = 3500) -> None:
+    if len(text) <= chunk_limit:
+        await update.message.reply_text(text)
+        return
+    current: List[str] = []
+    current_len = 0
+    for line in text.splitlines():
+        line_len = len(line) + 1
+        if current and current_len + line_len > chunk_limit:
+            await update.message.reply_text("\n".join(current))
+            current = [line]
+            current_len = line_len
+        else:
+            current.append(line)
+            current_len += line_len
+    if current:
+        await update.message.reply_text("\n".join(current))
+
+
 def analyze_midday_update_distribution(
     *,
     current_schedule: Dict[str, List[Tuple[int, int]]],
@@ -1592,6 +1654,263 @@ def analyze_midday_update_distribution(
     total_on_today = total_prefix_on + on_count * suffix_slots
     extra_group_count = total_on_today % len(GROUPS)
     return slot_minutes, cut_slot, suffix_slots, prefix_on_by_group, extra_group_count
+
+
+def build_midday_updated_schedule_relaxed(
+    *,
+    current_schedule: Dict[str, List[Tuple[int, int]]],
+    q: float,
+    update_from_minutes: int,
+    rng: random.Random,
+) -> Tuple[Dict[str, List[Tuple[int, int]]], int, int]:
+    # Relaxed update mode for mid-day rule changes:
+    # - hard: preserve prefix, and keep exact ON-count per slot in suffix.
+    # - objective: make remaining light as fair as possible across groups,
+    #   without requiring strict equal full-day totals.
+    slot_minutes, cut_slot, suffix_slots, prefix_on_by_group, _ = analyze_midday_update_distribution(
+        current_schedule=current_schedule,
+        q=q,
+        update_from_minutes=update_from_minutes,
+    )
+    on_count = on_queue_count(q)
+    slots_per_day = MINUTES_PER_DAY // slot_minutes
+
+    on_flags = build_on_slot_flags(current_schedule, slot_minutes)
+    prefix_on_flags = {group: on_flags[group][:cut_slot] for group in GROUPS}
+
+    # Water-filling over remaining part of day with capacity `suffix_slots` per group.
+    # This maximizes minimum final light and keeps spread minimal (semi-fair).
+    remaining_total_on = on_count * suffix_slots
+    add_on = {group: 0 for group in GROUPS}
+    for _ in range(remaining_total_on):
+        eligible = [group for group in GROUPS if add_on[group] < suffix_slots]
+        if not eligible:
+            break
+        min_total = min(prefix_on_by_group[group] + add_on[group] for group in eligible)
+        candidates = [group for group in eligible if prefix_on_by_group[group] + add_on[group] == min_total]
+        # Keep result reproducible with RNG tie-breaking.
+        chosen = rng.choice(candidates)
+        add_on[chosen] += 1
+
+    # Build suffix slot assignment with exact ON-count each slot and
+    # no new 30-minute ON fragments: any run started in suffix must be >= 1 hour.
+    min_suffix_light_run_slots = max(1, int(math.ceil(60 / slot_minutes)))
+    group_count = len(GROUPS)
+    group_index = {group: idx for idx, group in enumerate(GROUPS)}
+    group_bits = [1 << idx for idx in range(group_count)]
+
+    initial_on_run: List[int] = [0] * group_count
+    for group in GROUPS:
+        idx = group_index[group]
+        tail = 0
+        cursor = cut_slot - 1
+        while cursor >= 0 and on_flags[group][cursor] == 1:
+            tail += 1
+            cursor -= 1
+        initial_on_run[idx] = tail
+
+    initial_rem = tuple(add_on[group] for group in GROUPS)
+
+    def quick_valid(
+        rem: Tuple[int, ...],
+        on_run: Tuple[int, ...],
+        started: Tuple[bool, ...],
+        slots_left: int,
+    ) -> bool:
+        for idx in range(group_count):
+            r = rem[idx]
+            if r < 0 or r > slots_left:
+                return False
+            if on_run[idx] == 0 and r > 0 and r < min_suffix_light_run_slots:
+                return False
+            if on_run[idx] > 0 and started[idx] and on_run[idx] < min_suffix_light_run_slots:
+                need = min_suffix_light_run_slots - on_run[idx]
+                if r < need:
+                    return False
+        return True
+
+    def candidate_masks(
+        rem: Tuple[int, ...],
+        on_run: Tuple[int, ...],
+        started: Tuple[bool, ...],
+        slots_left: int,
+        limit: int = 180,
+    ) -> List[int]:
+        mandatory_mask = 0
+        optional: List[int] = []
+        for idx in range(group_count):
+            if rem[idx] <= 0:
+                continue
+            must_on = False
+            if rem[idx] == slots_left:
+                must_on = True
+            if on_run[idx] > 0 and started[idx] and on_run[idx] < min_suffix_light_run_slots:
+                must_on = True
+            if must_on:
+                mandatory_mask |= group_bits[idx]
+            else:
+                optional.append(idx)
+
+        mandatory_count = mandatory_mask.bit_count()
+        if mandatory_count > on_count:
+            return []
+        need = on_count - mandatory_count
+        if need == 0:
+            return [mandatory_mask]
+        if need < 0 or len(optional) < need:
+            return []
+
+        ranked = sorted(
+            optional,
+            key=lambda idx: (
+                -rem[idx],
+                -(1 if on_run[idx] > 0 else 0),
+                rng.random(),
+            ),
+        )
+        total_combos = math.comb(len(ranked), need)
+        result: List[int] = []
+        if total_combos <= limit:
+            combos = itertools.combinations(ranked, need)
+        else:
+            pool = ranked[: min(len(ranked), need + 8)]
+            base = list(itertools.combinations(pool, need))
+            if not base:
+                base = [tuple(ranked[:need])]
+            sampled = base[: max(1, limit // 2)]
+            while len(sampled) < limit:
+                sampled.append(tuple(sorted(rng.sample(ranked, need))))
+            combos = sampled
+
+        seen = set()
+        for combo in combos:
+            key = tuple(combo)
+            if key in seen:
+                continue
+            seen.add(key)
+            mask = mandatory_mask
+            for idx in combo:
+                mask |= group_bits[idx]
+            result.append(mask)
+            if len(result) >= limit:
+                break
+        return result
+
+    beam_width = 120
+    beam = [
+        {
+            "rem": initial_rem,
+            "on_run": tuple(initial_on_run),
+            "started": tuple(False for _ in GROUPS),
+            "path": tuple(),
+        }
+    ]
+    solved = None
+
+    for slot in range(suffix_slots):
+        slots_left = suffix_slots - slot
+        next_states: Dict[Tuple[Tuple[int, ...], Tuple[int, ...], Tuple[bool, ...]], Dict[str, object]] = {}
+
+        for state in beam:
+            rem = state["rem"]
+            on_run = state["on_run"]
+            started = state["started"]
+            path = state["path"]
+            masks = candidate_masks(rem, on_run, started, slots_left)
+            if not masks:
+                continue
+
+            for mask in masks:
+                rem_list = list(rem)
+                run_list = list(on_run)
+                started_list = list(started)
+                valid = True
+                for idx in range(group_count):
+                    is_on = bool(mask & group_bits[idx])
+                    if is_on:
+                        rem_list[idx] -= 1
+                        if rem_list[idx] < 0:
+                            valid = False
+                            break
+                        if run_list[idx] == 0:
+                            run_list[idx] = 1
+                            started_list[idx] = True
+                        else:
+                            run_list[idx] += 1
+                    else:
+                        if run_list[idx] > 0 and started_list[idx] and run_list[idx] < min_suffix_light_run_slots:
+                            valid = False
+                            break
+                        run_list[idx] = 0
+                        started_list[idx] = False
+                if not valid:
+                    continue
+
+                rem_t = tuple(rem_list)
+                run_t = tuple(run_list)
+                started_t = tuple(started_list)
+                if not quick_valid(rem_t, run_t, started_t, slots_left - 1):
+                    continue
+
+                key = (rem_t, run_t, started_t)
+                candidate = {
+                    "rem": rem_t,
+                    "on_run": run_t,
+                    "started": started_t,
+                    "path": path + (mask,),
+                }
+                if key not in next_states or rng.random() < 0.4:
+                    next_states[key] = candidate
+
+        if not next_states:
+            break
+
+        ranked_states = list(next_states.values())
+        ranked_states.sort(
+            key=lambda st: (
+                max(st["rem"]) - min(st["rem"]),
+                -sum(st["rem"]),
+                rng.random(),
+            )
+        )
+        beam = ranked_states[:beam_width]
+
+    if beam:
+        for state in beam:
+            rem = state["rem"]
+            run = state["on_run"]
+            started = state["started"]
+            if any(value != 0 for value in rem):
+                continue
+            if any(run[idx] > 0 and started[idx] and run[idx] < min_suffix_light_run_slots for idx in range(group_count)):
+                continue
+            solved = state
+            break
+
+    if solved is None:
+        raise ValueError("Cannot update schedule with strict equal light hours for selected time and rule.")
+
+    suffix_on = {group: [0] * suffix_slots for group in GROUPS}
+    path = solved["path"]
+    for slot, mask in enumerate(path):
+        for group in GROUPS:
+            idx = group_index[group]
+            suffix_on[group][slot] = 1 if (mask & group_bits[idx]) else 0
+
+    full_on = {
+        group: prefix_on_flags[group] + suffix_on[group]
+        for group in GROUPS
+    }
+
+    off_flags = {
+        group: [0 if value == 1 else 1 for value in full_on[group]]
+        for group in GROUPS
+    }
+    schedule = off_flags_to_schedule(off_flags, slot_minutes)
+
+    totals = [sum(full_on[group]) for group in GROUPS]
+    fairness_gap_slots = max(totals) - min(totals) if totals else 0
+    return schedule, slot_minutes, fairness_gap_slots
 
 
 def build_midday_updated_schedule(
@@ -3163,6 +3482,8 @@ async def ask_yesterday_rule(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def ask_update_rule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("update_pending_schedule", None)
     context.user_data.pop("update_pending_extra_count", None)
+    context.user_data.pop("update_extra_options_order", None)
+    context.user_data.pop("update_extra_feasible_schedules", None)
     await update.message.reply_text("Вкажіть нову кількість відключених черг для решти дня (наприклад, 4.5).")
     return UPDATE_RULE
 
@@ -3325,28 +3646,7 @@ async def handle_update_schedule(update: Update, context: ContextTypes.DEFAULT_T
         return UPDATE_SCHEDULE
 
     try:
-        _, _, _, _, extra_count = analyze_midday_update_distribution(
-            current_schedule=current_schedule,
-            q=q,
-            update_from_minutes=update_from,
-        )
-    except ValueError as exc:
-        await update.message.reply_text(humanize_error(exc, q=q))
-        return ConversationHandler.END
-
-    if extra_count > 0:
-        context.user_data["update_pending_schedule"] = current_schedule
-        context.user_data["update_pending_extra_count"] = extra_count
-        example_groups = ", ".join(GROUPS[:extra_count])
-        await update.message.reply_text(
-            "Для цієї години і правила не виходить розподілити світло абсолютно порівну.\n"
-            f"Оберіть рівно {extra_count} підгруп, які отримають додаткові 30 хвилин світла сьогодні.\n"
-            f"Надішліть у форматі: {example_groups}"
-        )
-        return UPDATE_EXTRA_GROUPS
-
-    try:
-        updated_schedule, slot_minutes = build_midday_updated_schedule(
+        updated_schedule, slot_minutes, fairness_gap_slots = build_midday_updated_schedule_relaxed(
             current_schedule=current_schedule,
             q=q,
             update_from_minutes=update_from,
@@ -3355,6 +3655,26 @@ async def handle_update_schedule(update: Update, context: ContextTypes.DEFAULT_T
     except ValueError as exc:
         await update.message.reply_text(humanize_error(exc, q=q))
         return ConversationHandler.END
+
+    if fairness_gap_slots > 0:
+        on_flags = build_on_slot_flags(updated_schedule, slot_minutes)
+        total_on_slots = {group: sum(on_flags[group]) for group in GROUPS}
+        min_total_slots = min(total_on_slots.values())
+        extra_by_minutes: Dict[int, List[str]] = {}
+        for group in GROUPS:
+            delta_slots = total_on_slots[group] - min_total_slots
+            if delta_slots > 0:
+                delta_minutes = delta_slots * slot_minutes
+                extra_by_minutes.setdefault(delta_minutes, []).append(group)
+
+        lines = [
+            "Оновлено за максимально рівномірним принципом для решти дня. "
+            f"Різниця між підгрупами за підсумком доби: {format_duration_uk(fairness_gap_slots * slot_minutes)}."
+        ]
+        for delta_minutes in sorted(extra_by_minutes):
+            groups_text = ", ".join(extra_by_minutes[delta_minutes])
+            lines.append(f"На {format_duration_uk(delta_minutes)} більше світла — {groups_text}")
+        await update.message.reply_text("\n".join(lines))
 
     await update.message.reply_text(format_schedule(updated_schedule))
     await send_off_counts(update, updated_schedule, slot_minutes)
@@ -3384,28 +3704,52 @@ async def handle_update_extra_groups(update: Update, context: ContextTypes.DEFAU
     update_from = context.user_data.get("update_from_minutes")
     current_schedule = context.user_data.get("update_pending_schedule")
     extra_count = context.user_data.get("update_pending_extra_count")
+    options_order = context.user_data.get("update_extra_options_order", [])
+    feasible_map = context.user_data.get("update_extra_feasible_schedules", {})
     if q is None or update_from is None or current_schedule is None or extra_count is None:
         await update.message.reply_text("Не знайдено параметри оновлення. Почніть спочатку.")
         return ConversationHandler.END
 
-    selected_groups = parse_selected_groups(text)
-    if len(selected_groups) != int(extra_count):
-        await update.message.reply_text(
-            f"Потрібно вказати рівно {extra_count} підгруп у форматі: 1.1, 2.2, 3.1"
-        )
-        return UPDATE_EXTRA_GROUPS
+    selected_key = None
+    if text.isdigit():
+        idx = int(text)
+        if idx < 1 or idx > len(options_order):
+            await update.message.reply_text(
+                f"Невірний номер варіанту. Вкажіть число від 1 до {len(options_order)}."
+            )
+            return UPDATE_EXTRA_GROUPS
+        selected_key = options_order[idx - 1]
+    else:
+        selected_groups = parse_selected_groups(text)
+        if len(selected_groups) != int(extra_count):
+            await update.message.reply_text(
+                f"Потрібно вказати рівно {extra_count} підгруп у форматі: 1.1, 2.2, 3.1 "
+                f"або номер варіанту від 1 до {len(options_order)}."
+            )
+            return UPDATE_EXTRA_GROUPS
+        selected_key = normalize_selected_groups_key(selected_groups)
+        if selected_key not in feasible_map:
+            await update.message.reply_text(
+                "Цього набору немає серед можливих варіантів. "
+                "Надішліть номер зі списку або один із перелічених наборів."
+            )
+            return UPDATE_EXTRA_GROUPS
 
-    try:
-        updated_schedule, slot_minutes = build_midday_updated_schedule(
-            current_schedule=current_schedule,
-            q=q,
-            update_from_minutes=update_from,
-            extra_light_groups=selected_groups,
-            rng=random.Random(),
-        )
-    except ValueError as exc:
-        await update.message.reply_text(humanize_error(exc, q=q))
-        return UPDATE_EXTRA_GROUPS
+    updated_schedule = feasible_map.get(selected_key)
+    if updated_schedule is None:
+        # Fallback path if cache was lost for some reason.
+        try:
+            updated_schedule, _ = build_midday_updated_schedule(
+                current_schedule=current_schedule,
+                q=q,
+                update_from_minutes=update_from,
+                extra_light_groups=selected_key.split(","),
+                rng=random.Random(),
+            )
+        except ValueError as exc:
+            await update.message.reply_text(humanize_error(exc, q=q))
+            return UPDATE_EXTRA_GROUPS
+    slot_minutes = detect_slot_minutes(updated_schedule)
 
     await update.message.reply_text(format_schedule(updated_schedule))
     await send_off_counts(update, updated_schedule, slot_minutes)
@@ -3419,6 +3763,8 @@ async def handle_update_extra_groups(update: Update, context: ContextTypes.DEFAU
     context.user_data.pop("update_from_minutes", None)
     context.user_data.pop("update_pending_schedule", None)
     context.user_data.pop("update_pending_extra_count", None)
+    context.user_data.pop("update_extra_options_order", None)
+    context.user_data.pop("update_extra_feasible_schedules", None)
     return ConversationHandler.END
 
 

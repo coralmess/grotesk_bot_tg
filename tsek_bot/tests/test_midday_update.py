@@ -178,6 +178,191 @@ class MiddayUpdateTest(unittest.TestCase):
         self.assertEqual(len(non_selected_values), 1)
         self.assertEqual(next(iter(selected_values)) - next(iter(non_selected_values)), 1)
 
+    def test_enumerate_feasible_extra_group_variants(self):
+        source_text = """
+Графік відключень:
+🔹 Черга 1.1
+00:00 - 01:30
+03:00 - 09:30
+11:30 - 18:00
+20:30 - 00:00
+
+🔹 Черга 1.2
+00:00 - 03:00
+04:30 - 11:00
+13:00 - 19:00
+21:30 - 00:00
+
+🔹 Черга 2.1
+00:00 - 03:00
+05:30 - 11:30
+13:30 - 20:30
+22:00 - 00:00
+
+🔹 Черга 2.2
+00:00 - 03:00
+05:00 - 11:30
+13:00 - 19:30
+22:00 - 00:00
+
+🔹 Черга 3.1
+00:00 - 05:30
+07:00 - 13:30
+16:00 - 22:00
+
+🔹 Черга 3.2
+00:00 - 04:30
+06:00 - 13:00
+15:30 - 22:00
+
+🔹 Черга 4.1
+01:30 - 06:30
+09:00 - 15:30
+17:30 - 00:00
+
+🔹 Черга 4.2
+01:30 - 06:00
+08:30 - 15:00
+17:00 - 00:00
+
+🔹 Черга 5.1
+01:30 - 07:00
+09:30 - 16:00
+18:00 - 00:00
+
+🔹 Черга 5.2
+00:00 - 05:00
+06:30 - 13:00
+15:00 - 21:30
+
+🔹 Черга 6.1
+00:00 - 01:30
+03:00 - 08:30
+11:00 - 17:00
+19:00 - 00:00
+
+🔹 Черга 6.2
+00:00 - 01:30
+03:00 - 09:00
+11:30 - 17:30
+19:30 - 00:00
+"""
+        lines = [line.strip() for line in source_text.splitlines() if line.strip()]
+        current_schedule, _ = bot.parse_yesterday_schedule(lines)
+        _, _, _, _, extra_count = bot.analyze_midday_update_distribution(
+            current_schedule=current_schedule,
+            q=4.0,
+            update_from_minutes=bot.parse_update_time("14:00"),
+        )
+        self.assertEqual(extra_count, 8)
+
+        feasible = bot.enumerate_feasible_extra_group_schedules(
+            current_schedule=current_schedule,
+            q=4.0,
+            update_from_minutes=bot.parse_update_time("14:00"),
+            extra_group_count=extra_count,
+            max_attempts_per_variant=120,
+        )
+        self.assertGreater(len(feasible), 0)
+
+        sample_key = bot.normalize_selected_groups_key(
+            ["3.1", "3.2", "5.2", "1.1", "1.2", "4.1", "4.2", "2.1"]
+        )
+        self.assertIn(sample_key, feasible)
+
+    def test_relaxed_update_has_no_30min_new_light_windows(self):
+        source_text = """
+Графік відключень:
+🔹 Черга 1.1
+00:00 - 01:30
+03:00 - 09:30
+11:30 - 16:30
+20:00 - 00:00
+
+🔹 Черга 1.2
+00:00 - 03:00
+04:30 - 11:00
+13:00 - 20:30
+
+🔹 Черга 2.1
+00:00 - 03:00
+05:30 - 11:30
+13:30 - 21:30
+
+🔹 Черга 2.2
+00:00 - 03:00
+05:00 - 11:30
+13:00 - 17:00
+20:30 - 00:00
+
+🔹 Черга 3.1
+00:00 - 05:30
+07:00 - 13:30
+19:00 - 00:00
+
+🔹 Черга 3.2
+00:00 - 04:30
+06:00 - 13:00
+14:00 - 19:30
+
+🔹 Черга 4.1
+01:30 - 06:30
+09:00 - 14:00
+17:00 - 00:00
+
+🔹 Черга 4.2
+01:30 - 06:00
+08:30 - 14:00
+17:00 - 00:00
+
+🔹 Черга 5.1
+01:30 - 07:00
+09:30 - 14:00
+16:30 - 00:00
+
+🔹 Черга 5.2
+00:00 - 05:00
+06:30 - 13:00
+14:00 - 20:00
+
+🔹 Черга 6.1
+00:00 - 01:30
+03:00 - 08:30
+11:00 - 17:00
+19:30 - 00:00
+
+🔹 Черга 6.2
+00:00 - 01:30
+03:00 - 09:00
+11:30 - 19:00
+21:30 - 00:00
+"""
+        lines = [line.strip() for line in source_text.splitlines() if line.strip()]
+        schedule, _ = bot.parse_yesterday_schedule(lines)
+        update_from = bot.parse_update_time("19:00")
+        updated, slot_minutes, _ = bot.build_midday_updated_schedule_relaxed(
+            current_schedule=schedule,
+            q=4.5,
+            update_from_minutes=update_from,
+            rng=random.Random(3),
+        )
+        self.assertEqual(slot_minutes, 30)
+        on_flags = bot.build_on_slot_flags(updated, slot_minutes)
+        cut_slot = update_from // slot_minutes
+        min_run_slots = 2  # 1 hour in 30-minute slots
+        for group in bot.GROUPS:
+            slot = cut_slot
+            while slot < bot.MINUTES_PER_DAY // slot_minutes:
+                prev = on_flags[group][slot - 1] if slot > 0 else 0
+                if on_flags[group][slot] == 1 and prev == 0:
+                    end = slot
+                    while end < bot.MINUTES_PER_DAY // slot_minutes and on_flags[group][end] == 1:
+                        end += 1
+                    self.assertGreaterEqual(end - slot, min_run_slots)
+                    slot = end
+                else:
+                    slot += 1
+
 
 if __name__ == "__main__":
     unittest.main()
