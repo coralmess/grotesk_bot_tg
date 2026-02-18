@@ -436,5 +436,17 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/men/obuv?search_text=Fiorentini%20Baker&sizes=241&sizes=174&sizes=239&sizes=176&sizes=240&sizes=175&sort=4",
         "url_name": "Fiorentini Baker"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Giorgio%20Brato&sort=4",
+        "url_name": "Giorgio Brato"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Laurence%20Smith&sort=4",
+        "url_name": "Laurence Smith"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Silvano%20Sassetti&sizes=232&sizes=37&sizes=231&sizes=36&sort=4",
+        "url_name": "Silvano Sassetti"
     }
 ]

@@ -816,5 +816,25 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Backlash/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Backlash"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Giorgio-Brato/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Giorgio Brato"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/verhnyaya-odezhda/q-Kl%C3%A4ttermusen/?currency=UAH&search%5Border%5D=created_at%3Adesc",
+        "url_name": "Klättermusen"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Laurence-Smith/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Laurence Smith"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-obuv/q-Silvano-Sassetti/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_enum_size%5D%5B0%5D=39_5&search%5Bfilter_enum_size%5D%5B1%5D=39&search%5Bfilter_enum_size%5D%5B2%5D=40&search%5Bfilter_enum_size%5D%5B3%5D=40_5&search%5Bfilter_enum_size%5D%5B4%5D=41",
+        "url_name": "Silvano Sassetti"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-John-Lofgren/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "John Lofgren"
     }
 ]
