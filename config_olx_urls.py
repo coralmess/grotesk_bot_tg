@@ -872,5 +872,29 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Settefili/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Settefili"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Gentryportofino/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Gentryportofino"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Handvaerk/?search%5Border%5D=created_at:desc",
+        "url_name": "Handvaerk"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/28vg9/",
+        "url_name": "Євгеній"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-bernard-Zins/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Bernard Zins"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Cellar-Door/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Cellar Door"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Ruffo/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=6000",
+        "url_name": "Ruffo"
     }
 ]

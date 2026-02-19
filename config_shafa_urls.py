@@ -480,5 +480,21 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Settefili%20&sort=4",
         "url_name": "Settefili"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?price_to=10000&search_text=Gentryportofino&sort=4",
+        "url_name": "Gentryportofino"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Handvaerk&sort=4",
+        "url_name": "Handvaerk"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=bernard%20Zins&sort=4",
+        "url_name": "Bernard Zins"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Cellar%20Door&sort=4",
+        "url_name": "Cellar Door"
     }
 ]
