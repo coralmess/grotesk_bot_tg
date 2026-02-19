@@ -593,7 +593,7 @@ def process_image(image_url, uah_price, sale_percentage):
     text_margin = min(text_margin, int(width * 0.14))
 
     # Choose base font size and adjust if needed to fit width
-    base_scale = 0.06 if width > height else 0.055
+    base_scale = 0.064 if width > height else 0.06
     font_size = max(24, int(width * base_scale))
     font = load_font(font_size, prefer_heavy=False)
 
@@ -631,9 +631,9 @@ def process_image(image_url, uah_price, sale_percentage):
         text_y = width + padding + ascent + (line_padding // 2)
         draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
         draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
-    elif height > width and (height / width) < 1.42:
-        # Add side padding to reach target portrait ratio (1:1.42)
-        target_ratio = 1.42
+    elif height > width and (height / width) > 1.56:
+        # Add side padding for very tall images to reach target portrait ratio (1:1.56).
+        target_ratio = 1.56
         target_width = int(round(height / target_ratio))
         if target_width > width:
             side_pad_total = target_width - width

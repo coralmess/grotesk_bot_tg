@@ -448,5 +448,37 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Silvano%20Sassetti&sizes=232&sizes=37&sizes=231&sizes=36&sort=4",
         "url_name": "Silvano Sassetti"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?price_to=10000&search_text=Valstar&sort=4",
+        "url_name": "Valstar"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Emmeti&sort=4",
+        "url_name": "Emmeti"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Salvatore%20Santoro&sort=4" ,
+        "url_name": "Salvatore Santoro"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Sage%20de%20Cret&sort=4",
+        "url_name": "Sage de Cret"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Hevo&sort=4",
+        "url_name": "Hevo"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/verkhniaia-odezhda?search_text=fay&sizes=150&sizes=149&sort=4",
+        "url_name": "Fay"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/verkhniaia-odezhda?search_text=Duno&sizes=150&sizes=149&sort=4",
+        "url_name": "Duno"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Settefili%20&sort=4",
+        "url_name": "Settefili"
     }
 ]

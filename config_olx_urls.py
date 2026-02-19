@@ -836,5 +836,41 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-John-Lofgren/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "John Lofgren"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Valstar/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Valstar"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Yves-Salomon/?currency=UAH&search%5Border%5D=created_at%3Adesc&search%5Bfilter_float_price%3Ato%5D=10000",
+        "url_name": "Yves Salomon"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Emmeti/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Emmeti"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Salvatore-Santoro/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Salvatore Santoro"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Sage-de-Cret/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Sage de Cret"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Hevo/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Hevo"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/verhnyaya-odezhda/q-fay/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_enum_size%5D%5B0%5D=m&search%5Bfilter_enum_size%5D%5B1%5D=l",
+        "url_name": "Fay"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/verhnyaya-odezhda/q-Duno/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_enum_size%5D%5B0%5D=m&search%5Bfilter_enum_size%5D%5B1%5D=l",
+        "url_name": "Duno"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Settefili/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Settefili"
     }
 ]

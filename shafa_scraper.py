@@ -44,7 +44,7 @@ _playwright_browser: Optional[Browser] = None
 _playwright_context: Optional[BrowserContext] = None
 _playwright_instance = None
 MIN_PRICE_DIFF = 50
-MIN_PRICE_DIFF_PERCENT = 20.0
+MIN_PRICE_DIFF_PERCENT = 25.0
 _PARSER = "lxml" if _LXML_AVAILABLE else "html.parser"
 
 if not _LXML_AVAILABLE:
