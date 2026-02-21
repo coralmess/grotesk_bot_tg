@@ -2,6 +2,38 @@ from config import DANYLO_DEFAULT_CHAT_ID
 
 SHAFA_URLS = [
     {
+        "url": "https://shafa.ua/uk/clothes?search_text=haat&sort=4",
+        "url_name": "Haat"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=viberg&sort=4",
+        "url_name": "Viberg"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/verkhniaia-odezhda?price_to=7000&search_text=Seraphin&sort=4",
+        "url_name": "Seraphin"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=A%20Kind%20of%20Guise&sort=4",
+        "url_name": "A Kind of Guise"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Sillage&sort=4",
+        "url_name": "Sillage"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Tautz&sort=4",
+        "url_name": "Tautz"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Haversack&sort=4",
+        "url_name": "Haversack"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=mfpen&sort=4",
+        "url_name": "Mfpen"
+    },
+    {
         "url": "https://shafa.ua/uk/men?search_text=sunspel&sort=4",
         "url_name": "Sunspel"
     },
@@ -48,10 +80,6 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/men?search_text=John%20Smedley&sort=4",
         "url_name": "John Smedley"
-    },
-    {
-        "url": "https://shafa.ua/uk/men?search_text=Agnona&sort=4",
-        "url_name": "Agnona"
     },
     {
         "url": "https://shafa.ua/uk/men?search_text=Ann%20Demeulemeester&sort=4",
@@ -496,5 +524,9 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Cellar%20Door&sort=4",
         "url_name": "Cellar Door"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?price_to=8000&search_text=Enrico%20Mandelli&sort=4",
+        "url_name": "Enrico Mandelli"
     }
 ]

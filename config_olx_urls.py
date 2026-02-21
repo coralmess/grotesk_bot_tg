@@ -1,6 +1,38 @@
 from config import DANYLO_DEFAULT_CHAT_ID
 
 OLX_URLS = [
+    {
+        "url": "https://www.olx.ua/uk/list/q-razer-pro-click-mini/?search%5Bfilter_float_price:from%5D=700&search%5Bfilter_float_price:to%5D=3000",
+        "url_name": "Razer Pro Click Mini"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Haat/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Haat"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-A-POC/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "A POC"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-obuv/q-Viberg/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Viberg"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Seraphin/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=7000",
+        "url_name": "Seraphin"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-a-kind-of-guise/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "A Kind Of Guise"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Tautz/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Tautz"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Mfpen/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Mfpen"
+    },
     { 
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-riri/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Riri"
@@ -542,10 +574,6 @@ OLX_URLS = [
         "url_name": "Isaac Sellam Experience"
     },
     {
-        "url": "https://www.olx.ua/uk/moda-i-stil/q-Forme-d'Expression/?currency=UAH&search%5Border%5D=created_at:desc",
-        "url_name": "Forme d'Expression"
-    },
-    {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Geoffrey-Small/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Geoffrey Small"
     },
@@ -790,10 +818,6 @@ OLX_URLS = [
         "url_name": "Doriani"
     },
     {
-        "url": "https://www.olx.ua/uk/moda-i-stil/q-Polyploid/?currency=UAH&search%5Border%5D=created_at:desc",
-        "url_name": "Christian Peau"
-    },
-    {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Scott-Charters/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Scott Charters"
     },
@@ -896,5 +920,13 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Ruffo/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=6000",
         "url_name": "Ruffo"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/1rBfd/",
+        "url_name": "Святослав"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Enrico-Mandelli/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=9000",
+        "url_name": "Enrico Mandelli"
     }
 ]
