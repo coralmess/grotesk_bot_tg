@@ -9,6 +9,7 @@ from PIL import Image
 import io, asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
 from functools import wraps
+from urllib.parse import urljoin, urlsplit, urlunsplit
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_UPSCALE_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
 from config_shafa_urls import SHAFA_URLS
 from dynamic_sources import load_dynamic_urls, merge_sources
@@ -99,6 +100,113 @@ def normalize_price(text: str) -> Tuple[str, int]:
     price_int = int(digits) if digits else 0
     return (f"{price_int} грн" if price_int else (text or "").strip()), price_int
 
+
+def _has_numeric_price(price_text: Optional[str], price_int: int) -> bool:
+    if price_int <= 0:
+        return False
+    return bool(re.search(r"\d", price_text or ""))
+
+
+def _looks_like_item_href(href: Optional[str]) -> bool:
+    if not href:
+        return False
+    href = href.strip()
+    if href.startswith(("javascript:", "#", "mailto:", "tel:")):
+        return False
+    parsed = urlsplit(href)
+    path = (parsed.path or "").rstrip("/")
+    low = path.lower()
+    if not low.startswith("/uk/"):
+        return False
+    if low in ("/uk", "/uk/"):
+        return False
+    for bad in ("/my/", "/msg/", "/member/", "/api/", "/social/", "/login"):
+        if bad in low:
+            return False
+    parts = [p for p in low.split("/") if p]
+    if len(parts) < 4:
+        return False
+    return bool(re.search(r"\d", parts[-1]))
+
+
+def _normalize_item_url(href: str) -> str:
+    absolute = urljoin(BASE_SHAFA, (href or "").strip())
+    parsed = urlsplit(absolute)
+    path = (parsed.path or "").rstrip("/")
+    if not path:
+        path = "/"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
+
+
+def _extract_anchor(card):
+    # Prefer known product-link class, fallback to href heuristics.
+    a = card.find("a", class_="p1SYwW")
+    if a and _looks_like_item_href(a.get("href")):
+        return a
+    for cand in card.find_all("a", href=True):
+        if _looks_like_item_href(cand.get("href")):
+            return cand
+    return None
+
+
+def _extract_price_from_node_text(text: str) -> Tuple[str, int]:
+    if not text:
+        return "", 0
+    normalized = " ".join((text or "").split())
+    return normalize_price(normalized)
+
+
+def _extract_price_from_card(card) -> Tuple[str, int]:
+    # Current (active) price selectors first.
+    current_selectors = [
+        "p.D8o9s7",
+        "div.D8o9s7 p",
+        "div[class*='D8o9s7'] p",
+    ]
+    for selector in current_selectors:
+        for node in card.select(selector):
+            price_text, price_int = _extract_price_from_node_text(node.get_text(" ", strip=True))
+            if price_int > 0:
+                return price_text, price_int
+
+    # Fallback for cards that show sale/new + old price in different nodes.
+    # Keep this class-agnostic: scan short text nodes with explicit currency marks.
+    footer = card.find("footer") or card
+    candidates: List[Tuple[int, str, int]] = []
+    idx = 0
+    for node in footer.find_all(["p", "span", "div"], limit=200):
+        idx += 1
+        text = node.get_text(" ", strip=True)
+        if not text:
+            continue
+        text_norm = " ".join(text.split())
+        if len(text_norm) > 40:
+            continue
+        low = text_norm.lower()
+        if not re.search(r"(грн|uah|₴)", low):
+            continue
+        price_text, price_int = _extract_price_from_node_text(text_norm)
+        if price_int > 0:
+            candidates.append((idx, price_text, price_int))
+    if candidates:
+        # Deduplicate by amount while preserving first appearance order.
+        seen_amounts = set()
+        ordered: List[Tuple[int, str]] = []
+        for _, price_text, price_int in candidates:
+            if price_int in seen_amounts:
+                continue
+            seen_amounts.add(price_int)
+            ordered.append((price_int, price_text))
+        if len(ordered) == 1:
+            amount, text = ordered[0]
+            return text, amount
+        # Sale cards often contain [new_price, old_price] or [old_price, new_price].
+        # Pick the lower amount from the first two meaningful values.
+        first_two = ordered[:2]
+        amount, text = min(first_two, key=lambda x: x[0])
+        return text, amount
+    return "", 0
+
 def extract_id_from_link(link: str) -> str:
     slug = link.rstrip("/").split("/")[-1].split("?", 1)[0]
     if match := re.match(r"(\d+)", slug):
@@ -115,31 +223,79 @@ def _strip_image_url(url: Optional[str]) -> Optional[str]:
         return None
     return url.split("_", 1)[0] if "_" in url else url
 
-def _extract_image_from_card(card) -> Optional[str]:
-    if not (img := card.find("img", class_="wD1fsK")):
+
+def _extract_from_srcset(srcset: Optional[str]) -> Optional[str]:
+    if not srcset:
+        return None
+    parts = [p.strip() for p in srcset.split(",") if p.strip()]
+    if not parts:
+        return None
+    # Use the last candidate (usually highest resolution in srcset order).
+    candidate = parts[-1].split()[0]
+    return _strip_image_url(candidate)
+
+
+def _extract_image_from_anchor(anchor) -> Optional[str]:
+    if not anchor:
+        return None
+    img = anchor.find("img", class_="wD1fsK") or anchor.find("img")
+    if not img:
         return None
     if src := _strip_image_url(img.get("src")):
         return src
-    for attr in ["data-src", "data-lazy-src"]:
+    for attr in ["data-src", "data-lazy-src", "data-original"]:
         if url := _strip_image_url(img.get(attr)):
             return url
+    for attr in ["srcset", "data-srcset"]:
+        if url := _extract_from_srcset(img.get(attr)):
+            return url
+    return None
+
+
+def _extract_image_from_card(card, anchor, link_url: str) -> Optional[str]:
+    # Strict binding: image should belong to the same item anchor.
+    if url := _extract_image_from_anchor(anchor):
+        return url
+    for a in card.find_all("a", href=True):
+        if not _looks_like_item_href(a.get("href")):
+            continue
+        if _normalize_item_url(a.get("href", "")) != link_url:
+            continue
+        if url := _extract_image_from_anchor(a):
+            return url
+    # Better no image than a wrong image from another card.
     return None
 
 def parse_card(card) -> Optional[ShafaItem]:
     try:
-        a = card.find("a", class_="p1SYwW")
+        a = _extract_anchor(card)
         if not a or not (href := a.get("href")):
             return None
-        link = href if href.startswith("http") else f"{BASE_SHAFA}{href}"
+        link = _normalize_item_url(href)
+        if not _looks_like_item_href(link):
+            return None
         item_id = extract_id_from_link(link)
         name_el = card.find("a", class_="CnMTkD")
-        name = name_el.get_text(strip=True) if name_el else ""
-        price_el = card.find("div", class_="D8o9s7")
-        if price_el:
-            main_price = price_el.find("p")
-            price_text, price_int = normalize_price(main_price.get_text(" ", strip=True) if main_price else "")
+        if name_el and _looks_like_item_href(name_el.get("href")):
+            name = name_el.get_text(strip=True)
         else:
-            price_text, price_int = "", 0
+            # Class-agnostic name fallback tied to the same item URL.
+            name_candidates: List[str] = []
+            for anchor in card.find_all("a", href=True):
+                if not _looks_like_item_href(anchor.get("href")):
+                    continue
+                if _normalize_item_url(anchor.get("href", "")) != link:
+                    continue
+                txt = " ".join(anchor.get_text(" ", strip=True).split())
+                if len(txt) < 3:
+                    continue
+                if re.search(r"(грн|uah|₴|\d+\s*%?)", txt.lower()):
+                    continue
+                name_candidates.append(txt)
+            name = max(name_candidates, key=len) if name_candidates else ""
+            if not name and (img := card.find("img")):
+                name = (img.get("alt") or "").strip()
+        price_text, price_int = _extract_price_from_card(card)
         brand_el = card.find("p", class_="i7zcRu")
         brand = brand_el.get_text(strip=True) if brand_el else None
         size_el = card.find("p", class_="NyHfpp")
@@ -154,7 +310,7 @@ def parse_card(card) -> Optional[ShafaItem]:
             price_int=price_int,
             brand=brand,
             size=size,
-            first_image_url=_extract_image_from_card(card)
+            first_image_url=_extract_image_from_card(card, a, link)
         )
     except Exception as e:
         logger.debug(f"Failed to parse card: {e}")
@@ -164,26 +320,38 @@ def collect_cards(soup: BeautifulSoup) -> List:
     cards = soup.find_all("div", class_=lambda x: x and "dqgIPe" in x)
     if cards:
         return cards
-    product_links = soup.find_all("a", class_="p1SYwW")
+    product_links = soup.find_all("a", href=lambda h: _looks_like_item_href(h))
     if product_links:
         cards = []
+        seen = set()
         for link in product_links:
             parent = link.parent
+            best = None
             while parent and parent.name != 'body':
-                classes = parent.get("class", [])
-                if isinstance(classes, str):
-                    classes = [classes]
-                if any(cls for cls in classes if cls):
-                    cards.append(parent)
-                    break
+                if parent.name == "div":
+                    anchors = parent.find_all("a", href=lambda h: _looks_like_item_href(h))
+                    anchor_count = len(anchors)
+                    if anchor_count == 0 or anchor_count > 3:
+                        parent = parent.parent
+                        continue
+                    if not parent.find("img"):
+                        parent = parent.parent
+                        continue
+                    best = parent
+                    if anchor_count == 1:
+                        break
                 parent = parent.parent
+            if best is not None:
+                ident = id(best)
+                if ident not in seen:
+                    seen.add(ident)
+                    cards.append(best)
         if cards:
             return cards
     cards = []
     for div in soup.find_all("div"):
-        if (div.find("a", class_="p1SYwW") and 
-            div.find("a", class_="CnMTkD") and
-            div.find("img", class_="wD1fsK")):
+        if (div.find("a", href=lambda h: _looks_like_item_href(h)) and
+            div.find("img")):
             cards.append(div)
     return cards
 
@@ -416,7 +584,7 @@ def _db_init_sync():
             CREATE TABLE IF NOT EXISTS shafa_items (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, link TEXT NOT NULL,
                 price_text TEXT NOT NULL, price_int INTEGER NOT NULL,
-                brand TEXT, size TEXT, source TEXT,
+                brand TEXT, size TEXT, source TEXT, first_image_url TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now')),
                 last_sent_at TEXT
@@ -430,6 +598,12 @@ def _db_init_sync():
                 last_checked_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        try:
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(shafa_items)").fetchall()]
+            if "first_image_url" not in cols:
+                conn.execute("ALTER TABLE shafa_items ADD COLUMN first_image_url TEXT")
+        except Exception:
+            pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shafa_items_source ON shafa_items(source);")
         conn.commit()
 
@@ -438,14 +612,18 @@ def _db_upsert_items_sync(items: List[Tuple[ShafaItem, bool]], source_name: str)
         return
     with _db_connect() as conn:
         conn.executemany("""
-            INSERT INTO shafa_items (id, name, link, price_text, price_int, brand, size, source, created_at, updated_at, last_sent_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), CASE WHEN ? THEN datetime('now') ELSE NULL END)
+            INSERT INTO shafa_items (id, name, link, price_text, price_int, brand, size, source, first_image_url, created_at, updated_at, last_sent_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), CASE WHEN ? THEN datetime('now') ELSE NULL END)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name, link=excluded.link, price_text=excluded.price_text, price_int=excluded.price_int,
                 brand=excluded.brand, size=excluded.size, source=excluded.source, updated_at=datetime('now'),
+                first_image_url=CASE
+                    WHEN excluded.first_image_url IS NOT NULL AND excluded.first_image_url <> '' THEN excluded.first_image_url
+                    ELSE shafa_items.first_image_url
+                END,
                 last_sent_at=CASE WHEN ? THEN datetime('now') ELSE last_sent_at END
             """, [
-                (item.id, item.name, item.link, item.price_text, item.price_int, item.brand, item.size, source_name,
+                (item.id, item.name, item.link, item.price_text, item.price_int, item.brand, item.size, source_name, item.first_image_url,
                  1 if touch_last_sent else 0, 1 if touch_last_sent else 0)
                 for item, touch_last_sent in items
             ])
@@ -458,7 +636,7 @@ def _db_fetch_existing_sync(item_ids: List[str]) -> List[Optional[Dict[str, Any]
     try:
         # Batch query using IN clause - much faster than N individual queries
         placeholders = ','.join('?' * len(item_ids))
-        query = f"SELECT id, name, link, price_text, price_int, brand, size, source, created_at, updated_at, last_sent_at FROM shafa_items WHERE id IN ({placeholders})"
+        query = f"SELECT id, name, link, price_text, price_int, brand, size, source, first_image_url, created_at, updated_at, last_sent_at FROM shafa_items WHERE id IN ({placeholders})"
         rows = conn.execute(query, item_ids).fetchall()
         # Build lookup dict for O(1) access
         items_dict = {row['id']: dict(row) for row in rows}
@@ -580,12 +758,25 @@ async def run_shafa_scraper():
             updates = []
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
+                if prev and not it.first_image_url and prev.get("first_image_url"):
+                    it.first_image_url = prev.get("first_image_url")
                 if prev is None:
+                    if not _has_numeric_price(it.price_text, it.price_int):
+                        logger.warning(f"Skipping new item with empty/invalid price: {it.id}")
+                        continue
                     new_count += 1
                     items_to_send.append(it)
                     send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it))
                     continue
+                # Do not apply price updates when parser produced empty/invalid price.
+                if not _has_numeric_price(it.price_text, it.price_int):
+                    logger.warning(f"Skipping update with empty/invalid price for item {it.id}")
+                    continue
                 previous_price = prev.get("price_int") or 0
+                if previous_price <= 0 and it.price_int > 0:
+                    # Heal DB after previous bad/empty price without sending noisy updates.
+                    updates.append((it, False))
+                    continue
                 if previous_price > 0 and it.price_int > previous_price:
                     # Price increased: update DB but do not notify.
                     updates.append((it, False))

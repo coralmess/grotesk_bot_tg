@@ -528,5 +528,21 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/men?price_to=8000&search_text=Enrico%20Mandelli&sort=4",
         "url_name": "Enrico Mandelli"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=fracap&sizes=176&sizes=240&sizes=175&sizes=174&sizes=239&sort=4",
+        "url_name": "Fracap"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Ajmone&sort=4",
+        "url_name": "Ajmone"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Cinquanta&sort=4",
+        "url_name": "Cinquanta"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Emmeti&sort=4",
+        "url_name": "Emmeti"
     }
 ]

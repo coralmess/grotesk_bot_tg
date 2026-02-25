@@ -928,5 +928,25 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Enrico-Mandelli/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=9000",
         "url_name": "Enrico Mandelli"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Ajmone/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Ajmone"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Cinquanta/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Cinquanta"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Ajmone/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Ajmone"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Emmeti/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Emmeti"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Craig-Green/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Craig Green"
     }
 ]
