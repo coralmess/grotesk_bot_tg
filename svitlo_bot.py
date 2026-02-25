@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Set
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import Update
@@ -19,6 +20,7 @@ CONNECT_TIMEOUT_SECONDS = 8
 
 SUBSCRIBERS_FILE = Path("subscribers.json")
 STATE_FILE = Path("svitlo_state.json")
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 
 @dataclass
@@ -119,16 +121,15 @@ class SvitloBot:
         new_state: str,
         previous_duration: str,
     ) -> None:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = datetime.now(KYIV_TZ).strftime("%d.%m %H:%M")
         state_line = "⚡ Світло з'явилося" if new_state == "ON" else "🚫 Світло зникло"
         duration_label = "Без світла" if old_state == "OFF" else "Зі світлом"
         previous_state_ua = self._state_to_ua(old_state)
         text = (
-            "🏠 Зміна стану електропостачання\n"
+            "🏠 Зміна стану електропостачання\n\n"
             f"{state_line}\n"
-            f"🔄 Попередній стан: {previous_state_ua}\n"
             f"⏱️ {duration_label}: {previous_duration}\n"
-            f"🕒 Зафіксовано о: {timestamp}"
+            f"🕒 Час апдейту: {timestamp}"
         )
 
         async with self._lock:
