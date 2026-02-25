@@ -20,41 +20,6 @@ CONNECT_TIMEOUT_SECONDS = 8
 SUBSCRIBERS_FILE = Path("subscribers.json")
 STATE_FILE = Path("svitlo_state.json")
 
-EMOJI_HOME = "\U0001F3E0"
-EMOJI_OK = "\u2705"
-EMOJI_INFO = "\u2139\ufe0f"
-EMOJI_LIGHT_ON = "\u26a1"
-EMOJI_LIGHT_OFF = "\U0001F6AB"
-EMOJI_PLUG = "\U0001F50C"
-EMOJI_GLOBE = "\U0001F310"
-EMOJI_REFRESH = "\U0001F504"
-EMOJI_CLOCK = "\U0001F552"
-EMOJI_TIMER = "\u23f1\ufe0f"
-
-UA_DAY_ONE = "\u0434\u0435\u043d\u044c"
-UA_DAY_FEW = "\u0434\u043d\u0456"
-UA_DAY_MANY = "\u0434\u043d\u0456\u0432"
-UA_HOUR_ONE = "\u0433\u043e\u0434\u0438\u043d\u0430"
-UA_HOUR_FEW = "\u0433\u043e\u0434\u0438\u043d\u0438"
-UA_HOUR_MANY = "\u0433\u043e\u0434\u0438\u043d"
-UA_MINUTES_SHORT = "\u0445\u0432"
-UA_WITHOUT_LIGHT = "\u0411\u0435\u0437 \u0441\u0432\u0456\u0442\u043b\u0430"
-UA_WITH_LIGHT = "\u0417\u0456 \u0441\u0432\u0456\u0442\u043b\u043e\u043c"
-UA_UNKNOWN = "\u043d\u0435\u0432\u0456\u0434\u043e\u043c\u043e"
-UA_HEADER = "\u041c\u043e\u043d\u0456\u0442\u043e\u0440 \u0435\u043b\u0435\u043a\u0442\u0440\u043e\u043f\u043e\u0441\u0442\u0430\u0447\u0430\u043d\u043d\u044f"
-UA_ACTION_SUBSCRIBED = "\u041f\u0456\u0434\u043f\u0438\u0441\u043a\u0443 \u0430\u043a\u0442\u0438\u0432\u043e\u0432\u0430\u043d\u043e."
-UA_ACTION_ALREADY = "\u0412\u0438 \u0432\u0436\u0435 \u043f\u0456\u0434\u043f\u0438\u0441\u0430\u043d\u0456."
-UA_STATUS_LINE = "\u041f\u043e\u0442\u043e\u0447\u043d\u0438\u0439 \u0441\u0442\u0430\u043d: {state}"
-UA_HOST_CHECK = "\u041f\u0435\u0440\u0435\u0432\u0456\u0440\u043a\u0430 \u0445\u043e\u0441\u0442\u0430: {host}:{port} \u043a\u043e\u0436\u043d\u0456 {seconds}\u0441"
-UA_STATE_ON = "\u0441\u0432\u0456\u0442\u043b\u043e \u0454"
-UA_STATE_OFF = "\u0441\u0432\u0456\u0442\u043b\u0430 \u043d\u0435\u043c\u0430\u0454"
-UA_ALERT_HEADER = "\u0417\u043c\u0456\u043d\u0430 \u0441\u0442\u0430\u043d\u0443 \u0435\u043b\u0435\u043a\u0442\u0440\u043e\u043f\u043e\u0441\u0442\u0430\u0447\u0430\u043d\u043d\u044f"
-UA_ALERT_ON = "\u0421\u0432\u0456\u0442\u043b\u043e \u0437\u0027\u044f\u0432\u0438\u043b\u043e\u0441\u044f"
-UA_ALERT_OFF = "\u0421\u0432\u0456\u0442\u043b\u043e \u0437\u043d\u0438\u043a\u043b\u043e"
-UA_PREVIOUS = "\u041f\u043e\u043f\u0435\u0440\u0435\u0434\u043d\u0456\u0439 \u0441\u0442\u0430\u043d: {state}"
-UA_DURATION = "{label}: {duration}"
-UA_DETECTED_AT = "\u0417\u0430\u0444\u0456\u043a\u0441\u043e\u0432\u0430\u043d\u043e \u043e: {timestamp}"
-
 
 @dataclass
 class PowerState:
@@ -84,14 +49,13 @@ class SvitloBot:
 
         current_state = self._state.value if self._state else "UNKNOWN"
         current_state_ua = self._state_to_ua(current_state)
-        state_emoji = EMOJI_LIGHT_ON if current_state == "ON" else EMOJI_PLUG
-        action_text = f"{EMOJI_OK} {UA_ACTION_SUBSCRIBED}" if added else f"{EMOJI_INFO} {UA_ACTION_ALREADY}"
+        state_emoji = "⚡" if current_state == "ON" else "🔌"
+        action_text = "✅ Підписку активовано." if added else "ℹ️ Ви вже підписані."
 
         await update.message.reply_text(
-            f"{EMOJI_HOME} {UA_HEADER}\n"
+            "🏠 Монітор електропостачання\n"
             f"{action_text}\n"
-            f"{state_emoji} {UA_STATUS_LINE.format(state=current_state_ua)}\n"
-            f"{EMOJI_GLOBE} {UA_HOST_CHECK.format(host=HOST, port=PORT, seconds=CHECK_INTERVAL_SECONDS)}"
+            f"{state_emoji} Поточний стан: {current_state_ua}"
         )
 
     async def on_startup(self, application: Application) -> None:
@@ -156,15 +120,15 @@ class SvitloBot:
         previous_duration: str,
     ) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        state_line = f"{EMOJI_LIGHT_ON} {UA_ALERT_ON}" if new_state == "ON" else f"{EMOJI_LIGHT_OFF} {UA_ALERT_OFF}"
-        duration_label = UA_WITHOUT_LIGHT if old_state == "OFF" else UA_WITH_LIGHT
+        state_line = "⚡ Світло з'явилося" if new_state == "ON" else "🚫 Світло зникло"
+        duration_label = "Без світла" if old_state == "OFF" else "Зі світлом"
         previous_state_ua = self._state_to_ua(old_state)
         text = (
-            f"{EMOJI_HOME} {UA_ALERT_HEADER}\n"
+            "🏠 Зміна стану електропостачання\n"
             f"{state_line}\n"
-            f"{EMOJI_REFRESH} {UA_PREVIOUS.format(state=previous_state_ua)}\n"
-            f"{EMOJI_TIMER} {UA_DURATION.format(label=duration_label, duration=previous_duration)}\n"
-            f"{EMOJI_CLOCK} {UA_DETECTED_AT.format(timestamp=timestamp)}"
+            f"🔄 Попередній стан: {previous_state_ua}\n"
+            f"⏱️ {duration_label}: {previous_duration}\n"
+            f"🕒 Зафіксовано о: {timestamp}"
         )
 
         async with self._lock:
@@ -256,7 +220,7 @@ class SvitloBot:
             start_dt = datetime.fromisoformat(start_iso)
             end_dt = datetime.fromisoformat(end_iso)
         except ValueError:
-            return UA_UNKNOWN
+            return "невідомо"
 
         total_seconds = max(0, int((end_dt - start_dt).total_seconds()))
         days = total_seconds // 86400
@@ -264,13 +228,13 @@ class SvitloBot:
         minutes = (total_seconds % 3600) // 60
 
         if days > 0:
-            day_word = SvitloBot._plural_uk(days, UA_DAY_ONE, UA_DAY_FEW, UA_DAY_MANY)
-            hour_word = SvitloBot._plural_uk(hours, UA_HOUR_ONE, UA_HOUR_FEW, UA_HOUR_MANY)
+            day_word = SvitloBot._plural_uk(days, "день", "дні", "днів")
+            hour_word = SvitloBot._plural_uk(hours, "година", "години", "годин")
             return f"{days} {day_word} {hours} {hour_word}"
         if hours > 0:
-            hour_word = SvitloBot._plural_uk(hours, UA_HOUR_ONE, UA_HOUR_FEW, UA_HOUR_MANY)
-            return f"{hours} {hour_word} {minutes}{UA_MINUTES_SHORT}"
-        return f"{max(1, minutes)}{UA_MINUTES_SHORT}"
+            hour_word = SvitloBot._plural_uk(hours, "година", "години", "годин")
+            return f"{hours} {hour_word} {minutes}хв"
+        return f"{max(1, minutes)}хв"
 
     @staticmethod
     def _plural_uk(n: int, one: str, few: str, many: str) -> str:
@@ -287,10 +251,10 @@ class SvitloBot:
     @staticmethod
     def _state_to_ua(state: str) -> str:
         if state == "ON":
-            return UA_STATE_ON
+            return "Світло є"
         if state == "OFF":
-            return UA_STATE_OFF
-        return UA_UNKNOWN
+            return "Світла немає"
+        return "Невідомо"
 
 
 def build_application() -> Application:
