@@ -4,10 +4,15 @@
 # Configuration
 $SCRIPT_DIR = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $BOT_SCRIPT = Join-Path $SCRIPT_DIR "GroteskBotTg.py"
-$LOG_FILE = Join-Path $SCRIPT_DIR "monitor.log"
+$RUNTIME_LOG_DIR = Join-Path $SCRIPT_DIR "runtime_data\logs"
+$LOG_FILE = Join-Path $RUNTIME_LOG_DIR "monitor.log"
 $LOCK_FILE = Join-Path $SCRIPT_DIR "monitor.lock"
 $CHECK_INTERVAL = 600 # 10 minutes in seconds
 $GIT_CHECK_INTERVAL = 60 # Check git status every 60 seconds, but only fetch every 10 minutes
+
+if (-not (Test-Path $RUNTIME_LOG_DIR)) {
+    New-Item -ItemType Directory -Path $RUNTIME_LOG_DIR -Force | Out-Null
+}
 
 # Global variables
 $global:BotProcess = $null

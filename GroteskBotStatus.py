@@ -7,10 +7,11 @@ from zoneinfo import ZoneInfo
 
 from telegram import Bot
 from telegram.constants import ParseMode
+from helpers.runtime_paths import STATUS_MESSAGE_ID_FILE, LAST_RUNS_JSON_FILE
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
-STATUS_MSG_FILE = Path(__file__).with_name("status_message_id.txt")
-LAST_RUNS_FILE = Path(__file__).with_name("last_runs.json")
+STATUS_MSG_FILE = STATUS_MESSAGE_ID_FILE
+LAST_RUNS_FILE = LAST_RUNS_JSON_FILE
 
 LAST_OLX_RUN_UTC = None
 LAST_SHAFA_RUN_UTC = None

@@ -7,7 +7,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $SCRIPT_DIR = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $TASK_NAME = "GroteskBotTg-AutoStart"
-$LOG_FILE = Join-Path $SCRIPT_DIR "monitor.log"
+$LOG_FILE = Join-Path (Join-Path $SCRIPT_DIR "runtime_data\logs") "monitor.log"
 $LOCK_FILE = Join-Path $SCRIPT_DIR "monitor.lock"
 
 function Get-ColoredStatus {

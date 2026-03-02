@@ -22,7 +22,7 @@ from GroteskBotStatus import (
     mark_lyst_issue,
     finalize_lyst_run,
 )
-from dynamic_sources import add_dynamic_url, detect_source
+from helpers.dynamic_sources import add_dynamic_url, detect_source
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC
 from config_lyst import (
     BASE_URLS,
@@ -33,18 +33,27 @@ from config_lyst import (
     LYST_PAGE_TIMEOUT_SEC,
     LYST_MAX_SCROLL_ATTEMPTS,
 )
-from lyst_debug import (
+from helpers.lyst_debug import (
     attach_lyst_debug_listeners,
     dump_lyst_debug_event,
     write_stop_too_early_dump,
 )
-from scheduler import run_scheduler
+from helpers.scheduler import run_scheduler
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
 import aiosqlite
 from olx_scraper import run_olx_scraper
 from shafa_scraper import run_shafa_scraper
+from helpers.runtime_paths import (
+    PYTHON_LOG_FILE,
+    SHOES_DB_FILE as RUNTIME_SHOES_DB_FILE,
+    OLX_ITEMS_DB_FILE as RUNTIME_OLX_DB_FILE,
+    SHAFA_ITEMS_DB_FILE as RUNTIME_SHAFA_DB_FILE,
+    LYST_RESUME_JSON_FILE,
+    SHOE_DATA_JSON_FILE,
+    EXCHANGE_RATES_JSON_FILE,
+)
 try:
     import cv2
 except Exception:
@@ -70,15 +79,16 @@ window.chrome = { runtime: {} };
 
 # Initialize constants and globals
 colorama.init(autoreset=True)
-BOT_VERSION, DB_NAME = "4.1.0", "shoes.db"
+BOT_VERSION, DB_NAME = "4.1.0", str(RUNTIME_SHOES_DB_FILE)
 LIVE_MODE, ASK_FOR_LIVE_MODE = False, False
 PAGE_SCRAPE = LYST_PAGE_SCRAPE
-SHOE_DATA_FILE, EXCHANGE_RATES_FILE = 'shoe_data.json', 'exchange_rates.json'
-BOT_LOG_FILE = Path(__file__).with_name("python.log")
-SHOES_DB_FILE = Path(__file__).with_name("shoes.db")
-OLX_DB_FILE = Path(__file__).with_name("olx_items.db")
-SHAFA_DB_FILE = Path(__file__).with_name("shafa_items.db")
-LYST_RESUME_FILE = Path(__file__).with_name("lyst_resume.json")
+SHOE_DATA_FILE = SHOE_DATA_JSON_FILE
+EXCHANGE_RATES_FILE = EXCHANGE_RATES_JSON_FILE
+BOT_LOG_FILE = PYTHON_LOG_FILE
+SHOES_DB_FILE = RUNTIME_SHOES_DB_FILE
+OLX_DB_FILE = RUNTIME_OLX_DB_FILE
+SHAFA_DB_FILE = RUNTIME_SHAFA_DB_FILE
+LYST_RESUME_FILE = LYST_RESUME_JSON_FILE
 LOG_TAIL_LINES = 500
 COUNTRIES = LYST_COUNTRIES
 BLOCK_RESOURCES = False

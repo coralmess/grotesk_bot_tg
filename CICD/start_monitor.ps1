@@ -3,8 +3,13 @@
 
 $SCRIPT_DIR = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $MONITOR_SCRIPT = Join-Path $SCRIPT_DIR "CICD\monitor_and_update.ps1"
-$ERROR_LOG = Join-Path $SCRIPT_DIR "startup_error.log"
+$RUNTIME_LOG_DIR = Join-Path $SCRIPT_DIR "runtime_data\logs"
+$ERROR_LOG = Join-Path $RUNTIME_LOG_DIR "startup_error.log"
 $LOCK_FILE = Join-Path $SCRIPT_DIR "monitor.lock"
+
+if (-not (Test-Path $RUNTIME_LOG_DIR)) {
+    New-Item -ItemType Directory -Path $RUNTIME_LOG_DIR -Force | Out-Null
+}
 
 function Write-ErrorLog {
     param([string]$Message)

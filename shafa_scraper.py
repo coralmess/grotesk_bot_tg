@@ -12,7 +12,8 @@ from functools import wraps
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_UPSCALE_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
 from config_shafa_urls import SHAFA_URLS
-from dynamic_sources import load_dynamic_urls, merge_sources
+from helpers.dynamic_sources import load_dynamic_urls, merge_sources
+from helpers.runtime_paths import SHAFA_ITEMS_DB_FILE
 
 try:
     from playwright.async_api import async_playwright, Browser, BrowserContext
@@ -559,7 +560,7 @@ async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_ur
     result = await send_message(bot, chat_id, caption)
     return result if result is not None else False
 
-DB_FILE = Path(__file__).with_name("shafa_items.db")
+DB_FILE = SHAFA_ITEMS_DB_FILE
 
 def _apply_pragmas(conn: sqlite3.Connection):
     try:

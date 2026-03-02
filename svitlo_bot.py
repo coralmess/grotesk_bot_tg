@@ -12,14 +12,17 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
+from helpers.runtime_paths import SVITLO_SUBSCRIBERS_JSON_FILE, SVITLO_STATE_JSON_FILE
 
 HOST = "grotesk.tplinkdns.com"
 PORT = 45678
 CHECK_INTERVAL_SECONDS = 60
 CONNECT_TIMEOUT_SECONDS = 8
+QUIET_HOURS_START = 23
+QUIET_HOURS_END = 9
 
-SUBSCRIBERS_FILE = Path("subscribers.json")
-STATE_FILE = Path("svitlo_state.json")
+SUBSCRIBERS_FILE = SVITLO_SUBSCRIBERS_JSON_FILE
+STATE_FILE = SVITLO_STATE_JSON_FILE
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 
@@ -54,10 +57,13 @@ class SvitloBot:
         state_emoji = "⚡" if current_state == "ON" else "🔌"
         action_text = "✅ Підписку активовано." if added else "ℹ️ Ви вже підписані."
 
+        silent = self._is_quiet_hours(datetime.now(KYIV_TZ))
+
         await update.message.reply_text(
             "🏠 Монітор електропостачання\n"
             f"{action_text}\n"
-            f"{state_emoji} Поточний стан: {current_state_ua}"
+            f"{state_emoji} Поточний стан: {current_state_ua}",
+            disable_notification=silent,
         )
 
     async def on_startup(self, application: Application) -> None:
@@ -121,15 +127,16 @@ class SvitloBot:
         new_state: str,
         previous_duration: str,
     ) -> None:
-        timestamp = datetime.now(KYIV_TZ).strftime("%d.%m %H:%M")
-        state_line = "⚡ Світло з'явилося" if new_state == "ON" else "🚫 Світло зникло"
+        now_kyiv = datetime.now(KYIV_TZ)
+        timestamp = now_kyiv.strftime("%d.%m %H:%M")
+        silent = self._is_quiet_hours(now_kyiv)
+        state_line = "⚡ Світло з'явилося ⚡" if new_state == "ON" else "🕯 Світло зникло 🕯"
         duration_label = "Без світла" if old_state == "OFF" else "Зі світлом"
         previous_state_ua = self._state_to_ua(old_state)
         text = (
-            "🏠 Зміна стану електропостачання\n\n"
-            f"{state_line}\n"
+            f"{state_line}\n\n"
             f"⏱️ {duration_label}: {previous_duration}\n"
-            f"🕒 Час апдейту: {timestamp}"
+            f"⌚️ Час апдейту: {timestamp}"
         )
 
         async with self._lock:
@@ -138,11 +145,11 @@ class SvitloBot:
         for chat_id in chat_ids:
             should_remove = False
             try:
-                await application.bot.send_message(chat_id=chat_id, text=text)
+                await application.bot.send_message(chat_id=chat_id, text=text, disable_notification=silent)
             except RetryAfter as error:
                 await asyncio.sleep(error.retry_after + 1)
                 try:
-                    await application.bot.send_message(chat_id=chat_id, text=text)
+                    await application.bot.send_message(chat_id=chat_id, text=text, disable_notification=silent)
                 except Exception:
                     logging.exception("Failed to notify chat_id=%s after retry", chat_id)
             except (Forbidden, BadRequest):
@@ -256,6 +263,10 @@ class SvitloBot:
         if state == "OFF":
             return "Світла немає"
         return "Невідомо"
+
+    @staticmethod
+    def _is_quiet_hours(dt_kyiv: datetime) -> bool:
+        return dt_kyiv.hour >= QUIET_HOURS_START or dt_kyiv.hour < QUIET_HOURS_END
 
 
 def build_application() -> Application:

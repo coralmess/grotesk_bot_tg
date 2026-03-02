@@ -11,7 +11,8 @@ from html import escape
 from functools import wraps
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, OLX_TASK_CONCURRENCY, OLX_HTTP_HTML_CONCURRENCY, OLX_HTTP_IMAGE_CONCURRENCY, OLX_UPSCALE_CONCURRENCY, OLX_SEND_CONCURRENCY, OLX_HTTP_CONNECTOR_LIMIT
 from config_olx_urls import OLX_URLS
-from dynamic_sources import load_dynamic_urls, merge_sources
+from helpers.dynamic_sources import load_dynamic_urls, merge_sources
+from helpers.runtime_paths import OLX_ITEMS_DB_FILE
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -448,7 +449,7 @@ async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_ur
     result = await send_message(bot, chat_id, caption)
     return result if result is not None else False
 
-DB_FILE = Path(__file__).with_name("olx_items.db")
+DB_FILE = OLX_ITEMS_DB_FILE
 
 def _apply_pragmas(conn: sqlite3.Connection):
     """Apply SQLite pragmas for better performance."""

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
+from .runtime_paths import RUNTIME_DEBUG_DIR
 
 
 def attach_lyst_debug_listeners(page, collector: list[str]) -> None:
@@ -83,7 +84,8 @@ def write_lyst_debug_dump(
     screenshot_bytes: Optional[bytes] = None,
     base_dir: Optional[Path] = None,
 ) -> None:
-    base = base_dir or Path(__file__).parent
+    base = base_dir or RUNTIME_DEBUG_DIR
+    base.mkdir(parents=True, exist_ok=True)
     html_path = base / f"{prefix}.html"
     meta_path = base / f"{prefix}_meta.txt"
     screenshot_path = base / f"{prefix}.png"

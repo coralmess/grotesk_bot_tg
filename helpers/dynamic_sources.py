@@ -4,11 +4,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
+from .runtime_paths import OLX_DYNAMIC_JSON_FILE, SHAFA_DYNAMIC_JSON_FILE
 
 
 _BASE_DIR = Path(__file__).resolve().parent
-DYNAMIC_OLX_FILE = _BASE_DIR / "olx_dynamic_urls.json"
-DYNAMIC_SHAFA_FILE = _BASE_DIR / "shafa_dynamic_urls.json"
+DYNAMIC_OLX_FILE = OLX_DYNAMIC_JSON_FILE
+DYNAMIC_SHAFA_FILE = SHAFA_DYNAMIC_JSON_FILE
 
 
 def _load_json(path: Path) -> List[Dict[str, str]]:

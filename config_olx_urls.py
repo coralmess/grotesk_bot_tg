@@ -33,7 +33,7 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Mfpen/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Mfpen"
     },
-    { 
+    {
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-riri/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Riri"
     },
@@ -292,7 +292,7 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/mebel/q-Mattiazzi/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Mattiazzi"
-    },  
+    },
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Punt-Mobles/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Punt Mobles"
@@ -337,10 +337,6 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/list/user/83Rzs/",
         "url_name": "Гоша"
     },
-    # {
-    #     "url": "https://www.olx.ua/uk/list/user/4XOGU/",
-    #     "url_name": "Андрій"
-    # },
     {
         "url": "https://www.olx.ua/uk/list/user/2fnjBw/",
         "url_name": "Євгенія'"
@@ -377,10 +373,6 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/list/q-paola-zani/?search%5Border%5D=created_at:desc",
         "url_name": "Paola Zani"
     },
-    # {
-    #     "url": "https://www.olx.ua/uk/list/user/1OyGf/",
-    #     "url_name": "Сергій Олігарх"
-    # },
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Frette/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Frette"
@@ -481,10 +473,6 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Fedeli/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
         "url_name": "Fedeli"
     },
-    # {
-    #     "url": "https://www.olx.ua/uk/moda-i-stil/q-helmut-lang/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
-    #     "url_name": "Helmut Lang"
-    # },
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Veilance/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Veilance"
@@ -548,7 +536,7 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Graphpaper/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Graphpaper"
-    }, 
+    },
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Pillivuyt/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Pillivuyt"
@@ -685,10 +673,10 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Extreme-Cashmere/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Extreme Cashmere"
     },
-    { 
+    {
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Auralee/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Auralee"
-    }, 
+    },
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Alk-Phenix/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Alk Phenix"
@@ -710,7 +698,7 @@ OLX_URLS = [
         "url_name": "Hamcus"
     },
     {
-        "url": "https://www.olx.ua/uk/moda-i-stil/q-Portaille/?currency=UAH&search%5Border%5D=created_at:desc", 
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Portaille/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Portaille"
     },
     {
@@ -743,7 +731,7 @@ OLX_URLS = [
     },
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Nicolas-Andreas-Taralis/?currency=UAH&search%5Border%5D=created_at:desc",
-        "url_name": "Nicolas Andreas Taralis"   
+        "url_name": "Nicolas Andreas Taralis"
     },
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Richard-Ginori/?currency=UAH&search%5Border%5D=created_at:desc",
@@ -948,5 +936,185 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Craig-Green/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Craig Green"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Alberto-Fasciani/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Alberto Fasciani"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-fausto-colato/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Fausto Colato"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Abyss-Habidecor/?search%5Border%5D=created_at:desc",
+        "url_name": "Abyss Habidecor"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/aksessuary/remni-poyasa/q-orciani/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Orciani"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/aksessuary/remni-poyasa/q-Campomaggi/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Campomaggi"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Feit/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Feit"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Adriano-Meneghetti/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Adriano Meneghetti"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Tiberio-Ferretti/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Tiberio Ferretti"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Still-By-Hand/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Still By Hand"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Rolling-Dub-Trio/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Rolling Dub Trio"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Heschung/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Heschung"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-obuv/q-Black-Sign/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Black Sign"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-obuv/q-Petrosolaum/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Petrosolaum"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-obuv/q-Toga-Virilis/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Toga Virilis"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/aksessuary/remni-poyasa/q-Kreis/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Kreis"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Jabez-Cliff/?search%5Border%5D=created_at:desc",
+        "url_name": "Jabez Cliff"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-billykirk/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Billykirk"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-house-of-blanks/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "House Of Blanks"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Cotton-Citizen/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Cotton Citizen"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/1C2Td",
+        "url_name": "User 1C2Td"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Sferra/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Sferra"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Matouk/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Matouk"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Uchino/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Uchino"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Serapian/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=7000",
+        "url_name": "Serapian"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/aksessuary/remni-poyasa/remni/q-Paolo-Vitale/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Paolo Vitale"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Pratesi/?currency=UAH",
+        "url_name": "Pratesi"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-supima/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Supima"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Yves-Delorme/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Yves Delorme"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Comoli/?search%5Border%5D=created_at:desc",
+        "url_name": "Comoli"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Camiel-Fortgens/?search%5Border%5D=created_at:desc",
+        "url_name": "Camiel Fortgens"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-De-Bonne-Facture/?search%5Border%5D=created_at:desc",
+        "url_name": "De Bonne Facture"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Christian-Fischbacher/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Christian Fischbacher"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Schlossberg/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Schlossberg"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Libeco/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Libeco"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Gingerlily/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Gingerlily"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/predmety-interera/q-Bellora/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Bellora"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Story-mfg/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Story mfg"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Kaptain-Sunshine/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Kaptain Sunshine"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Nicholas-Daley/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Nicholas Daley"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Markaware/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Markaware"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Arpenteur/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Arpenteur"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-H%C3%A4stens/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Hästens"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/bryuki/q-NEAT/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "NEAT"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Affix/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Affix"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Willy-Chavarria/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Willy Chavarria"
     }
 ]

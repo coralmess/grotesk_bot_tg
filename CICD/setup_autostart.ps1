@@ -97,7 +97,7 @@ try {
         Start-ScheduledTask -TaskName $TASK_NAME
         Write-Host ""
         Write-Host "Task started! The bot monitor is now running in the background." -ForegroundColor Green
-        Write-Host "Check monitor.log for details: $(Join-Path $SCRIPT_DIR 'monitor.log')" -ForegroundColor Yellow
+        Write-Host "Check monitor.log for details: $(Join-Path $SCRIPT_DIR 'runtime_data\logs\monitor.log')" -ForegroundColor Yellow
     }
 }
 catch {
