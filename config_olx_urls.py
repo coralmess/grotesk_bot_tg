@@ -1116,5 +1116,9 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Willy-Chavarria/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Willy Chavarria"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Ettinger/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=3000",
+        "url_name": "Ettinger"
     }
 ]

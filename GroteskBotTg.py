@@ -2352,15 +2352,24 @@ async def command_listener(bot_token, allowed_chat_ids, log_path):
                     if not source:
                         await bot.send_message(chat_id=chat_id, text="Unsupported URL. Send an OLX or Shafa link.")
                         continue
+                    source_upper = source.upper()
                     if ok:
                         await bot.send_message(
                             chat_id=chat_id,
-                            text=f"Added {source.upper()} link: {url}\\nName: {url_name}"
+                            text=(
+                                f"👔 Added {source_upper} link\n\n"
+                                f"🌐 Url: {url}\n"
+                                f"📥 Name: {url_name}"
+                            ),
                         )
                     else:
                         await bot.send_message(
                             chat_id=chat_id,
-                            text=f"{source.upper()} link already exists: {url}\\nName: {url_name}"
+                            text=(
+                                f"⚠️ {source_upper} link already exists\n\n"
+                                f"🌐 Url: {url}\n"
+                                f"📥 Name: {url_name}"
+                            ),
                         )
         except asyncio.CancelledError:
             raise
