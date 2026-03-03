@@ -789,7 +789,8 @@ async def migrate_json_to_sqlite():
 async def load_shoe_data():
     create_tables()
     await migrate_json_to_sqlite()
-    return load_shoe_data_from_db()
+    # load_shoe_data_from_db uses sync sqlite3; run it in a thread so the event loop stays responsive.
+    return await asyncio.to_thread(load_shoe_data_from_db)
 
 async def save_shoe_data(data):
     await async_save_shoe_data(data)
@@ -2221,24 +2222,40 @@ def get_sale_emoji(sale_percentage, uah_sale):
     return "🍄🍄🍄"
 
 def build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol, old_sale_price=None, status=None):
+    # Telegram uses HTML parsing for captions/messages below.
+    # Always escape dynamic site data to prevent malformed HTML and send failures.
+    def _esc(value):
+        return html.escape(str(value if value is not None else ""), quote=True)
+
+    name = _esc(shoe.get('name'))
+    original_price = _esc(shoe.get('original_price'))
+    sale_price = _esc(shoe.get('sale_price'))
+    lowest_price = _esc(shoe.get('lowest_price'))
+    store = _esc(shoe.get('store'))
+    country = _esc(shoe.get('country'))
+    kurs_symbol_safe = _esc(kurs_symbol)
+    old_sale_price_safe = _esc(old_sale_price)
+    shoe_link = _esc(shoe.get('shoe_link'))
+    store_line = f"🔗 Store : <a href='{shoe_link}'>{store}</a>" if shoe_link else f"🔗 Store : {store}"
+
     if status is None:  # New item
         sale_emoji = get_sale_emoji(sale_percentage, uah_sale)
         return (
-            f"{sale_emoji}  New item  {sale_emoji}\n{shoe['name']}\n\n"
-            f"💀 Prices : <s>{shoe['original_price']}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
+            f"{sale_emoji}  New item  {sale_emoji}\n{name}\n\n"
+            f"💀 Prices : <s>{original_price}</s>  <b>{sale_price}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
             f"🤑 Grivniki : <b>{uah_sale} UAH </b>\n"
-            f"🧊 Kurs : {kurs_symbol} {kurs} \n"
-            f"🔗 Store : <a href='{shoe['shoe_link']}'>{shoe['store']}</a>\n"
-            f"🌍 Country : {shoe['country']}"
+            f"🧊 Kurs : {kurs_symbol_safe} {kurs} \n"
+            f"{store_line}\n"
+            f"🌍 Country : {country}"
         )
     return (
-        f"💎💎💎 {status} 💎💎💎 \n{shoe['name']}:\n\n"
-        f"💀 Prices : <s>{shoe['original_price']}</s>  <s>{old_sale_price}</s>  <b>{shoe['sale_price']}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i> \n"
+        f"💎💎💎 {_esc(status)} 💎💎💎 \n{name}:\n\n"
+        f"💀 Prices : <s>{original_price}</s>  <s>{old_sale_price_safe}</s>  <b>{sale_price}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i> \n"
         f"🤑 Grivniki : {uah_sale} UAH\n"
-        f"📉 Lowest price : {shoe['lowest_price']} ({shoe['lowest_price_uah']} UAH)\n"
-        f"🧊 Kurs : {kurs_symbol} {kurs} \n"
-        f"🔗 Store : <a href='{shoe['shoe_link ']}'>{shoe['store']}</a>\n"
-        f"🌍 Country : {shoe['country']}"
+        f"📉 Lowest price : {lowest_price} ({shoe['lowest_price_uah']} UAH)\n"
+        f"🧊 Kurs : {kurs_symbol_safe} {kurs} \n"
+        f"{store_line}\n"
+        f"🌍 Country : {country}"
     )
 
 async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah_price=None, sale_percentage=None, max_retries=3):
@@ -2247,7 +2264,8 @@ async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah
         try:
             if image_url and image_url.startswith(('http://', 'https://')):
                 if uah_price is not None and sale_percentage is not None:
-                    img_byte_arr = process_image(image_url, uah_price, sale_percentage)
+                    # process_image performs blocking HTTP + PIL work; keep event loop non-blocking.
+                    img_byte_arr = await asyncio.to_thread(process_image, image_url, uah_price, sale_percentage)
                     await bot.send_photo(chat_id=chat_id, photo=img_byte_arr, caption=message, parse_mode='HTML')
                 else:
                     best_url = _upgrade_lyst_image_url(image_url) or image_url
@@ -2428,7 +2446,8 @@ def filter_duplicates(shoes, exchange_rates):
 
 async def process_shoe(shoe, old_data, message_queue, exchange_rates):
     key = f"{shoe['name']}_{shoe['unique_id']}"
-    if await is_shoe_processed(key): return
+    is_new_item = key not in old_data
+    was_processed = await is_shoe_processed(key) if is_new_item else False
 
     # Calculate sale details
     sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], shoe['country'])
@@ -2436,16 +2455,20 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
     kurs, uah_sale, kurs_symbol = sale_exchange_data.exchange_rate, sale_exchange_data.uah_amount, sale_exchange_data.currency_symbol
 
     # Handle new shoe
-    if key not in old_data:
+    if is_new_item:
         shoe.update({
             'lowest_price': shoe['sale_price'],
             'lowest_price_uah': uah_sale,
             'uah_price': uah_sale,
             'active': True
         })
-        message = build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol)
-        await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
-        await mark_shoe_processed(key)
+        # Important: do NOT globally skip this function based on processed_shoes.
+        # That old behavior prevented future state updates for existing items.
+        # We only use processed_shoes to suppress duplicate "new item" notifications.
+        if not was_processed:
+            message = build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol)
+            await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
+            await mark_shoe_processed(key)
         old_data[key] = shoe
         # Save individual shoe instead of entire dataset
         await save_shoe_data_bulk([dict(shoe, key=key)])
