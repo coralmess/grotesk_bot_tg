@@ -728,5 +728,9 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/women/nizhnee-bele-i-kupalniki/trusiki?conditions=1&search_text=hanro&sizes=5&sizes=4&sort=4",
         "url_name": "Hanro (pnt)"
+    },
+    {
+        "url": "https://shafa.ua/uk/women/nizhnee-bele-i-kupalniki/trusiki?conditions=1&search_text=zimmerli&sizes=5&sizes=4&sort=4",
+        "url_name": "Zimmerli (pnt)"
     }
 ]

@@ -23,6 +23,9 @@ from GroteskBotStatus import (
     finalize_lyst_run,
 )
 from helpers.dynamic_sources import add_dynamic_url, detect_source
+from helpers import image_pipeline as image_pipeline_helpers
+from helpers import telegram_runtime as telegram_runtime_helpers
+from helpers import lyst_state as lyst_state_helpers
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC
 from config_lyst import (
     BASE_URLS,
@@ -124,41 +127,47 @@ LYST_HTTP_ONLY_ENABLED = LYST_HTTP_ONLY
 LYST_HTTP_ONLY_DISABLE_REASON = ""
 
 def build_lyst_context_lines(*, attempt=None, max_retries=None, max_scroll_attempts=None, use_pagination=None):
-    lines = [
-        f"attempt: {attempt}/{max_retries}" if attempt is not None and max_retries is not None else "attempt: ",
-        f"block_resources: {BLOCK_RESOURCES}",
-        f"page_scrape: {PAGE_SCRAPE}",
-        f"use_pagination: {use_pagination if use_pagination is not None else ''}",
-        f"max_scroll_attempts: {max_scroll_attempts if max_scroll_attempts is not None else ''}",
-        f"image_strategy: {LYST_IMAGE_STRATEGY}",
-        f"image_ready_target: {LYST_IMAGE_READY_TARGET}",
-        f"image_extra_scrolls: {LYST_IMAGE_EXTRA_SCROLLS}",
-        f"image_settle_passes: {LYST_IMAGE_SETTLE_PASSES}",
-        f"lyst_http_only: {LYST_HTTP_ONLY}",
-        f"lyst_http_only_enabled: {LYST_HTTP_ONLY_ENABLED}",
-        f"lyst_http_only_disabled_reason: {LYST_HTTP_ONLY_DISABLE_REASON}",
-        f"lyst_http_timeout_sec: {LYST_HTTP_TIMEOUT_SEC}",
-        f"lyst_page_timeout_sec: {LYST_PAGE_TIMEOUT_SEC}",
-        f"lyst_url_timeout_sec: {LYST_URL_TIMEOUT_SEC}",
-        f"lyst_stall_timeout_sec: {LYST_STALL_TIMEOUT_SEC}",
-        f"lyst_max_browsers: {LYST_MAX_BROWSERS}",
-        f"lyst_shoe_concurrency: {LYST_SHOE_CONCURRENCY}",
-        f"lyst_country_concurrency: {LYST_COUNTRY_CONCURRENCY}",
-        f"live_mode: {LIVE_MODE}",
-    ]
-    return lines
+    # Keep this wrapper for backward compatibility; implementation lives in helpers/lyst_state.py.
+    return lyst_state_helpers.build_context_lines(
+        attempt=attempt,
+        max_retries=max_retries,
+        max_scroll_attempts=max_scroll_attempts,
+        use_pagination=use_pagination,
+        block_resources=BLOCK_RESOURCES,
+        page_scrape=PAGE_SCRAPE,
+        image_strategy=LYST_IMAGE_STRATEGY,
+        image_ready_target=LYST_IMAGE_READY_TARGET,
+        image_extra_scrolls=LYST_IMAGE_EXTRA_SCROLLS,
+        image_settle_passes=LYST_IMAGE_SETTLE_PASSES,
+        lyst_http_only=LYST_HTTP_ONLY,
+        lyst_http_only_enabled=LYST_HTTP_ONLY_ENABLED,
+        lyst_http_only_disabled_reason=LYST_HTTP_ONLY_DISABLE_REASON,
+        lyst_http_timeout_sec=LYST_HTTP_TIMEOUT_SEC,
+        lyst_page_timeout_sec=LYST_PAGE_TIMEOUT_SEC,
+        lyst_url_timeout_sec=LYST_URL_TIMEOUT_SEC,
+        lyst_stall_timeout_sec=LYST_STALL_TIMEOUT_SEC,
+        lyst_max_browsers=LYST_MAX_BROWSERS,
+        lyst_shoe_concurrency=LYST_SHOE_CONCURRENCY,
+        lyst_country_concurrency=LYST_COUNTRY_CONCURRENCY,
+        live_mode=LIVE_MODE,
+    )
 
 def reset_lyst_http_only_state():
     global LYST_HTTP_ONLY_ENABLED, LYST_HTTP_ONLY_DISABLE_REASON
-    LYST_HTTP_ONLY_ENABLED = LYST_HTTP_ONLY
-    LYST_HTTP_ONLY_DISABLE_REASON = ""
+    LYST_HTTP_ONLY_ENABLED, LYST_HTTP_ONLY_DISABLE_REASON = lyst_state_helpers.reset_http_only_state(
+        lyst_http_only_default=LYST_HTTP_ONLY
+    )
 
 def disable_lyst_http_only(reason: str):
     global LYST_HTTP_ONLY_ENABLED, LYST_HTTP_ONLY_DISABLE_REASON
-    if LYST_HTTP_ONLY_ENABLED:
-        LYST_HTTP_ONLY_ENABLED = False
-        LYST_HTTP_ONLY_DISABLE_REASON = reason or "disabled"
-        logger.warning(f"LYST HTTP-only disabled for this run: {LYST_HTTP_ONLY_DISABLE_REASON}")
+    # Preserve previous reason when already disabled to avoid noisy state churn.
+    if not LYST_HTTP_ONLY_ENABLED:
+        return
+    LYST_HTTP_ONLY_ENABLED, LYST_HTTP_ONLY_DISABLE_REASON = lyst_state_helpers.disable_http_only(
+        currently_enabled=LYST_HTTP_ONLY_ENABLED,
+        reason=reason,
+        logger=logger,
+    )
 
 # Config-driven priorities and thresholds with safe defaults (compact, safe getattr)
 COUNTRY_PRIORITY = ["PL", "US", "IT", "GB"]
@@ -205,82 +214,10 @@ class ColoredFormatter(logging.Formatter):
         timestamp = Fore.LIGHTBLACK_EX + self.formatTime(record, self.datefmt) + Style.RESET_ALL
         return f"{timestamp}     {log_color}{record.getMessage()}{Style.RESET_ALL}"
 
-class TelegramMessageQueue:
+class TelegramMessageQueue(telegram_runtime_helpers.TelegramMessageQueue):
+    # Thin compatibility layer so existing call sites keep the same constructor/signature.
     def __init__(self, bot_token):
-        self.queue, self.bot_token, self.pending_messages = asyncio.Queue(), bot_token, {}
-        self.recent_sent = {}
-        # Keep this bounded for long-running processes; old completed IDs are not useful forever.
-        self._pending_ttl_sec = 6 * 3600
-        self._pending_max_entries = 5000
-
-    def _fingerprint(self, chat_id, message, image_url, uah_price, sale_percentage):
-        payload = f"{chat_id}|{message}|{image_url or ''}|{uah_price or ''}|{sale_percentage or ''}"
-        return hashlib.sha1(payload.encode("utf-8", errors="ignore")).hexdigest()
-
-    def _prune_recent(self, now_ts, window_sec):
-        expired = [k for k, ts in self.recent_sent.items() if now_ts - ts > window_sec]
-        for k in expired:
-            self.recent_sent.pop(k, None)
-
-    def _set_pending_status(self, message_id, sent, now_ts=None):
-        self.pending_messages[message_id] = {
-            "sent": bool(sent),
-            "updated_at": now_ts if now_ts is not None else time.time(),
-        }
-
-    def _prune_pending_messages(self, now_ts):
-        expired = [
-            message_id
-            for message_id, meta in self.pending_messages.items()
-            if meta.get("sent") and (now_ts - float(meta.get("updated_at", now_ts))) > self._pending_ttl_sec
-        ]
-        for message_id in expired:
-            self.pending_messages.pop(message_id, None)
-        overflow = len(self.pending_messages) - self._pending_max_entries
-        if overflow <= 0:
-            return
-        # Evict oldest completed records first; keep unsent records for diagnostics/retries.
-        ordered = sorted(
-            self.pending_messages.items(),
-            key=lambda item: (0 if item[1].get("sent") else 1, float(item[1].get("updated_at", 0.0))),
-        )
-        for message_id, _ in ordered[:overflow]:
-            self.pending_messages.pop(message_id, None)
-
-    async def add_message(self, chat_id, message, image_url=None, uah_price=None, sale_percentage=None):
-        message_id = str(uuid.uuid4())
-        self._set_pending_status(message_id, False)
-        await self.queue.put((message_id, chat_id, message, image_url, uah_price, sale_percentage))
-        return message_id
-
-    async def process_queue(self):
-        while True:
-            message_id, chat_id, message, image_url, uah_price, sale_percentage = await self.queue.get()
-            now_ts = time.time()
-            fingerprint = self._fingerprint(chat_id, message, image_url, uah_price, sale_percentage)
-            self._prune_recent(now_ts, 1800)
-            self._prune_pending_messages(now_ts)
-            if fingerprint in self.recent_sent:
-                self._set_pending_status(message_id, True, now_ts)
-                await asyncio.sleep(1)
-                continue
-            success = await send_telegram_message(self.bot_token, chat_id, message, image_url, uah_price, sale_percentage)
-            self._set_pending_status(message_id, success, now_ts)
-            if success:
-                self.recent_sent[fingerprint] = time.time()
-            else:
-                await self.queue.put((message_id, chat_id, message, image_url, uah_price, sale_percentage))
-            await asyncio.sleep(1)
-
-    def is_message_sent(self, message_id):
-        meta = self.pending_messages.get(message_id)
-        if not meta:
-            return False
-        return bool(meta.get("sent"))
-
-    def stats(self):
-        pending = sum(1 for meta in self.pending_messages.values() if not meta.get("sent"))
-        return {"queue_size": self.queue.qsize(), "pending": pending}
+        super().__init__(bot_token, send_func=send_telegram_message)
 
 # Configure logging
 logger = logging.getLogger()
@@ -448,289 +385,111 @@ def _now_kyiv_str():
     return datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
 def _write_json_atomic(path: Path, payload):
-    # Atomic replace avoids partially-written JSON when the process is interrupted mid-write.
-    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
-    try:
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            handle.write(serialized)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
+    # Delegated to shared helper to keep one atomic-write implementation across bot modules.
+    lyst_state_helpers._write_json_atomic(path, payload)
 
 def load_lyst_resume_state():
-    try:
-        data = json.loads(LYST_RESUME_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and "entries" in data:
-            data.setdefault("resume_active", False)
-            if not isinstance(data.get("entries"), dict):
-                data["entries"] = {}
-            return data
-    except Exception as exc:
-        logger.warning(f"Failed to load Lyst resume state from {LYST_RESUME_FILE}: {exc}")
-    return {"resume_active": False, "entries": {}}
+    return lyst_state_helpers.load_resume_state(resume_file=LYST_RESUME_FILE, logger=logger)
 
 def save_lyst_resume_state(state):
-    try:
-        _write_json_atomic(LYST_RESUME_FILE, state)
-    except Exception as exc:
-        logger.error(f"Failed to persist Lyst resume state to {LYST_RESUME_FILE}: {exc}")
+    lyst_state_helpers.save_resume_state(resume_file=LYST_RESUME_FILE, state=state, logger=logger)
 
 async def update_lyst_resume_entry(key, **fields):
-    async with LYST_RESUME_LOCK:
-        entries = LYST_RESUME_STATE.setdefault("entries", {})
-        entry = entries.get(key, {})
-        entry.update(fields)
-        entry["updated_at"] = _now_kyiv_str()
-        entries[key] = entry
-        save_lyst_resume_state(LYST_RESUME_STATE)
+    await lyst_state_helpers.update_resume_entry(
+        resume_lock=LYST_RESUME_LOCK,
+        resume_state=LYST_RESUME_STATE,
+        key=key,
+        fields=fields,
+        now_kyiv_str_fn=_now_kyiv_str,
+        save_state_fn=save_lyst_resume_state,
+    )
 
 def init_lyst_resume_state():
     global LYST_RESUME_STATE, LYST_RUN_FAILED, LYST_RUN_PROGRESS
-    LYST_RESUME_STATE = load_lyst_resume_state()
-    if not LYST_RESUME_STATE.get("resume_active", False):
-        LYST_RESUME_STATE["entries"] = {}
-    LYST_RUN_FAILED = False
-    LYST_RUN_PROGRESS = {}
-    if LYST_ABORT_EVENT.is_set():
-        LYST_ABORT_EVENT.clear()
+    # Wrapper keeps old API while shared helper owns the state-reset rules.
+    loaded_state = load_lyst_resume_state()
+    LYST_RESUME_STATE, LYST_RUN_FAILED, LYST_RUN_PROGRESS = lyst_state_helpers.init_resume_state(
+        loaded_state=loaded_state,
+        abort_event=LYST_ABORT_EVENT,
+    )
 
 async def mark_lyst_run_failed(reason: str):
     global LYST_RUN_FAILED
-    LYST_RUN_FAILED = True
-    LYST_ABORT_EVENT.set()
-    async with LYST_RESUME_LOCK:
-        LYST_RESUME_STATE["resume_active"] = True
-        LYST_RESUME_STATE["last_failure_reason"] = reason
-        LYST_RESUME_STATE["last_failure_at"] = _now_kyiv_str()
-        LYST_RESUME_STATE["last_run_progress"] = dict(LYST_RUN_PROGRESS)
-        save_lyst_resume_state(LYST_RESUME_STATE)
+    LYST_RUN_FAILED = await lyst_state_helpers.mark_run_failed(
+        reason=reason,
+        resume_lock=LYST_RESUME_LOCK,
+        resume_state=LYST_RESUME_STATE,
+        run_progress=LYST_RUN_PROGRESS,
+        now_kyiv_str_fn=_now_kyiv_str,
+        save_state_fn=save_lyst_resume_state,
+        abort_event=LYST_ABORT_EVENT,
+    )
 
 def log_lyst_run_progress_summary():
-    if not LYST_RUN_PROGRESS:
-        return
-    logger.error("Lyst run progress before abort:")
-    for key, page in sorted(LYST_RUN_PROGRESS.items()):
-        logger.error(f"LYST progress {key}: last_scraped_page={page}")
+    lyst_state_helpers.log_run_progress_summary(run_progress=LYST_RUN_PROGRESS, logger=logger)
 
 async def finalize_lyst_resume_after_processing():
-    async with LYST_RESUME_LOCK:
-        entries = LYST_RESUME_STATE.get("entries", {})
-        for key, entry in entries.items():
-            last_scraped = entry.get("last_scraped_page")
-            if last_scraped is None:
-                continue
-            entry["last_success_page"] = last_scraped
-            if entry.get("scrape_complete") and not LYST_RUN_FAILED:
-                entry["completed"] = True
-                entry["next_page"] = 1
-            else:
-                entry["completed"] = False
-                entry["next_page"] = (last_scraped + 1) if last_scraped else entry.get("next_page", 1)
-        if LYST_RUN_FAILED:
-            LYST_RESUME_STATE["resume_active"] = True
-        save_lyst_resume_state(LYST_RESUME_STATE)
+    await lyst_state_helpers.finalize_resume_after_processing(
+        resume_lock=LYST_RESUME_LOCK,
+        resume_state=LYST_RESUME_STATE,
+        run_failed=LYST_RUN_FAILED,
+        save_state_fn=save_lyst_resume_state,
+    )
 
 def load_font(font_size, prefer_heavy=False):
-    font_dir = Path(__file__).with_name("fonts")
-    if prefer_heavy:
-        font_candidates = [
-            font_dir / "SFPro-Heavy.ttf",
-            font_dir / "SFPro-Bold.ttf",
-        ]
-    else:
-        font_candidates = [
-            font_dir / "SFPro-Bold.ttf",
-            font_dir / "SFPro-Heavy.ttf",
-        ]
-    font_candidates += [
-        "SFPro-Heavy.ttf",
-        "SFPro-Bold.ttf",
-        "arialbd.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    ]
-    for font_file in font_candidates:
-        try:
-            return ImageFont.truetype(str(font_file), font_size)
-        except IOError:
-            continue
-    return ImageFont.load_default()
+    return image_pipeline_helpers.load_font(
+        font_size,
+        fonts_dir=Path(__file__).with_name("fonts"),
+        prefer_heavy=prefer_heavy,
+    )
 
 def _ensure_edsr_weights():
-    if EDSR_MODEL_PATH.exists():
-        return True
-    try:
-        EDSR_MODEL_PATH.parent.mkdir(exist_ok=True)
-        resp = requests.get(EDSR_MODEL_URL, stream=True, timeout=60)
-        if resp.status_code != 200:
-            logger.warning(f"EDSR weights download failed: HTTP {resp.status_code}")
-            return False
-        with open(EDSR_MODEL_PATH, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1 << 20):
-                if chunk:
-                    f.write(chunk)
-        return True
-    except Exception as exc:
-        logger.warning(f"EDSR weights download failed: {exc}")
-        return False
+    return image_pipeline_helpers._ensure_edsr_weights(
+        model_path=EDSR_MODEL_PATH,
+        model_url=EDSR_MODEL_URL,
+        logger=logger,
+    )
 
 def _get_edsr_superres():
-    global _EDSR_SUPERRES
-    if _EDSR_SUPERRES is not None:
-        return _EDSR_SUPERRES
-    if cv2 is None or not hasattr(cv2, "dnn_superres"):
-        raise RuntimeError("opencv-contrib (dnn_superres) not available")
-    if not _ensure_edsr_weights():
-        raise RuntimeError("EDSR weights unavailable")
-    sr = cv2.dnn_superres.DnnSuperResImpl_create()
-    sr.readModel(str(EDSR_MODEL_PATH))
-    sr.setModel("edsr", 2)
-    _EDSR_SUPERRES = sr
-    return _EDSR_SUPERRES
+    return image_pipeline_helpers._get_edsr_superres(
+        cv2_module=cv2,
+        model_path=EDSR_MODEL_PATH,
+        model_url=EDSR_MODEL_URL,
+        logger=logger,
+    )
 
-def _upscale_with_edsr(pil_img: Image.Image) -> Image.Image:
-    if cv2 is None or np is None:
-        raise RuntimeError("opencv/numpy not available for EDSR")
-    sr = _get_edsr_superres()
-    img_rgb = np.array(pil_img.convert("RGB"))
-    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-    with _EDSR_LOCK:
-        up_bgr = sr.upsample(img_bgr)
-    up_rgb = cv2.cvtColor(up_bgr, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(up_rgb)
+def _upscale_with_edsr(pil_img):
+    return image_pipeline_helpers._upscale_with_edsr(
+        pil_img,
+        cv2_module=cv2,
+        np_module=np,
+        model_path=EDSR_MODEL_PATH,
+        model_url=EDSR_MODEL_URL,
+        logger=logger,
+    )
 
 def _fetch_image_bytes(image_url: str) -> bytes:
-    last_exc = None
-    for url in _image_url_candidates(image_url):
-        try:
-            resp = requests.get(url, timeout=30)
-            if not resp.ok or not resp.content:
-                last_exc = RuntimeError(f"Image HTTP {resp.status_code} for {url}")
-                continue
-            return resp.content
-        except Exception as exc:
-            last_exc = exc
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("No image candidates available")
+    return image_pipeline_helpers._fetch_image_bytes(
+        image_url,
+        image_url_candidates_fn=_image_url_candidates,
+    )
 
 def process_image(image_url, uah_price, sale_percentage):
-    response_bytes = _fetch_image_bytes(image_url)
-    img = Image.open(io.BytesIO(response_bytes))
-    # If upscaling is disabled, downscale large sources to keep file size under Telegram limit
-    if not UPSCALE_IMAGES:
-        max_edge = 1280
-        w, h = img.size
-        scale = min(1.0, max_edge / max(w, h)) if max(w, h) else 1.0
-        if scale < 1.0:
-            new_size = (int(w * scale), int(h * scale))
-            img = img.resize(new_size, Image.LANCZOS)
-    width, height = img.size
-    should_upscale = UPSCALE_IMAGES and max(width, height) < 720
-    if should_upscale:
-        if UPSCALE_METHOD == "edsr":
-            try:
-                img = _upscale_with_edsr(img)
-                width, height = img.size
-            except Exception as exc:
-                logger.warning(f"EDSR upscale failed, falling back to LANCZOS: {exc}")
-                width, height = [dim * 2 for dim in img.size]
-                img = img.resize((width, height), Image.LANCZOS)
-        else:
-            width, height = [dim * 2 for dim in img.size]
-            img = img.resize((width, height), Image.LANCZOS)
-
-    price_text, sale_text = f"{uah_price} UAH", f"-{sale_percentage}%"
-    padding = max(12, int(width * 0.03))
-    text_margin = max(20, int(width * 0.1))
-    text_margin = min(text_margin, int(width * 0.14))
-
-    # Choose base font size and adjust if needed to fit width
-    base_scale = 0.064 if width > height else 0.06
-    font_size = max(24, int(width * base_scale))
-    font = load_font(font_size, prefer_heavy=False)
-
-    def _fit_font(font_size):
-        while font_size > 12:
-            font = load_font(font_size, prefer_heavy=False)
-            dummy = Image.new('RGB', (width, width), (255, 255, 255))
-            d = ImageDraw.Draw(dummy)
-            price_bbox = d.textbbox((0, 0), price_text, font=font)
-            sale_bbox = d.textbbox((0, 0), sale_text, font=font)
-            price_w = price_bbox[2] - price_bbox[0]
-            sale_w = sale_bbox[2] - sale_bbox[0]
-            if max(price_w, sale_w) <= (width - (text_margin * 2)):
-                return font
-            font_size -= 2
-        return load_font(font_size, prefer_heavy=False)
-
-    font = _fit_font(font_size)
-    ascent, descent = font.getmetrics()
-    text_height = ascent + descent
-    line_padding = max(2, int(font_size * 0.15))
-
-    if width > height:
-        # Make square by adding white space ABOVE the image (not below the prices)
-        top_pad = width - height
-        square_img = Image.new('RGB', (width, width), (255, 255, 255))
-        square_img.paste(img, (0, top_pad))
-
-        draw = ImageDraw.Draw(square_img)
-        bottom_area = text_height + (padding * 2) + line_padding
-
-        new_img = Image.new('RGB', (width, width + bottom_area), (255, 255, 255))
-        new_img.paste(square_img, (0, 0))
-        draw = ImageDraw.Draw(new_img)
-        text_y = width + padding + ascent + (line_padding // 2)
-        draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
-        draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
-    elif height > width and (height / width) > 1.56:
-        # Add side padding for very tall images to reach target portrait ratio (1:1.56).
-        target_ratio = 1.56
-        target_width = int(round(height / target_ratio))
-        if target_width > width:
-            side_pad_total = target_width - width
-            left_pad = side_pad_total // 2
-            right_pad = side_pad_total - left_pad
-            padded_img = Image.new('RGB', (target_width, height), (255, 255, 255))
-            padded_img.paste(img, (left_pad, 0))
-        else:
-            padded_img = img
-            target_width = width
-
-        bottom_area = text_height + (padding * 2) + line_padding
-        new_img = Image.new('RGB', (target_width, height + bottom_area), (255, 255, 255))
-        new_img.paste(padded_img, (0, 0))
-        draw = ImageDraw.Draw(new_img)
-        text_y = height + padding + ascent + (line_padding // 2)
-        draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
-        draw.text((target_width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
-    else:
-        # Default: add a bottom bar for text
-        bottom_area = text_height + (padding * 2) + line_padding
-        new_img = Image.new('RGB', (width, height + bottom_area), (255, 255, 255))
-        new_img.paste(img, (0, 0))
-        draw = ImageDraw.Draw(new_img)
-        text_y = height + padding + ascent + (line_padding // 2)
-        draw.text((text_margin, text_y), price_text, font=font, fill=(22, 22, 24), anchor="ls")
-        draw.text((width - text_margin, text_y), sale_text, font=font, fill=(255, 59, 48), anchor="rs")
-
-    img_byte_arr = io.BytesIO()
-    if UPSCALE_IMAGES:
-        new_img.save(img_byte_arr, format='PNG', quality=95)
-    else:
-        # JPEG is smaller and avoids Telegram size limits for large images
-        if new_img.mode != 'RGB':
-            new_img = new_img.convert('RGB')
-        new_img.save(img_byte_arr, format='JPEG', quality=85, optimize=True, subsampling=0)
-    img_byte_arr.seek(0)
-    return img_byte_arr
+    # Shared image rendering/compression pipeline extracted to helper for easier testing.
+    return image_pipeline_helpers.process_image(
+        image_url,
+        uah_price,
+        sale_percentage,
+        upscale_images=UPSCALE_IMAGES,
+        upscale_method=UPSCALE_METHOD,
+        image_url_candidates_fn=_image_url_candidates,
+        logger=logger,
+        fonts_dir=Path(__file__).with_name("fonts"),
+        cv2_module=cv2,
+        np_module=np,
+        edsr_model_path=EDSR_MODEL_PATH,
+        edsr_model_url=EDSR_MODEL_URL,
+    )
 
 # Database functions
 PRAGMA_STATEMENTS = ['PRAGMA foreign_keys = ON','PRAGMA journal_mode = WAL','PRAGMA synchronous = NORMAL','PRAGMA busy_timeout = 30000']
@@ -1079,6 +838,79 @@ def is_pipe_closed_error(exc: Exception) -> bool:
     lowered = msg.lower()
     return "pipe closed" in lowered or "os.write(pipe, data)" in lowered or "epipe" in lowered
 
+def _lyst_url_suffix(url_name=None, page_num=None):
+    if url_name or page_num is not None:
+        return f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+    return ""
+
+def _lyst_page_progress_data(url, country, url_name=None, page_num=None, attempt=None):
+    data = {
+        "url": url,
+        "country": country,
+        "url_name": url_name,
+        "page_num": page_num,
+    }
+    if attempt is not None:
+        data["attempt"] = attempt
+    return data
+
+def _mark_lyst_page_step(step, url, country, url_name=None, page_num=None, attempt=None):
+    _touch_lyst_progress(step, **_lyst_page_progress_data(url, country, url_name, page_num, attempt))
+    logger.info(f"LYST step={step} url={url}")
+
+def _safe_page_final_url(page):
+    try:
+        return page.url
+    except Exception:
+        return None
+
+def _lyst_debug_snapshot(page):
+    return (
+        datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S'),
+        tail_log_lines(BOT_LOG_FILE, line_count=200),
+        _safe_page_final_url(page),
+    )
+
+async def _dump_lyst_debug_event_safe(
+    prefix,
+    *,
+    reason,
+    url,
+    country,
+    url_name,
+    page_num,
+    step,
+    page,
+    debug_events,
+    context_lines,
+    content=None,
+    shield=False,
+):
+    now_kyiv, log_lines, final_url = _lyst_debug_snapshot(page)
+    payload = dict(
+        reason=reason,
+        url=url,
+        country=country,
+        url_name=url_name,
+        page_num=page_num,
+        step=step,
+        page=page,
+        now_kyiv=now_kyiv,
+        log_lines=log_lines,
+        extra_lines=debug_events,
+        context_lines=context_lines,
+        final_url=final_url,
+    )
+    if content is not None:
+        payload["content"] = content
+    try:
+        if shield:
+            await asyncio.shield(dump_lyst_debug_event(prefix, **payload))
+        else:
+            await dump_lyst_debug_event(prefix, **payload)
+    except Exception:
+        pass
+
 async def get_page_content(
     url,
     country,
@@ -1107,9 +939,7 @@ async def get_page_content(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            suffix = ""
-            if url_name or page_num is not None:
-                suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+            suffix = _lyst_url_suffix(url_name, page_num)
             logger.warning(f"LYST HTTP-only failed, falling back to Playwright for {url}{suffix} | {exc}")
     elif LYST_HTTP_ONLY and not LYST_HTTP_ONLY_ENABLED:
         logger.info("LYST HTTP-only disabled for this run; using Playwright")
@@ -1131,15 +961,7 @@ async def get_page_content(
         )
         context_lines.append(f"country_context_reused: {reused}")
         try:
-            _touch_lyst_progress(
-                "goto",
-                url=url,
-                country=country,
-                url_name=url_name,
-                page_num=page_num,
-                attempt=attempt,
-            )
-            logger.info(f"LYST step=goto url={url}")
+            _mark_lyst_page_step("goto", url, country, url_name=url_name, page_num=page_num, attempt=attempt)
             response = await page.goto(
                 url,
                 wait_until="domcontentloaded",
@@ -1152,71 +974,29 @@ async def get_page_content(
                     context_lines.append("goto_status: ")
             except Exception:
                 pass
-            if max_scroll_attempts is not None and max_scroll_attempts <= 0:
-                step = "scroll_skip"
-                _touch_lyst_progress(
-                    "scroll_skip",
-                    url=url,
-                    country=country,
-                    url_name=url_name,
-                    page_num=page_num,
-                )
-                logger.info(f"LYST step=scroll_skip url={url}")
-            else:
-                step = "scroll"
-                _touch_lyst_progress(
-                    "scroll",
-                    url=url,
-                    country=country,
-                    url_name=url_name,
-                    page_num=page_num,
-                )
-                logger.info(f"LYST step=scroll url={url}")
-                await scroll_page(page, max_scroll_attempts)
+                if max_scroll_attempts is not None and max_scroll_attempts <= 0:
+                    step = "scroll_skip"
+                    _mark_lyst_page_step("scroll_skip", url, country, url_name=url_name, page_num=page_num)
+                else:
+                    step = "scroll"
+                    _mark_lyst_page_step("scroll", url, country, url_name=url_name, page_num=page_num)
+                    await scroll_page(page, max_scroll_attempts)
             if LYST_IMAGE_STRATEGY == "settle":
                 step = "settle_lazy_images"
-                _touch_lyst_progress(
-                    "settle_lazy_images",
-                    url=url,
-                    country=country,
-                    url_name=url_name,
-                    page_num=page_num,
-                )
-                logger.info(f"LYST step=settle_lazy_images url={url}")
+                _mark_lyst_page_step("settle_lazy_images", url, country, url_name=url_name, page_num=page_num)
                 await settle_lazy_images(page, passes=LYST_IMAGE_SETTLE_PASSES)
             step = "normalize_lazy_images"
-            _touch_lyst_progress(
-                "normalize_lazy_images",
-                url=url,
-                country=country,
-                url_name=url_name,
-                page_num=page_num,
-            )
-            logger.info(f"LYST step=normalize_lazy_images url={url}")
+            _mark_lyst_page_step("normalize_lazy_images", url, country, url_name=url_name, page_num=page_num)
             await normalize_lazy_images(page)
             step = "wait_selector"
-            _touch_lyst_progress(
-                "wait_selector",
-                url=url,
-                country=country,
-                url_name=url_name,
-                page_num=page_num,
-            )
+            _mark_lyst_page_step("wait_selector", url, country, url_name=url_name, page_num=page_num)
             try:
-                logger.info(f"LYST step=wait_selector url={url}")
                 await page.wait_for_selector('._693owt3', timeout=20000)
             except Exception:
                 # If selector wait fails, still return content for parsing
                 pass
             step = "content"
-            _touch_lyst_progress(
-                "content",
-                url=url,
-                country=country,
-                url_name=url_name,
-                page_num=page_num,
-            )
-            logger.info(f"LYST step=content url={url}")
+            _mark_lyst_page_step("content", url, country, url_name=url_name, page_num=page_num)
             content = await page.content()
             if is_cloudflare_challenge(content):
                 context_lines.append("cloudflare_detected: true")
@@ -1225,64 +1005,37 @@ async def get_page_content(
                     context_lines.append(f"page_title: {title}")
                 except Exception:
                     pass
-                now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
-                log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
-                final_url = None
-                try:
-                    final_url = page.url
-                except Exception:
-                    final_url = None
-                try:
-                    await dump_lyst_debug_event(
-                        "lyst_cloudflare",
-                        reason="Cloudflare challenge",
-                        url=url,
-                        country=country,
-                        url_name=url_name,
-                        page_num=page_num,
-                        step=step,
-                        page=page,
-                        content=content,
-                        now_kyiv=now_kyiv,
-                        log_lines=log_lines,
-                        extra_lines=debug_events,
-                        final_url=final_url,
-                        context_lines=context_lines,
-                    )
-                except Exception:
-                    pass
+                await _dump_lyst_debug_event_safe(
+                    "lyst_cloudflare",
+                    reason="Cloudflare challenge",
+                    url=url,
+                    country=country,
+                    url_name=url_name,
+                    page_num=page_num,
+                    step=step,
+                    page=page,
+                    content=content,
+                    debug_events=debug_events,
+                    context_lines=context_lines,
+                )
                 mark_lyst_issue("Cloudflare challenge")
                 await lyst_context_pool.reset_context(country)
                 raise LystCloudflareChallenge()
             return content
         except asyncio.CancelledError:
-            now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
-            log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
-            final_url = None
-            try:
-                final_url = page.url
-            except Exception:
-                final_url = None
-            try:
-                await asyncio.shield(
-                    dump_lyst_debug_event(
-                        "lyst_timeout",
-                        reason="page timeout",
-                        url=url,
-                        country=country,
-                        url_name=url_name,
-                        page_num=page_num,
-                        step=step,
-                        page=page,
-                        now_kyiv=now_kyiv,
-                        log_lines=log_lines,
-                        extra_lines=debug_events,
-                        context_lines=context_lines,
-                        final_url=final_url,
-                    )
-                )
-            except Exception:
-                pass
+            await _dump_lyst_debug_event_safe(
+                "lyst_timeout",
+                reason="page timeout",
+                url=url,
+                country=country,
+                url_name=url_name,
+                page_num=page_num,
+                step=step,
+                page=page,
+                debug_events=debug_events,
+                context_lines=context_lines,
+                shield=True,
+            )
             try:
                 await page.close()
             except Exception:
@@ -1301,18 +1054,11 @@ async def get_page_content(
                 prefix = "lyst_target_closed"
             else:
                 prefix = "lyst_error"
-            now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
-            log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
-            final_url = None
-            try:
-                final_url = page.url
-            except Exception:
-                final_url = None
             try:
                 context_lines = list(context_lines)
                 context_lines.append(f"exception_type: {exc.__class__.__name__}")
                 context_lines.append(f"exception_message: {exc}")
-                await dump_lyst_debug_event(
+                await _dump_lyst_debug_event_safe(
                     prefix,
                     reason=reason,
                     url=url,
@@ -1321,10 +1067,7 @@ async def get_page_content(
                     page_num=page_num,
                     step=step,
                     page=page,
-                    now_kyiv=now_kyiv,
-                    log_lines=log_lines,
-                    extra_lines=debug_events,
-                    final_url=final_url,
+                    debug_events=debug_events,
                     context_lines=context_lines,
                 )
             except Exception:
@@ -1340,7 +1083,24 @@ async def get_page_content(
             except Exception:
                 pass
 
-async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None, use_pagination=None):
+def _build_soup(content):
+    try:
+        return BeautifulSoup(content, 'lxml')
+    except Exception:
+        return BeautifulSoup(content, 'html.parser')
+
+async def _get_soup_impl(
+    url,
+    country,
+    *,
+    return_content=False,
+    max_retries=3,
+    max_scroll_attempts=None,
+    url_name=None,
+    page_num=None,
+    use_pagination=None,
+    return_none_on_terminal_failure=False,
+):
     attempt = 0
     target_closed_retry_used = False
     cloudflare_retry_used = False
@@ -1361,9 +1121,7 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_na
                     timeout=LYST_PAGE_TIMEOUT_SEC,
                 )
             except asyncio.TimeoutError:
-                suffix = ""
-                if url_name or page_num is not None:
-                    suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+                suffix = _lyst_url_suffix(url_name, page_num)
                 logger.error(f"LYST timeout fetching page content for {url}{suffix}")
                 mark_lyst_issue("page timeout")
                 if attempt < max_retries - 1:
@@ -1375,15 +1133,11 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_na
                     await asyncio.sleep(5)
                     attempt += 1
                     continue
-                return None
-            try:
-                return BeautifulSoup(content, 'lxml')
-            except Exception:
-                return BeautifulSoup(content, 'html.parser')
+                return (None, None) if return_content else None
+            soup = _build_soup(content)
+            return (soup, content) if return_content else soup
         except Exception as e:
-            suffix = ""
-            if url_name or page_num is not None:
-                suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
+            suffix = _lyst_url_suffix(url_name, page_num)
             if isinstance(e, LystCloudflareChallenge):
                 if not cloudflare_retry_used:
                     cloudflare_retry_used = True
@@ -1408,77 +1162,35 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_na
             else:
                 logger.error(f"Failed to get soup for {url}{suffix}")
                 mark_lyst_issue("Failed to get soup")
+                if return_none_on_terminal_failure:
+                    return (None, None) if return_content else None
                 raise
 
+async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None, use_pagination=None):
+    return await _get_soup_impl(
+        url,
+        country,
+        return_content=False,
+        max_retries=max_retries,
+        max_scroll_attempts=max_scroll_attempts,
+        url_name=url_name,
+        page_num=page_num,
+        use_pagination=use_pagination,
+        return_none_on_terminal_failure=False,
+    )
+
 async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None, use_pagination=None):
-    attempt = 0
-    target_closed_retry_used = False
-    cloudflare_retry_used = False
-    while attempt < max_retries:
-        try:
-            try:
-                content = await asyncio.wait_for(
-                    get_page_content(
-                        url,
-                        country,
-                        max_scroll_attempts,
-                        url_name=url_name,
-                        page_num=page_num,
-                        attempt=attempt + 1,
-                        max_retries=max_retries,
-                        use_pagination=use_pagination,
-                    ),
-                    timeout=LYST_PAGE_TIMEOUT_SEC,
-                )
-            except asyncio.TimeoutError:
-                suffix = ""
-                if url_name or page_num is not None:
-                    suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
-                logger.error(f"LYST timeout fetching page content for {url}{suffix}")
-                mark_lyst_issue("page timeout")
-                if attempt < max_retries - 1:
-                    logger.info("LYST timeout: retrying with a fresh page/context")
-                content = None
-            if not content:
-                mark_lyst_issue("Failed to get soup")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(5)
-                    attempt += 1
-                    continue
-                return None, None
-            try:
-                return BeautifulSoup(content, 'lxml'), content
-            except Exception:
-                return BeautifulSoup(content, 'html.parser'), content
-        except Exception as e:
-            suffix = ""
-            if url_name or page_num is not None:
-                suffix = f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
-            if isinstance(e, LystCloudflareChallenge):
-                if not cloudflare_retry_used:
-                    cloudflare_retry_used = True
-                    logger.warning(f"LYST Cloudflare challenge: retrying after short wait for {url}{suffix}")
-                    await asyncio.sleep(8)
-                    continue
-                attempt += 1
-                if attempt < max_retries:
-                    await asyncio.sleep(8)
-                    continue
-                raise
-            if is_target_closed_error(e) and not target_closed_retry_used:
-                target_closed_retry_used = True
-                mark_lyst_issue("TargetClosedError")
-                logger.warning(f"LYST TargetClosedError: retrying with a fresh page/context for {url}{suffix}")
-                await asyncio.sleep(3)
-                continue
-            attempt += 1
-            if attempt < max_retries:
-                logger.warning(f"Failed to get soup (attempt {attempt}/{max_retries}). Retrying...")
-                await asyncio.sleep(5)
-            else:
-                logger.error(f"Failed to get soup for {url}{suffix}")
-                mark_lyst_issue("Failed to get soup")
-                return None, None
+    return await _get_soup_impl(
+        url,
+        country,
+        return_content=True,
+        max_retries=max_retries,
+        max_scroll_attempts=max_scroll_attempts,
+        url_name=url_name,
+        page_num=page_num,
+        use_pagination=use_pagination,
+        return_none_on_terminal_failure=True,
+    )
 
 def is_lyst_domain(url):
     return 'lyst.com' in urllib.parse.urlparse(url).netloc
@@ -1503,108 +1215,25 @@ def extract_embedded_url(url):
 
 def _touch_lyst_progress(step: str | None = None, **details):
     global LYST_LAST_PROGRESS_TS, LYST_LAST_STEP_INFO
-    LYST_LAST_PROGRESS_TS = time.time()
-    if step is None:
-        return
-    info = {
-        "step": step,
-        "ts": LYST_LAST_PROGRESS_TS,
-        "ts_kyiv": datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S'),
-    }
-    info.update({k: v for k, v in details.items() if v is not None})
-    LYST_LAST_STEP_INFO = info
+    LYST_LAST_PROGRESS_TS, info = lyst_state_helpers.touch_progress(
+        step=step,
+        details=details,
+        kyiv_tz=KYIV_TZ,
+    )
+    if step is not None:
+        LYST_LAST_STEP_INFO = info
 
 def _lyst_step_snapshot():
-    return dict(LYST_LAST_STEP_INFO) if LYST_LAST_STEP_INFO else {}
+    return lyst_state_helpers.step_snapshot(LYST_LAST_STEP_INFO)
 
 def _format_task_stack(task):
-    if task is None:
-        return []
-    try:
-        frames = task.get_stack()
-    except Exception:
-        return []
-    if not frames:
-        return []
-    lines = []
-    for frame in frames[-6:]:
-        try:
-            lines.append(f"{frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}")
-        except Exception:
-            continue
-    return lines
+    return lyst_state_helpers.format_task_stack(task)
 
 def _format_tasks_snapshot(limit=10):
-    try:
-        tasks = asyncio.all_tasks()
-    except Exception:
-        return []
-    lines = []
-    seen = 0
-    for task in tasks:
-        if task.done() or task is asyncio.current_task():
-            continue
-        try:
-            frames = task.get_stack()
-        except Exception:
-            continue
-        if not frames:
-            continue
-        # Focus on tasks that are likely part of this app.
-        if not any("GroteskBotTg.py" in frame.f_code.co_filename for frame in frames):
-            continue
-        task_name = task.get_name() if hasattr(task, "get_name") else str(task)
-        lines.append(f"Task {task_name} id={id(task)}")
-        for frame in frames[-4:]:
-            try:
-                lines.append(f"  {frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}")
-            except Exception:
-                continue
-        seen += 1
-        if seen >= limit:
-            break
-    return lines
+    return lyst_state_helpers.format_tasks_snapshot(file_hint="GroteskBotTg.py", limit=limit)
 
 def _describe_task_wait_chain(task, max_depth=6):
-    if task is None:
-        return []
-    lines = []
-    try:
-        coro = task.get_coro()
-    except Exception:
-        return []
-    awaitable = getattr(coro, "cr_await", None)
-    depth = 0
-    seen = set()
-    while awaitable is not None and depth < max_depth:
-        if id(awaitable) in seen:
-            lines.append("  ↳ await chain loop detected")
-            break
-        seen.add(id(awaitable))
-        lines.append(f"  ↳ awaiting {type(awaitable).__name__}: {awaitable!r}")
-        try:
-            if isinstance(awaitable, asyncio.Task):
-                lines.append(
-                    f"    task id={id(awaitable)} done={awaitable.done()} cancelled={awaitable.cancelled()}"
-                )
-                frames = awaitable.get_stack()
-                for frame in frames[-3:]:
-                    try:
-                        lines.append(f"    {frame.f_code.co_filename}:{frame.f_lineno} in {frame.f_code.co_name}")
-                    except Exception:
-                        continue
-                awaitable = getattr(awaitable.get_coro(), "cr_await", None)
-            elif isinstance(awaitable, asyncio.Future):
-                lines.append(
-                    f"    future done={awaitable.done()} cancelled={awaitable.cancelled()}"
-                )
-                awaitable = getattr(awaitable, "_fut_waiter", None) or getattr(awaitable, "cr_await", None)
-            else:
-                awaitable = getattr(awaitable, "cr_await", None)
-        except Exception:
-            break
-        depth += 1
-    return lines
+    return lyst_state_helpers.describe_task_wait_chain(task, max_depth=max_depth)
 
 async def get_final_clear_link(initial_url, semaphore, item_name, country, current_item, total_items):
     logger.info(f"Processing final link for {item_name} | Country: {country} | Progress: {current_item}/{total_items}")
@@ -2308,141 +1937,43 @@ def build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol, old_s
     )
 
 async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah_price=None, sale_percentage=None, max_retries=3):
-    bot = Bot(token=bot_token)
-    for attempt in range(max_retries):
-        try:
-            if image_url and image_url.startswith(('http://', 'https://')):
-                if uah_price is not None and sale_percentage is not None:
-                    # process_image performs blocking HTTP + PIL work; keep event loop non-blocking.
-                    img_byte_arr = await asyncio.to_thread(process_image, image_url, uah_price, sale_percentage)
-                    await bot.send_photo(chat_id=chat_id, photo=img_byte_arr, caption=message, parse_mode='HTML')
-                else:
-                    best_url = _upgrade_lyst_image_url(image_url) or image_url
-                    await bot.send_photo(chat_id=chat_id, photo=best_url, caption=message, parse_mode='HTML')
-            else:
-                await bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
-            return True
-        except RetryAfter as e:
-            logger.warning(f"Rate limited. Sleeping for {e.retry_after} seconds")
-            await asyncio.sleep(e.retry_after)
-        except TimedOut:
-            logger.warning(f"Request timed out on attempt {attempt + 1}")
-            logger.warning("Assuming Telegram delivered message despite timeout to avoid duplicates")
-            return True
-        except Exception as e:
-            logger.error(f"Error sending Telegram message (attempt {attempt + 1}): {e}")
-            if attempt == max_retries - 1:
-                logger.error(f"Failed to send Telegram message after {max_retries} attempts")
-                return False
-            await asyncio.sleep(2 * (attempt + 1))
-    return False
+    return await telegram_runtime_helpers.send_telegram_message(
+        bot_token,
+        chat_id,
+        message,
+        image_url=image_url,
+        uah_price=uah_price,
+        sale_percentage=sale_percentage,
+        max_retries=max_retries,
+        process_image_func=process_image,
+        upgrade_image_url_func=_upgrade_lyst_image_url,
+        logger=logger,
+    )
 
 def get_allowed_chat_ids():
-    allowed = set()
-    for raw in (DANYLO_DEFAULT_CHAT_ID, TELEGRAM_CHAT_ID):
-        if raw is None:
-            continue
-        try:
-            allowed.add(int(raw))
-        except (TypeError, ValueError):
-            continue
-    return allowed
+    return telegram_runtime_helpers.get_allowed_chat_ids(DANYLO_DEFAULT_CHAT_ID, TELEGRAM_CHAT_ID)
 
 def tail_log_lines(path, line_count=LOG_TAIL_LINES):
-    if not path.exists():
-        return []
-    lines = deque(maxlen=line_count)
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                lines.append(line.rstrip("\n"))
-    except Exception as exc:
-        logger.error(f"Failed to read log file: {exc}")
-        return []
-    return list(lines)
+    return telegram_runtime_helpers.tail_log_lines(path, line_count=line_count, logger=logger)
 
 async def send_log_tail(bot, chat_id, log_path, line_count=LOG_TAIL_LINES):
-    lines = tail_log_lines(log_path, line_count)
-    if not lines:
-        await bot.send_message(chat_id=chat_id, text="Log file is empty or missing.")
-        return
-    payload = "\n".join(lines) + "\n"
-    log_bytes = payload.encode("utf-8", errors="replace")
-    bio = io.BytesIO(log_bytes)
-    bio.name = f"python_last_{line_count}.log"
-    await bot.send_document(
-        chat_id=chat_id,
-        document=bio,
-        caption=f"Last {line_count} lines from {log_path.name}"
+    await telegram_runtime_helpers.send_log_tail(
+        bot,
+        chat_id,
+        log_path,
+        line_count=line_count,
+        logger=logger,
     )
 
 async def command_listener(bot_token, allowed_chat_ids, log_path):
-    if not bot_token:
-        logger.warning("Command listener disabled: TELEGRAM_BOT_TOKEN is not set.")
-        return
-    if not allowed_chat_ids:
-        logger.warning("Command listener disabled: no allowed chat IDs configured.")
-        return
-
-    bot = Bot(token=bot_token)
-    offset = None
-    logger.info("Command listener started.")
-
-    while True:
-        try:
-            updates = await bot.get_updates(
-                offset=offset,
-                timeout=20,
-                allowed_updates=["message"]
-            )
-            for update in updates:
-                offset = update.update_id + 1
-                message = update.message
-                if not message or not message.text:
-                    continue
-                chat_id = message.chat_id
-                if chat_id not in allowed_chat_ids:
-                    continue
-                raw_text = message.text.strip()
-                if not raw_text:
-                    continue
-                command = raw_text.split()[0].split("@")[0].lower()
-                if command in ("/log", "/logs", "/log500"):
-                    await send_log_tail(bot, chat_id, log_path, LOG_TAIL_LINES)
-                elif command in ("/add", "/addlink", "/addurl"):
-                    url_match = re.search(r"https?://\S+", raw_text)
-                    if not url_match:
-                        await bot.send_message(chat_id=chat_id, text="Send a valid URL after the command.")
-                        continue
-                    url = url_match.group(0).strip()
-                    ok, source, url_name = add_dynamic_url(url)
-                    if not source:
-                        await bot.send_message(chat_id=chat_id, text="Unsupported URL. Send an OLX or Shafa link.")
-                        continue
-                    source_upper = source.upper()
-                    if ok:
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=(
-                                f"👔 Added {source_upper} link\n\n"
-                                f"🌐 Url: {url}\n"
-                                f"📥 Name: {url_name}"
-                            ),
-                        )
-                    else:
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=(
-                                f"⚠️ {source_upper} link already exists\n\n"
-                                f"🌐 Url: {url}\n"
-                                f"📥 Name: {url_name}"
-                            ),
-                        )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error(f"Command listener error: {exc}")
-            await asyncio.sleep(5)
+    await telegram_runtime_helpers.command_listener(
+        bot_token,
+        allowed_chat_ids,
+        log_path,
+        line_count=LOG_TAIL_LINES,
+        add_dynamic_url_func=add_dynamic_url,
+        logger=logger,
+    )
 
 async def _run_olx_and_mark():
     err = await run_olx_scraper()
@@ -2631,6 +2162,48 @@ def print_link_statistics():
                     
 def center_text(text, width, fill_char=' '): return text.center(width, fill_char)
 
+def _collect_successful_lyst_results(url_results):
+    all_shoes = []
+    for result in url_results:
+        if isinstance(result, Exception):
+            logger.error(f"Lyst task failed: {result}")
+            continue
+        all_shoes.extend(result)
+    return all_shoes
+
+async def _clear_lyst_resume_state():
+    async with LYST_RESUME_LOCK:
+        LYST_RESUME_STATE["resume_active"] = False
+        LYST_RESUME_STATE["entries"] = {}
+        LYST_RESUME_STATE.pop("last_run_progress", None)
+        LYST_RESUME_STATE.pop("last_failure_reason", None)
+        LYST_RESUME_STATE.pop("last_failure_at", None)
+        save_lyst_resume_state(LYST_RESUME_STATE)
+
+async def _finalize_lyst_resume_state():
+    try:
+        _touch_lyst_progress("finalize_resume_start")
+        await asyncio.wait_for(finalize_lyst_resume_after_processing(), timeout=60)
+        _touch_lyst_progress("finalize_resume_done")
+    except asyncio.TimeoutError:
+        mark_lyst_issue("resume finalize timeout")
+        logger.error("LYST finalize resume timed out; continuing without resume update")
+    if LYST_RUN_FAILED:
+        return
+    try:
+        _touch_lyst_progress("finalize_clear_start")
+        await asyncio.wait_for(_clear_lyst_resume_state(), timeout=60)
+        _touch_lyst_progress("finalize_clear_done")
+    except asyncio.TimeoutError:
+        mark_lyst_issue("resume clear timeout")
+        logger.error("LYST resume clear timed out; continuing")
+
+async def _shutdown_background_tasks(tasks):
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 async def run_lyst_cycle_impl(message_queue):
     global LYST_LAST_PROGRESS_TS, LYST_ACTIVE_TASK
     LYST_ACTIVE_TASK = asyncio.current_task()
@@ -2647,13 +2220,7 @@ async def run_lyst_cycle_impl(message_queue):
             for base_url in BASE_URLS
         ]
         url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
-
-        all_shoes = []
-        for result in url_results:
-            if isinstance(result, Exception):
-                logger.error(f"Lyst task failed: {result}")
-                continue
-            all_shoes.extend(result)
+        all_shoes = _collect_successful_lyst_results(url_results)
         if not all_shoes:
             mark_lyst_issue("0 items scraped")
 
@@ -2666,29 +2233,7 @@ async def run_lyst_cycle_impl(message_queue):
         special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
 
         await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
-        try:
-            _touch_lyst_progress("finalize_resume_start")
-            await asyncio.wait_for(finalize_lyst_resume_after_processing(), timeout=60)
-            _touch_lyst_progress("finalize_resume_done")
-        except asyncio.TimeoutError:
-            mark_lyst_issue("resume finalize timeout")
-            logger.error("LYST finalize resume timed out; continuing without resume update")
-        if not LYST_RUN_FAILED:
-            async def _clear_resume_state():
-                async with LYST_RESUME_LOCK:
-                    LYST_RESUME_STATE["resume_active"] = False
-                    LYST_RESUME_STATE["entries"] = {}
-                    LYST_RESUME_STATE.pop("last_run_progress", None)
-                    LYST_RESUME_STATE.pop("last_failure_reason", None)
-                    LYST_RESUME_STATE.pop("last_failure_at", None)
-                    save_lyst_resume_state(LYST_RESUME_STATE)
-            try:
-                _touch_lyst_progress("finalize_clear_start")
-                await asyncio.wait_for(_clear_resume_state(), timeout=60)
-                _touch_lyst_progress("finalize_clear_done")
-            except asyncio.TimeoutError:
-                mark_lyst_issue("resume clear timeout")
-                logger.error("LYST resume clear timed out; continuing")
+        await _finalize_lyst_resume_state()
         _touch_lyst_progress("finalize_run")
         finalize_lyst_run()
         logger.info("LYST run completed")
@@ -2767,11 +2312,11 @@ async def main():
 
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
-    _start_background_task(message_queue.process_queue(), "tg_message_queue")
-    _start_background_task(
-        command_listener(TELEGRAM_BOT_TOKEN, get_allowed_chat_ids(), BOT_LOG_FILE),
-        "tg_command_listener",
-    )
+    for coro, task_name in (
+        (message_queue.process_queue(), "tg_message_queue"),
+        (command_listener(TELEGRAM_BOT_TOKEN, get_allowed_chat_ids(), BOT_LOG_FILE), "tg_command_listener"),
+    ):
+        _start_background_task(coro, task_name)
     try:
         chat_id = int((DANYLO_DEFAULT_CHAT_ID or "").strip())
     except Exception:
@@ -2869,12 +2414,10 @@ async def main():
             lyst_stall_timeout_sec=LYST_STALL_TIMEOUT_SEC,
         )
     finally:
-        for task in background_tasks:
-            task.cancel()
-        if background_tasks:
-            await asyncio.gather(*background_tasks, return_exceptions=True)
+        await _shutdown_background_tasks(background_tasks)
 
 if __name__ == "__main__":
     if IS_RUNNING_LYST:
         create_tables()  # Create tables at startup instead of creating them just before using
     asyncio.run(main())
+
