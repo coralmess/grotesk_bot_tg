@@ -1,12 +1,14 @@
 import asyncio
 import itertools
+import json
 import logging
 import math
 import random
 import re
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -21,7 +23,7 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
-from config import TELEGRAM_TSEK_BOT_TOKEN
+from config import TELEGRAM_TSEK_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID
 from tsek_bot.constants import (
     MINUTES_PER_DAY,
     GROUPS,
@@ -52,6 +54,107 @@ TIME_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})")
 GROUP_TOKEN_RE = re.compile(r"([1-6]\.[12])")
 
 GEN_RULE, YEST_RULE, YEST_SCHEDULE, YEST_PATTERN, SHIFT_CHOICE, UPDATE_RULE, UPDATE_TIME, UPDATE_SCHEDULE, UPDATE_EXTRA_GROUPS = range(9)
+
+USAGE_STATS_FILE = Path(__file__).resolve().with_name("usage_stats.json")
+try:
+    ADMIN_CHAT_ID = int(str(DANYLO_DEFAULT_CHAT_ID)) if DANYLO_DEFAULT_CHAT_ID is not None else None
+except (TypeError, ValueError):
+    ADMIN_CHAT_ID = None
+
+
+def _load_usage_events() -> List[Dict[str, Any]]:
+    if not USAGE_STATS_FILE.exists():
+        return []
+    try:
+        data = USAGE_STATS_FILE.read_text(encoding="utf-8")
+        payload = json.loads(data)
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+    except Exception:
+        logger.exception("Failed to load usage stats from %s", USAGE_STATS_FILE)
+    return []
+
+
+def _save_usage_events(events: List[Dict[str, Any]]) -> None:
+    temp_file = USAGE_STATS_FILE.with_suffix(".tmp")
+    temp_file.write_text(
+        json.dumps(events, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temp_file.replace(USAGE_STATS_FILE)
+
+
+def _prune_usage_events(events: List[Dict[str, Any]], now: datetime) -> List[Dict[str, Any]]:
+    keep_from = now - timedelta(days=31)
+    kept: List[Dict[str, Any]] = []
+    for event in events:
+        raw_ts = event.get("ts")
+        if not isinstance(raw_ts, str):
+            continue
+        try:
+            ts = datetime.fromisoformat(raw_ts)
+        except ValueError:
+            continue
+        if ts >= keep_from:
+            kept.append(event)
+    return kept
+
+
+def record_usage_event(update: Update) -> None:
+    if not update.effective_chat or not update.effective_user:
+        return
+    now = datetime.now()
+    events = _load_usage_events()
+    events = _prune_usage_events(events, now)
+    events.append(
+        {
+            "ts": now.isoformat(timespec="seconds"),
+            "chat_id": update.effective_chat.id,
+            "user_id": update.effective_user.id,
+        }
+    )
+    _save_usage_events(events)
+
+
+def _stats_for_period(events: List[Dict[str, Any]], *, start: datetime, end: datetime) -> Tuple[int, int]:
+    uses = 0
+    users = set()
+    for event in events:
+        raw_ts = event.get("ts")
+        if not isinstance(raw_ts, str):
+            continue
+        try:
+            ts = datetime.fromisoformat(raw_ts)
+        except ValueError:
+            continue
+        if start <= ts <= end:
+            uses += 1
+            user_id = event.get("user_id")
+            if isinstance(user_id, int):
+                users.add(user_id)
+    return uses, len(users)
+
+
+async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_chat or not update.message or ADMIN_CHAT_ID is None:
+        return
+    if update.effective_chat.id != ADMIN_CHAT_ID:
+        return
+
+    now = datetime.now()
+    events = _prune_usage_events(_load_usage_events(), now)
+    _save_usage_events(events)
+
+    today_start = datetime(now.year, now.month, now.day)
+    week_start = now - timedelta(days=7)
+    today_uses, today_users = _stats_for_period(events, start=today_start, end=now)
+    week_uses, week_users = _stats_for_period(events, start=week_start, end=now)
+
+    await update.message.reply_text(
+        "Статистика використання бота\n"
+        f"Сьогодні: {today_uses} використань, {today_users} людей\n"
+        f"За останні 7 днів: {week_uses} використань, {week_users} людей"
+    )
 
 
 def format_queue_value(value: float) -> str:
@@ -3547,6 +3650,7 @@ async def handle_generate_rule(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(humanize_error(exc, q=q, from_yesterday=False))
         return ConversationHandler.END
 
+    record_usage_event(update)
     await update.message.reply_text(format_schedule(schedule))
     slot_minutes = detect_slot_minutes(schedule)
     await send_off_counts(update, schedule, slot_minutes)
@@ -3656,6 +3760,7 @@ async def handle_update_schedule(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(humanize_error(exc, q=q))
         return ConversationHandler.END
 
+    record_usage_event(update)
     if fairness_gap_slots > 0:
         on_flags = build_on_slot_flags(updated_schedule, slot_minutes)
         total_on_slots = {group: sum(on_flags[group]) for group in GROUPS}
@@ -3751,6 +3856,7 @@ async def handle_update_extra_groups(update: Update, context: ContextTypes.DEFAU
             return UPDATE_EXTRA_GROUPS
     slot_minutes = detect_slot_minutes(updated_schedule)
 
+    record_usage_event(update)
     await update.message.reply_text(format_schedule(updated_schedule))
     await send_off_counts(update, updated_schedule, slot_minutes)
     try:
@@ -3854,6 +3960,7 @@ async def handle_yesterday_schedule(update: Update, context: ContextTypes.DEFAUL
         )
         return SHIFT_CHOICE
 
+    record_usage_event(update)
     await update.message.reply_text(new_text)
     await send_off_counts(update, new_schedule, slot_minutes)
     try:
@@ -3929,6 +4036,7 @@ async def handle_yesterday_pattern(update: Update, context: ContextTypes.DEFAULT
         )
         return SHIFT_CHOICE
 
+    record_usage_event(update)
     await update.message.reply_text(new_text)
     await send_off_counts(update, new_schedule, slot_minutes)
     try:
@@ -3978,6 +4086,7 @@ async def handle_shift_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         new_schedule = shift_schedule(schedule, hours * 60)
 
+    record_usage_event(update)
     await update.message.reply_text(format_schedule(new_schedule))
     await send_off_counts(update, new_schedule, slot_minutes)
     try:
@@ -4020,6 +4129,7 @@ async def generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(humanize_error(exc, q=q, from_yesterday=False))
         return
 
+    record_usage_event(update)
     await update.message.reply_text(format_schedule(schedule))
     slot_minutes = detect_slot_minutes(schedule)
     await send_off_counts(update, schedule, slot_minutes)
@@ -4037,6 +4147,7 @@ def main() -> None:
     app = ApplicationBuilder().token(TELEGRAM_TSEK_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("generate", generate))
+    app.add_handler(CommandHandler("stat", stat_command))
     app.add_handler(CommandHandler("cancel", cancel))
 
     conversation = ConversationHandler(
