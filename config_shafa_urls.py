@@ -712,5 +712,21 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/men?search_text=Affix&sort=4",
         "url_name": "Affix"
+    },
+    {
+        "url": "https://shafa.ua/uk/zhenskoe-nizhnee-bele-simone-perele.xhtml?price_to=1000&sizes=267&sizes=266&conditions=1&brands=19297&sort=4",
+        "url_name": "Simone Perele (bra)"
+    },
+    {
+        "url": "https://shafa.ua/uk/women?conditions=1&price_to=1000&search_text=%09Lise%20Charmel&sizes=377&sizes=262&sizes=261&sort=4",
+        "url_name": "Lise Charmel (bra)"
+    },
+    {
+        "url": "https://shafa.ua/uk/women/nizhnee-bele-i-kupalniki/lifchiki?conditions=1&search_text=Hanro&sizes=266&sizes=265&sort=4",
+        "url_name": "Hanro (bra)"
+    },
+    {
+        "url": "https://shafa.ua/uk/women/nizhnee-bele-i-kupalniki/trusiki?conditions=1&search_text=hanro&sizes=5&sizes=4&sort=4",
+        "url_name": "Hanro (pnt)"
     }
 ]

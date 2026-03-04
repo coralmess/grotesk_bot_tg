@@ -1,6 +1,8 @@
 import json
 import time
 import asyncio
+import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,6 +26,28 @@ LAST_LYST_RUN_NOTE = ""
 LYST_RUN_HAD_ERRORS = False
 LYST_RUN_NOTES = []
 _LYST_RUN_STARTED_THIS_CYCLE = False
+LOGGER = logging.getLogger(__name__)
+
+
+def _write_text_atomic(path: Path, text: str) -> None:
+    # Atomic replace prevents partial state files after abrupt process termination.
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    _write_text_atomic(path, json.dumps(payload, ensure_ascii=False))
 
 
 def load_last_runs_from_file():
@@ -57,8 +81,8 @@ def load_last_runs_from_file():
             LAST_LYST_RUN_OK = lyst_ok
         if isinstance(lyst_note, str):
             LAST_LYST_RUN_NOTE = lyst_note
-    except Exception:
-        pass
+    except Exception as exc:
+        LOGGER.warning(f"Failed to load last-runs state from {LAST_RUNS_FILE}: {exc}")
 
 
 def save_last_runs_to_file():
@@ -73,9 +97,9 @@ def save_last_runs_to_file():
             "last_lyst_run_ok": LAST_LYST_RUN_OK,
             "last_lyst_run_note": LAST_LYST_RUN_NOTE,
         }
-        LAST_RUNS_FILE.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
+        _write_json_atomic(LAST_RUNS_FILE, payload)
+    except Exception as exc:
+        LOGGER.error(f"Failed to save last-runs state to {LAST_RUNS_FILE}: {exc}")
 
 
 def mark_olx_run(note: str | None = None):
@@ -155,13 +179,13 @@ async def _ensure_status_message(bot: Bot, chat_id: int) -> int:
             stored = STATUS_MSG_FILE.read_text(encoding="utf-8").strip()
             if stored.isdigit():
                 return int(stored)
-        except Exception:
-            pass
+        except Exception as exc:
+            LOGGER.warning(f"Failed to read status message id from {STATUS_MSG_FILE}: {exc}")
     msg = await bot.send_message(chat_id=chat_id, text="🟢 Bot status: starting...", parse_mode=ParseMode.HTML)
     try:
-        STATUS_MSG_FILE.write_text(str(msg.message_id), encoding="utf-8")
-    except Exception:
-        pass
+        _write_text_atomic(STATUS_MSG_FILE, str(msg.message_id))
+    except Exception as exc:
+        LOGGER.error(f"Failed to save status message id to {STATUS_MSG_FILE}: {exc}")
     try:
         await bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id, disable_notification=True)
     except Exception:
@@ -241,9 +265,9 @@ async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600, 
                 msg = await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
                 message_id = msg.message_id
                 try:
-                    STATUS_MSG_FILE.write_text(str(message_id), encoding="utf-8")
-                except Exception:
-                    pass
+                    _write_text_atomic(STATUS_MSG_FILE, str(message_id))
+                except Exception as exc:
+                    LOGGER.error(f"Failed to update status message id in {STATUS_MSG_FILE}: {exc}")
                 try:
                     if old_message_id and old_message_id != message_id:
                         await bot.unpin_chat_message(chat_id=chat_id, message_id=old_message_id)

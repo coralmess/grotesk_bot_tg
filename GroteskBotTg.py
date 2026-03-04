@@ -1,4 +1,4 @@
-import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, threading, hashlib
+import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, threading, hashlib, os
 from pathlib import Path
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple, deque
@@ -209,6 +209,9 @@ class TelegramMessageQueue:
     def __init__(self, bot_token):
         self.queue, self.bot_token, self.pending_messages = asyncio.Queue(), bot_token, {}
         self.recent_sent = {}
+        # Keep this bounded for long-running processes; old completed IDs are not useful forever.
+        self._pending_ttl_sec = 6 * 3600
+        self._pending_max_entries = 5000
 
     def _fingerprint(self, chat_id, message, image_url, uah_price, sale_percentage):
         payload = f"{chat_id}|{message}|{image_url or ''}|{uah_price or ''}|{sale_percentage or ''}"
@@ -219,9 +222,34 @@ class TelegramMessageQueue:
         for k in expired:
             self.recent_sent.pop(k, None)
 
+    def _set_pending_status(self, message_id, sent, now_ts=None):
+        self.pending_messages[message_id] = {
+            "sent": bool(sent),
+            "updated_at": now_ts if now_ts is not None else time.time(),
+        }
+
+    def _prune_pending_messages(self, now_ts):
+        expired = [
+            message_id
+            for message_id, meta in self.pending_messages.items()
+            if meta.get("sent") and (now_ts - float(meta.get("updated_at", now_ts))) > self._pending_ttl_sec
+        ]
+        for message_id in expired:
+            self.pending_messages.pop(message_id, None)
+        overflow = len(self.pending_messages) - self._pending_max_entries
+        if overflow <= 0:
+            return
+        # Evict oldest completed records first; keep unsent records for diagnostics/retries.
+        ordered = sorted(
+            self.pending_messages.items(),
+            key=lambda item: (0 if item[1].get("sent") else 1, float(item[1].get("updated_at", 0.0))),
+        )
+        for message_id, _ in ordered[:overflow]:
+            self.pending_messages.pop(message_id, None)
+
     async def add_message(self, chat_id, message, image_url=None, uah_price=None, sale_percentage=None):
         message_id = str(uuid.uuid4())
-        self.pending_messages[message_id] = False
+        self._set_pending_status(message_id, False)
         await self.queue.put((message_id, chat_id, message, image_url, uah_price, sale_percentage))
         return message_id
 
@@ -231,12 +259,13 @@ class TelegramMessageQueue:
             now_ts = time.time()
             fingerprint = self._fingerprint(chat_id, message, image_url, uah_price, sale_percentage)
             self._prune_recent(now_ts, 1800)
+            self._prune_pending_messages(now_ts)
             if fingerprint in self.recent_sent:
-                self.pending_messages[message_id] = True
+                self._set_pending_status(message_id, True, now_ts)
                 await asyncio.sleep(1)
                 continue
             success = await send_telegram_message(self.bot_token, chat_id, message, image_url, uah_price, sale_percentage)
-            self.pending_messages[message_id] = success
+            self._set_pending_status(message_id, success, now_ts)
             if success:
                 self.recent_sent[fingerprint] = time.time()
             else:
@@ -244,10 +273,13 @@ class TelegramMessageQueue:
             await asyncio.sleep(1)
 
     def is_message_sent(self, message_id):
-        return self.pending_messages.get(message_id, False)
+        meta = self.pending_messages.get(message_id)
+        if not meta:
+            return False
+        return bool(meta.get("sent"))
 
     def stats(self):
-        pending = sum(1 for sent in self.pending_messages.values() if not sent)
+        pending = sum(1 for meta in self.pending_messages.values() if not meta.get("sent"))
         return {"queue_size": self.queue.qsize(), "pending": pending}
 
 # Configure logging
@@ -415,6 +447,23 @@ def _resume_key(base_url, country):
 def _now_kyiv_str():
     return datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
+def _write_json_atomic(path: Path, payload):
+    # Atomic replace avoids partially-written JSON when the process is interrupted mid-write.
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
 def load_lyst_resume_state():
     try:
         data = json.loads(LYST_RESUME_FILE.read_text(encoding="utf-8"))
@@ -423,15 +472,15 @@ def load_lyst_resume_state():
             if not isinstance(data.get("entries"), dict):
                 data["entries"] = {}
             return data
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning(f"Failed to load Lyst resume state from {LYST_RESUME_FILE}: {exc}")
     return {"resume_active": False, "entries": {}}
 
 def save_lyst_resume_state(state):
     try:
-        LYST_RESUME_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+        _write_json_atomic(LYST_RESUME_FILE, state)
+    except Exception as exc:
+        logger.error(f"Failed to persist Lyst resume state to {LYST_RESUME_FILE}: {exc}")
 
 async def update_lyst_resume_entry(key, **fields):
     async with LYST_RESUME_LOCK:
@@ -2660,8 +2709,9 @@ async def run_lyst_cycle_impl(message_queue):
 
 
 
-def _db_maintenance_sync():
-    db_files = [SHOES_DB_FILE, OLX_DB_FILE, SHAFA_DB_FILE]
+def _db_maintenance_sync(db_files=None):
+    if db_files is None:
+        db_files = [SHOES_DB_FILE, OLX_DB_FILE, SHAFA_DB_FILE]
     for db_path in db_files:
         if not db_path.exists():
             continue
@@ -2696,33 +2746,49 @@ async def maintenance_loop(interval_s: int):
     if interval_s <= 0:
         return
     while True:
-        await asyncio.to_thread(_db_maintenance_sync)
+        # Serialize shoes.db maintenance with async writes to avoid lock contention.
+        async with DB_SEMAPHORE:
+            await asyncio.to_thread(_db_maintenance_sync, [SHOES_DB_FILE])
+        # OLX/SHAFA use separate DB files; maintenance can run independently.
+        await asyncio.to_thread(_db_maintenance_sync, [OLX_DB_FILE, SHAFA_DB_FILE])
         await asyncio.sleep(interval_s)
 
 # Main application
 async def main():
     global LIVE_MODE
     load_last_runs_from_file()
+    background_tasks = []
+
+    def _start_background_task(coro, task_name):
+        # Keep handles so we can cancel/await gracefully during shutdown.
+        task = asyncio.create_task(coro, name=task_name)
+        background_tasks.append(task)
+        return task
+
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
-    asyncio.create_task(message_queue.process_queue())
-    asyncio.create_task(command_listener(TELEGRAM_BOT_TOKEN, get_allowed_chat_ids(), BOT_LOG_FILE))
+    _start_background_task(message_queue.process_queue(), "tg_message_queue")
+    _start_background_task(
+        command_listener(TELEGRAM_BOT_TOKEN, get_allowed_chat_ids(), BOT_LOG_FILE),
+        "tg_command_listener",
+    )
     try:
         chat_id = int((DANYLO_DEFAULT_CHAT_ID or "").strip())
     except Exception:
         chat_id = None
     if chat_id:
         lyst_stale_after_sec = max(0, CHECK_INTERVAL_SEC + CHECK_JITTER_SEC + 600)
-        asyncio.create_task(
+        _start_background_task(
             status_heartbeat(
                 TELEGRAM_BOT_TOKEN,
                 chat_id,
                 interval_s=600,
                 lyst_stale_after_sec=lyst_stale_after_sec,
-            )
+            ),
+            "status_heartbeat",
         )
     if MAINTENANCE_INTERVAL_SEC > 0:
-        asyncio.create_task(maintenance_loop(MAINTENANCE_INTERVAL_SEC))
+        _start_background_task(maintenance_loop(MAINTENANCE_INTERVAL_SEC), "db_maintenance")
     terminal_width = shutil.get_terminal_size().columns
     bot_version = f"Grotesk bot v.{BOT_VERSION}"
     print(
@@ -2735,52 +2801,6 @@ async def main():
         LIVE_MODE = input("Enter 'live' to enable live mode, or press Enter to continue in headless mode: ").strip().lower() == 'live'
     if LIVE_MODE:
         special_logger.good("Live mode enabled")
-
-    async def run_lyst_cycle():
-        global LYST_LAST_PROGRESS_TS
-        reset_lyst_http_only_state()
-        begin_lyst_cycle()
-        _touch_lyst_progress("run_start")
-        try:
-            old_data = await load_shoe_data()
-            exchange_rates = load_exchange_rates()
-            url_tasks = [
-                asyncio.wait_for(process_url(base_url, COUNTRIES, exchange_rates), timeout=LYST_URL_TIMEOUT_SEC)
-                for base_url in BASE_URLS
-            ]
-            url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
-
-            all_shoes = []
-            for result in url_results:
-                if isinstance(result, Exception):
-                    logger.error(f"Lyst task failed: {result}")
-                    continue
-                all_shoes.extend(result)
-            if not all_shoes:
-                mark_lyst_issue("0 items scraped")
-
-            collected_ids = {shoe['unique_id'] for shoe in all_shoes}
-            recovered_count = sum(1 for uid in SKIPPED_ITEMS if uid in collected_ids)
-            special_logger.stat(f"Items skipped due to image but present in final list: {recovered_count}/{len(SKIPPED_ITEMS)}")
-
-            unfiltered_len = len(all_shoes)
-            all_shoes = filter_duplicates(all_shoes, exchange_rates)
-            special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
-
-            await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
-            finalize_lyst_run()
-
-            print_statistics()
-            print_link_statistics()
-        except asyncio.CancelledError:
-            mark_lyst_issue("stalled")
-            finalize_lyst_run()
-            raise
-        except Exception as exc:
-            logger.error(f"Lyst run failed: {exc}")
-            mark_lyst_issue("failed")
-            finalize_lyst_run()
-            raise
 
     try:
         async def _on_lyst_stall(lyst_task=None):
@@ -2834,6 +2854,7 @@ async def main():
         await run_scheduler(
             run_olx=_run_olx_and_mark,
             run_shafa=_run_shafa_and_mark,
+            # Keep a single canonical Lyst pipeline to avoid drift between duplicate implementations.
             run_lyst=lambda: run_lyst_cycle_impl(message_queue),
             is_running_lyst=lambda: IS_RUNNING_LYST,
             get_lyst_progress_ts=lambda: LYST_LAST_PROGRESS_TS,
@@ -2848,7 +2869,10 @@ async def main():
             lyst_stall_timeout_sec=LYST_STALL_TIMEOUT_SEC,
         )
     finally:
-        pass  # Removed application.stop() as we're no longer using telegram.ext.Application
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
 
 if __name__ == "__main__":
     if IS_RUNNING_LYST:

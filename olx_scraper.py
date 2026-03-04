@@ -7,6 +7,7 @@ from telegram.error import RetryAfter, TimedOut
 from telegram.constants import ParseMode
 from PIL import Image
 import io, asyncio, re, sqlite3, aiohttp, random, logging
+import aiosqlite
 from html import escape
 from functools import wraps
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, OLX_TASK_CONCURRENCY, OLX_HTTP_HTML_CONCURRENCY, OLX_HTTP_IMAGE_CONCURRENCY, OLX_UPSCALE_CONCURRENCY, OLX_SEND_CONCURRENCY, OLX_HTTP_CONNECTOR_LIMIT
@@ -26,6 +27,14 @@ MIN_PRICE_DIFF = 50
 MIN_PRICE_DIFF_PERCENT = 20.0
 NO_LISTINGS_TEXT = "Ми знайшли 0 оголошень"
 
+class RetryableHttpStatus(Exception):
+    def __init__(self, status: int, wait_s: float = 0.0, context: str = ""):
+        self.status = status
+        self.wait_s = max(0.0, float(wait_s or 0.0))
+        self.context = context or "http"
+        super().__init__(f"{self.context} status={self.status}")
+
+
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if (_http_session is None) or _http_session.closed:
@@ -44,17 +53,24 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
                 try:
                     return await func(*args, **kwargs)
                 except RetryAfter as e:
-                    logger.warning(f"⏳ Rate limited, waiting {e.retry_after}s...")
+                    logger.warning(f"Rate limited, waiting {e.retry_after}s...")
                     await asyncio.sleep(e.retry_after)
-                except TimedOut as e:
+                except TimedOut:
                     if attempt < max_retries - 1:
-                        logger.warning(f"⏱️  Timeout in {func.__name__}, retrying... ({attempt + 1}/{max_retries})")
+                        logger.warning(f"Timeout in {func.__name__}, retrying... ({attempt + 1}/{max_retries})")
                     await asyncio.sleep(backoff_base * (attempt + 1))
+                except RetryableHttpStatus as e:
+                    if attempt < max_retries - 1:
+                        wait_s = e.wait_s if e.wait_s > 0 else (backoff_base * (attempt + 1))
+                        logger.warning(f"Retryable HTTP {e.status} in {func.__name__}, waiting {wait_s:.1f}s")
+                        await asyncio.sleep(wait_s)
+                    else:
+                        logger.warning(f"{func.__name__} exhausted retries for HTTP {e.status}")
                 except Exception as e:
                     if attempt < max_retries - 1:
                         await asyncio.sleep(backoff_base * (attempt + 1) + random.random())
                     else:
-                        logger.error(f"❌ {func.__name__} failed after {max_retries} retries: {e}")
+                        logger.error(f"{func.__name__} failed after {max_retries} retries: {e}")
             return None
         return wrapper
     return decorator
@@ -391,7 +407,7 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
     if not _is_valid_image_url(url):
         logger.debug(f"Skipping invalid/placeholder image URL: {url}")
         return None
-    
+
     headers = {
         "User-Agent": RUN_USER_AGENT,
         "Accept-Language": RUN_ACCEPT_LANGUAGE,
@@ -403,12 +419,10 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
             if r.status == 429:
                 retry_after = r.headers.get("Retry-After")
                 wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 15
-                logger.warning(f"⏳ Image rate limited (429). Sleeping {wait_s}s before retry.")
-                await asyncio.sleep(wait_s)
-                return None
+                raise RetryableHttpStatus(429, wait_s=wait_s, context="image download")
             if r.status == 403:
-                logger.warning("⛔ Image forbidden (403). Backing off for 30s.")
-                await asyncio.sleep(30)
+                # Keep 403 conservative: avoid long retry loops and fall back to text-only send.
+                logger.warning("Image forbidden (403). Falling back to text-only send.")
                 return None
             r.raise_for_status()
             return await r.read()
@@ -597,31 +611,70 @@ async def db_update_source_stats(url: str, streak: int, cycle_count: int):
 
 async def run_olx_scraper():
     """Main scraper function."""
-    logger.info("🚀 OLX Scraper started")
+    logger.info("OLX Scraper started")
     errors = []
+
     def _add_error(msg: str):
         if msg:
             errors.append(str(msg)[:200])
-    
+
     token, default_chat = _clean_token(TELEGRAM_OLX_BOT_TOKEN), _clean_token(DANYLO_DEFAULT_CHAT_ID)
     if not token:
-        logger.warning("⚠️  No Telegram bot token configured")
+        logger.warning("No Telegram bot token configured")
         _add_error("No Telegram bot token configured")
         return "; ".join(dict.fromkeys(errors))
-    
+
     try:
         await db_init()
     except Exception as e:
-        logger.error(f"❌ Database initialization failed: {e}")
+        logger.error(f"Database initialization failed: {e}")
         _add_error(f"DB init failed: {e}")
         return "; ".join(dict.fromkeys(errors))
-    
+
     bot = Bot(token=token)
-    
+    db_conn = None
+    db_lock = asyncio.Lock()
+
     # Statistics tracking
     total_scraped = 0
     total_without_images = 0
-    
+
+    UPSERT_SQL = """
+        INSERT INTO olx_items (id, name, link, price_text, price_int, state, size, source, created_at, updated_at, last_sent_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), CASE WHEN ? THEN datetime('now') ELSE NULL END)
+        ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, link=excluded.link, price_text=excluded.price_text, price_int=excluded.price_int,
+            state=excluded.state, size=excluded.size, source=excluded.source, updated_at=datetime('now'),
+            last_sent_at=CASE WHEN ? THEN datetime('now') ELSE last_sent_at END
+    """
+
+    async def _open_writer_conn() -> aiosqlite.Connection:
+        conn = await aiosqlite.connect(DB_FILE)
+        for pragma in ("PRAGMA journal_mode=WAL;", "PRAGMA synchronous=NORMAL;", "PRAGMA busy_timeout=5000;"):
+            await conn.execute(pragma)
+        await conn.commit()
+        return conn
+
+    async def _persist_item_state(item: OlxItem, source_name: str, touch_last_sent: bool):
+        # Persist immediately after each send attempt to preserve crash-durability semantics.
+        async with db_lock:
+            await db_conn.execute(
+                UPSERT_SQL,
+                (
+                    item.id,
+                    item.name,
+                    item.link,
+                    item.price_text,
+                    item.price_int,
+                    item.state,
+                    item.size,
+                    source_name,
+                    1 if touch_last_sent else 0,
+                    1 if touch_last_sent else 0,
+                ),
+            )
+            await db_conn.commit()
+
     async def _send_item_message(bot: Bot, chat_id: str, text: str, item: OlxItem, source_name: str):
         """Send message for a single item."""
         nonlocal total_without_images
@@ -630,60 +683,61 @@ async def run_olx_scraper():
             if not image_url:
                 image_url = await fetch_first_image_best(item.link)
                 if not image_url:
-                    logger.warning(f"⚠️  No image available for item {item.id}")
+                    logger.warning(f"No image available for item {item.id}")
                     total_without_images += 1
             sent = await send_photo_with_upscale(bot, chat_id, text, image_url)
-            await db_upsert_item(item, source_name, touch_last_sent=sent)
+            await _persist_item_state(item, source_name, bool(sent))
             await asyncio.sleep(0.2)
         except RetryAfter as e:
-            logger.warning(f"⏳ Rate limited for item {item.id}, waiting {e.retry_after}s")
+            logger.warning(f"Rate limited for item {item.id}, waiting {e.retry_after}s")
         except TimedOut:
-            logger.warning(f"⏱️  Timeout sending item {item.id}")
+            logger.warning(f"Timeout sending item {item.id}")
             _add_error("Telegram send timeout")
         except Exception as e:
-            logger.error(f"❌ Failed to send item {item.id}: {e}")
+            logger.error(f"Failed to send item {item.id}: {e}")
             _add_error(f"Send item error: {e}")
+
     async def _process_entry(entry: Dict[str, Any]):
         nonlocal total_scraped
-        # Always send to the single default chat id; ignore any per-entry chat override
+        # Always send to the single default chat id; ignore any per-entry chat override.
         url, chat_id, source_name = entry.get("url"), default_chat, entry.get("url_name") or "OLX"
         if not url or not chat_id:
             return
         if OLX_REQUEST_JITTER_SEC > 0:
             await asyncio.sleep(random.uniform(0, OLX_REQUEST_JITTER_SEC))
-        
+
         stats = await db_get_source_stats(url)
         streak = stats["streak"]
         cycle_count = stats["cycle_count"] + 1
-        
+
         level = min(streak // 365, 23)
         divisor = level + 1
-        
+
         if cycle_count % divisor != 0:
-            logger.info(f"⏭️ Skipping {source_name} (Streak: {streak}, Level: {level}, Cycle: {cycle_count}/{divisor})")
+            logger.info(f"Skipping {source_name} (Streak: {streak}, Level: {level}, Cycle: {cycle_count}/{divisor})")
             await db_update_source_stats(url, streak, cycle_count)
             return
-        
+
         try:
             items = await scrape_olx_url(url)
             if items is None:
                 return
-            
+
             if items:
                 new_streak = 0
                 new_cycle = 0
             else:
                 new_streak = streak + 1
                 new_cycle = 0
-            
+
             await db_update_source_stats(url, new_streak, new_cycle)
-            
+
             if not items:
                 return
-            
+
             total_scraped += len(items)
             prev_items = await db_fetch_existing([item.id for item in items])
-            
+
             send_tasks = []
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
@@ -695,11 +749,11 @@ async def run_olx_scraper():
                 price_diff = abs(it.price_int - previous_price)
                 percent_change = (price_diff / previous_price * 100.0) if previous_price > 0 else None
 
-                # Skip updates when price delta does not meet the configured thresholds.
+                # Skip notifications when price delta does not meet configured thresholds.
                 if price_diff < MIN_PRICE_DIFF or (percent_change is not None and percent_change < MIN_PRICE_DIFF_PERCENT):
                     pct_display = f"{percent_change:.2f}%" if percent_change is not None else "N/A"
                     logger.debug(
-                        "Skipping item %s due to minor price change (diff=%d грн, %s)",
+                        "Skipping item %s due to minor price change (diff=%d UAH, %s)",
                         it.id,
                         price_diff,
                         pct_display,
@@ -707,39 +761,70 @@ async def run_olx_scraper():
                     continue
 
                 send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
-            
+
             if send_tasks:
                 await asyncio.gather(*send_tasks, return_exceptions=True)
-                
+
         except aiohttp.ClientError as e:
-            logger.error(f"🌐 Network error processing {source_name}: {e}")
+            logger.error(f"Network error processing {source_name}: {e}")
             _add_error(f"{source_name}: network error")
         except Exception as e:
-            logger.error(f"❌ Failed to process {source_name}: {e}")
+            logger.error(f"Failed to process {source_name}: {e}")
             _add_error(f"{source_name}: {e}")
-    
-    sem = asyncio.Semaphore(OLX_TASK_CONCURRENCY)
-    async def _guarded_process(entry: Dict[str, Any]):
-        async with sem:
-            await _process_entry(entry)
-    
-    sources = merge_sources(OLX_URLS or [], load_dynamic_urls("olx"))
-    if tasks := [_guarded_process(entry) for entry in sources]:
-        logger.info(f"📊 Processing {len(tasks)} OLX source(s)...")
-        await asyncio.gather(*tasks, return_exceptions=True)
-    else:
-        logger.warning("⚠️  No OLX URLs configured")
-    
-    logger.info("✅ OLX scraper completed successfully")
-    logger.info(f"📈 TOTAL SCRAPED: {total_scraped} items | WITHOUT IMAGES: {total_without_images} items ({(total_without_images/total_scraped*100) if total_scraped > 0 else 0:.1f}%)")
-    if errors:
-        uniq = []
-        for item in errors:
-            if item not in uniq:
-                uniq.append(item)
-            if len(uniq) >= 3:
-                break
-        summary = "; ".join(uniq)
-        logger.warning(f"OLX run errors: {summary}")
-        return summary
-    return ""
+
+    try:
+        db_conn = await _open_writer_conn()
+
+        sem = asyncio.Semaphore(OLX_TASK_CONCURRENCY)
+
+        async def _guarded_process(entry: Dict[str, Any]):
+            async with sem:
+                await _process_entry(entry)
+
+        sources = merge_sources(OLX_URLS or [], load_dynamic_urls("olx"))
+        if tasks := [_guarded_process(entry) for entry in sources]:
+            logger.info(f"Processing {len(tasks)} OLX source(s)...")
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            logger.warning("No OLX URLs configured")
+
+        logger.info("OLX scraper completed successfully")
+        logger.info(
+            f"TOTAL SCRAPED: {total_scraped} items | WITHOUT IMAGES: {total_without_images} items "
+            f"({(total_without_images / total_scraped * 100) if total_scraped > 0 else 0:.1f}%)"
+        )
+        if errors:
+            uniq = []
+            for item in errors:
+                if item not in uniq:
+                    uniq.append(item)
+                if len(uniq) >= 3:
+                    break
+            summary = "; ".join(uniq)
+            logger.warning(f"OLX run errors: {summary}")
+            return summary
+        return ""
+    finally:
+        if db_conn is not None:
+            try:
+                await db_conn.close()
+            except Exception:
+                pass
+        global _http_session
+        if _http_session is not None and not _http_session.closed:
+            try:
+                await _http_session.close()
+            except Exception:
+                pass
+            _http_session = None
+        try:
+            await bot.shutdown()
+        except Exception:
+            pass
+        try:
+            await bot.close()
+        except Exception:
+            pass
+
+
+

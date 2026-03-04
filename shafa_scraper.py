@@ -49,6 +49,13 @@ MIN_PRICE_DIFF = 50
 MIN_PRICE_DIFF_PERCENT = 25.0
 _PARSER = "lxml" if _LXML_AVAILABLE else "html.parser"
 
+class RetryableHttpStatus(Exception):
+    def __init__(self, status: int, wait_s: float = 0.0, context: str = ""):
+        self.status = status
+        self.wait_s = max(0.0, float(wait_s or 0.0))
+        self.context = context or "http"
+        super().__init__(f"{self.context} status={self.status}")
+
 if not _LXML_AVAILABLE:
     logger.warning("lxml not found; using html.parser")
 
@@ -73,6 +80,13 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
                         logger.warning(f"Timeout in {func.__name__} after {max_retries} attempts")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(backoff_base * (attempt + 1))
+                except RetryableHttpStatus as e:
+                    if attempt < max_retries - 1:
+                        wait_s = e.wait_s if e.wait_s > 0 else (backoff_base * (attempt + 1))
+                        logger.warning(f"Retryable HTTP {e.status} in {func.__name__}; waiting {wait_s:.1f}s")
+                        await asyncio.sleep(wait_s)
+                    else:
+                        logger.warning(f"{func.__name__} exhausted retries for HTTP {e.status}")
                 except Exception as e:
                     if "Wrong type of the page content" in str(e):
                         logger.warning(f"{func.__name__} got non-image content, falling back to bytes")
@@ -528,12 +542,10 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
             if r.status == 429:
                 retry_after = r.headers.get("Retry-After")
                 wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 15
-                logger.warning(f"Rate limited (429). Sleeping {wait_s}s before retry.")
-                await asyncio.sleep(wait_s)
-                return None
+                raise RetryableHttpStatus(429, wait_s=wait_s, context="image download")
             if r.status == 403:
-                logger.warning("Forbidden (403). Backing off for 30s.")
-                await asyncio.sleep(30)
+                # Keep 403 conservative: avoid long retry loops and fall back to text-only send.
+                logger.warning("Forbidden (403). Falling back to text-only send.")
                 return None
             r.raise_for_status()
             return await r.read()

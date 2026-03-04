@@ -1,5 +1,8 @@
 import json
 import re
+import logging
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -10,6 +13,25 @@ from .runtime_paths import OLX_DYNAMIC_JSON_FILE, SHAFA_DYNAMIC_JSON_FILE
 _BASE_DIR = Path(__file__).resolve().parent
 DYNAMIC_OLX_FILE = OLX_DYNAMIC_JSON_FILE
 DYNAMIC_SHAFA_FILE = SHAFA_DYNAMIC_JSON_FILE
+LOGGER = logging.getLogger(__name__)
+
+
+def _write_json_atomic(path: Path, payload: List[Dict[str, str]]) -> None:
+    # Atomic replace prevents partially-written dynamic URL lists.
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
 
 
 def _load_json(path: Path) -> List[Dict[str, str]]:
@@ -19,16 +41,16 @@ def _load_json(path: Path) -> List[Dict[str, str]]:
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, list):
             return [d for d in data if isinstance(d, dict)]
-    except Exception:
-        pass
+    except Exception as exc:
+        LOGGER.warning(f"Failed to load dynamic URLs from {path}: {exc}")
     return []
 
 
 def _save_json(path: Path, data: List[Dict[str, str]]) -> None:
     try:
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
+        _write_json_atomic(path, data)
+    except Exception as exc:
+        LOGGER.error(f"Failed to save dynamic URLs to {path}: {exc}")
 
 
 def normalize_url(url: str) -> str:
@@ -42,7 +64,8 @@ def normalize_url(url: str) -> str:
 def detect_source(url: str) -> Optional[str]:
     try:
         host = urlparse(url).netloc.lower()
-    except Exception:
+    except Exception as exc:
+        LOGGER.warning(f"Failed to parse URL source for '{url}': {exc}")
         return None
     if "olx" in host:
         return "olx"
@@ -132,6 +155,7 @@ def add_dynamic_url(url: str) -> Tuple[bool, Optional[str], Optional[str]]:
             from config_shafa_urls import SHAFA_URLS
             static_urls = SHAFA_URLS or []
     except Exception:
+        LOGGER.warning(f"Failed to load static URL config for source='{source}'", exc_info=True)
         static_urls = []
 
     dynamic_urls = load_dynamic_urls(source)
