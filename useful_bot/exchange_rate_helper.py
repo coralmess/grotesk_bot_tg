@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import json
 import logging
 import re
@@ -14,6 +14,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from helpers.runtime_paths import RUNTIME_JSON_DIR, ensure_runtime_dirs
+from useful_bot.exchange_rate_image import render_exchange_rate_card
 
 MONOBANK_RATES_URL = "https://minfin.com.ua/ua/company/monobank/currency/"
 STATE_FILE = RUNTIME_JSON_DIR / "useful_monobank_rates_state.json"
@@ -78,47 +79,10 @@ class ExchangeRateHelper:
             pass
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.message:
-            return
-
-        last_snapshot_data = self._state.get("last_snapshot")
-        history = self._state.get("history", [])
-        if not isinstance(last_snapshot_data, dict):
-            await update.message.reply_text("No rates collected yet.")
-            return
-
-        snapshot = RateSnapshot(
-            fetched_at=str(last_snapshot_data.get("fetched_at", "")),
-            source_date=str(last_snapshot_data.get("source_date", "")),
-            usd_buy=float(last_snapshot_data["usd_buy"]),
-            usd_sell=float(last_snapshot_data["usd_sell"]),
-            eur_buy=float(last_snapshot_data["eur_buy"]),
-            eur_sell=float(last_snapshot_data["eur_sell"]),
-        )
-        usd_spread = snapshot.usd_sell - snapshot.usd_buy
-        eur_buy_minus_usd_sell = snapshot.eur_buy - snapshot.usd_sell
-
-        usd_avg = self._mean_from_history(history, "usd_spread")
-        cross_avg = self._mean_from_history(history, "eur_buy_minus_usd_sell")
-
-        await update.message.reply_text(
-            self._build_report_text(
-                snapshot=snapshot,
-                usd_spread=usd_spread,
-                eur_buy_minus_usd_sell=eur_buy_minus_usd_sell,
-                usd_average=usd_avg,
-                cross_average=cross_avg,
-                reason="status",
-                changed=False,
-            )
-        )
+        await self._run_check(context.application, reason="status")
 
     async def checknow_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.message:
-            return
-        changed = await self._run_check(context.application, reason="manual")
-        result = "Rate change detected and sent." if changed else "No rate change."
-        await update.message.reply_text(result)
+        await self._run_check(context.application, reason="manual")
 
     async def _monitor_loop(self, application: Application) -> None:
         while True:
@@ -152,7 +116,7 @@ class ExchangeRateHelper:
                     last_snapshot = None
 
             changed = last_snapshot is None or self._snapshot_signature(snapshot) != self._snapshot_signature(last_snapshot)
-            if not changed:
+            if not changed and reason not in ("scheduled", "manual", "status"):
                 return False
 
             history = self._state.get("history", [])
@@ -164,16 +128,23 @@ class ExchangeRateHelper:
             usd_average = self._mean_from_history(history, "usd_spread")
             cross_average = self._mean_from_history(history, "eur_buy_minus_usd_sell")
 
-            text = self._build_report_text(
-                snapshot=snapshot,
+            image_buf = render_exchange_rate_card(
+                usd_buy=snapshot.usd_buy,
+                usd_sell=snapshot.usd_sell,
+                eur_buy=snapshot.eur_buy,
+                eur_sell=snapshot.eur_sell,
+                prev_usd_buy=last_snapshot.usd_buy if last_snapshot else None,
+                prev_usd_sell=last_snapshot.usd_sell if last_snapshot else None,
+                prev_eur_buy=last_snapshot.eur_buy if last_snapshot else None,
+                prev_eur_sell=last_snapshot.eur_sell if last_snapshot else None,
                 usd_spread=usd_spread,
                 eur_buy_minus_usd_sell=eur_buy_minus_usd_sell,
-                usd_average=usd_average,
-                cross_average=cross_average,
-                reason=reason,
-                changed=True,
+                usd_spread_avg=usd_average,
+                cross_avg=cross_average,
             )
-            await application.bot.send_message(chat_id=self._chat_id, text=text)
+            await application.bot.send_photo(
+                chat_id=self._chat_id, photo=image_buf,
+            )
 
             history.append(
                 {
@@ -280,59 +251,6 @@ class ExchangeRateHelper:
         return mean(values) if values else None
 
     @staticmethod
-    def _format_with_average(current_value: float, average_value: Optional[float]) -> str:
-        if average_value is None:
-            return "average: no data yet"
-        delta = current_value - average_value
-        if abs(delta) < 0.005:
-            relation = "about average"
-        elif delta > 0:
-            relation = f"more than average by {delta:.2f}"
-        else:
-            relation = f"less than average by {abs(delta):.2f}"
-        return f"average: {average_value:.2f} ({relation})"
-
-    def _build_report_text(
-        self,
-        snapshot: RateSnapshot,
-        usd_spread: float,
-        eur_buy_minus_usd_sell: float,
-        usd_average: Optional[float],
-        cross_average: Optional[float],
-        reason: str,
-        changed: bool,
-    ) -> str:
-        status = "updated" if changed else "current"
-        reason_text = {
-            "startup": "startup check",
-            "scheduled": "scheduled check",
-            "manual": "manual check",
-            "status": "status request",
-        }.get(reason, reason)
-
-        return (
-            f"Monobank exchange rates {status} ({reason_text})\n"
-            f"Date on site: {snapshot.source_date or 'n/a'}\n"
-            f"Checked (Kyiv): {self._format_kyiv_time(snapshot.fetched_at)}\n\n"
-            f"USD buy: {snapshot.usd_buy:.2f}\n"
-            f"USD sell: {snapshot.usd_sell:.2f}\n"
-            f"EUR buy: {snapshot.eur_buy:.2f}\n"
-            f"EUR sell: {snapshot.eur_sell:.2f}\n\n"
-            f"USD spread (sell - buy): {usd_spread:.2f}\n"
-            f"{self._format_with_average(usd_spread, usd_average)}\n\n"
-            f"EUR buy - USD sell: {eur_buy_minus_usd_sell:.2f}\n"
-            f"{self._format_with_average(eur_buy_minus_usd_sell, cross_average)}"
-        )
-
-    @staticmethod
-    def _format_kyiv_time(iso_text: str) -> str:
-        try:
-            dt = datetime.fromisoformat(iso_text)
-        except ValueError:
-            return iso_text
-        return dt.astimezone(KYIV_TZ).strftime("%d.%m.%Y %H:%M")
-
-    @staticmethod
     def _seconds_until_next_run(now: datetime) -> Tuple[float, datetime]:
         candidates = []
         for hour, minute in CHECK_TIMES_KYIV:
@@ -366,3 +284,4 @@ class ExchangeRateHelper:
             encoding="utf-8",
         )
         temp_file.replace(STATE_FILE)
+
