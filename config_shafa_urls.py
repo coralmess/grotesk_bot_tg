@@ -732,5 +732,17 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/women/nizhnee-bele-i-kupalniki/trusiki?conditions=1&search_text=zimmerli&sizes=5&sizes=4&sort=4",
         "url_name": "Zimmerli (pnt)"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Holubar&sort=4",
+        "url_name": "Holubar"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Pantanetti&sizes=38&sizes=232&sizes=37&sizes=231&sizes=36&sort=4",
+        "url_name": "Pantanetti"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Yoshitomo%20Nara&sort=4",
+        "url_name": "Yoshitomo Nara"
     }
 ]

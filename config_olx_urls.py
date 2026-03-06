@@ -1120,5 +1120,17 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Ettinger/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=3000",
         "url_name": "Ettinger"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-holubar/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Holubar"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Pantanetti/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=10000",
+        "url_name": "Pantanetti"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Yoshitomo-Nara/?search%5Border%5D=created_at:desc",
+        "url_name": "Yoshitomo Nara"
     }
 ]
