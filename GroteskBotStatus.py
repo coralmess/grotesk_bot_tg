@@ -29,6 +29,16 @@ _LYST_RUN_STARTED_THIS_CYCLE = False
 LOGGER = logging.getLogger(__name__)
 
 
+def _parse_utc_datetime(raw_value):
+    if not raw_value:
+        return None
+    parsed = datetime.fromisoformat(raw_value)
+    # Backward compatibility: old state files stored naive timestamps.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def _write_text_atomic(path: Path, text: str) -> None:
     # Atomic replace prevents partial state files after abrupt process termination.
     tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
@@ -66,17 +76,17 @@ def load_last_runs_from_file():
         lyst_ok = data.get("last_lyst_run_ok")
         lyst_note = data.get("last_lyst_run_note")
         if olx_raw:
-            LAST_OLX_RUN_UTC = datetime.fromisoformat(olx_raw)
+            LAST_OLX_RUN_UTC = _parse_utc_datetime(olx_raw)
         if shafa_raw:
-            LAST_SHAFA_RUN_UTC = datetime.fromisoformat(shafa_raw)
+            LAST_SHAFA_RUN_UTC = _parse_utc_datetime(shafa_raw)
         if isinstance(olx_note, str):
             LAST_OLX_RUN_NOTE = olx_note
         if isinstance(shafa_note, str):
             LAST_SHAFA_RUN_NOTE = shafa_note
         if lyst_raw:
-            LAST_LYST_RUN_START_UTC = datetime.fromisoformat(lyst_raw)
+            LAST_LYST_RUN_START_UTC = _parse_utc_datetime(lyst_raw)
         if lyst_end_raw:
-            LAST_LYST_RUN_END_UTC = datetime.fromisoformat(lyst_end_raw)
+            LAST_LYST_RUN_END_UTC = _parse_utc_datetime(lyst_end_raw)
         if isinstance(lyst_ok, bool):
             LAST_LYST_RUN_OK = lyst_ok
         if isinstance(lyst_note, str):
@@ -187,6 +197,13 @@ async def _ensure_status_message(bot: Bot, chat_id: int) -> int:
     except Exception as exc:
         LOGGER.error(f"Failed to save status message id to {STATUS_MSG_FILE}: {exc}")
     try:
+        chat = await bot.get_chat(chat_id=chat_id)
+        pinned_message = getattr(chat, "pinned_message", None)
+        if pinned_message and pinned_message.message_id != msg.message_id:
+            await bot.unpin_chat_message(chat_id=chat_id, message_id=pinned_message.message_id)
+    except Exception:
+        pass
+    try:
         await bot.pin_chat_message(chat_id=chat_id, message_id=msg.message_id, disable_notification=True)
     except Exception:
         pass
@@ -255,7 +272,12 @@ async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600, 
     start_ts = time.time()
     message_id = await _ensure_status_message(bot, chat_id)
     while True:
-        text = _format_status_text(start_ts, lyst_stale_after_sec=lyst_stale_after_sec)
+        try:
+            text = _format_status_text(start_ts, lyst_stale_after_sec=lyst_stale_after_sec)
+        except Exception:
+            LOGGER.exception("Failed to format status heartbeat text")
+            await asyncio.sleep(interval_s)
+            continue
         try:
             await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode=ParseMode.HTML)
         except Exception:
@@ -274,9 +296,16 @@ async def status_heartbeat(bot_token: str, chat_id: int, interval_s: int = 600, 
                 except Exception:
                     pass
                 try:
+                    chat = await bot.get_chat(chat_id=chat_id)
+                    pinned_message = getattr(chat, "pinned_message", None)
+                    if pinned_message and pinned_message.message_id != message_id:
+                        await bot.unpin_chat_message(chat_id=chat_id, message_id=pinned_message.message_id)
+                except Exception:
+                    pass
+                try:
                     await bot.pin_chat_message(chat_id=chat_id, message_id=message_id, disable_notification=True)
                 except Exception:
                     pass
             except Exception:
-                pass
+                LOGGER.exception("Status heartbeat failed to update Telegram message")
         await asyncio.sleep(interval_s)
