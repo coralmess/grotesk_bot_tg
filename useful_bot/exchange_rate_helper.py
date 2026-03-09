@@ -124,9 +124,13 @@ class ExchangeRateHelper:
                 history = []
 
             usd_spread = snapshot.usd_sell - snapshot.usd_buy
-            eur_buy_minus_usd_sell = snapshot.eur_buy - snapshot.usd_sell
+            eur_sell_minus_usd_buy = snapshot.eur_sell - snapshot.usd_buy
             usd_average = self._mean_from_history(history, "usd_spread")
-            cross_average = self._mean_from_history(history, "eur_buy_minus_usd_sell")
+            cross_average = self._mean_from_history(history, "eur_sell_minus_usd_buy")
+            usd_spread_min = self._min_from_history(history, "usd_spread")
+            usd_spread_max = self._max_from_history(history, "usd_spread")
+            cross_min = self._min_from_history(history, "eur_sell_minus_usd_buy")
+            cross_max = self._max_from_history(history, "eur_sell_minus_usd_buy")
 
             image_buf = render_exchange_rate_card(
                 usd_buy=snapshot.usd_buy,
@@ -138,9 +142,13 @@ class ExchangeRateHelper:
                 prev_eur_buy=last_snapshot.eur_buy if last_snapshot else None,
                 prev_eur_sell=last_snapshot.eur_sell if last_snapshot else None,
                 usd_spread=usd_spread,
-                eur_buy_minus_usd_sell=eur_buy_minus_usd_sell,
+                eur_sell_minus_usd_buy=eur_sell_minus_usd_buy,
                 usd_spread_avg=usd_average,
                 cross_avg=cross_average,
+                usd_spread_min=usd_spread_min,
+                usd_spread_max=usd_spread_max,
+                cross_min=cross_min,
+                cross_max=cross_max,
             )
             await application.bot.send_photo(
                 chat_id=self._chat_id, photo=image_buf,
@@ -155,7 +163,7 @@ class ExchangeRateHelper:
                     "eur_buy": snapshot.eur_buy,
                     "eur_sell": snapshot.eur_sell,
                     "usd_spread": usd_spread,
-                    "eur_buy_minus_usd_sell": eur_buy_minus_usd_sell,
+                    "eur_sell_minus_usd_buy": eur_sell_minus_usd_buy,
                 }
             )
             history = history[-HISTORY_LIMIT:]
@@ -249,6 +257,26 @@ class ExchangeRateHelper:
             except (KeyError, TypeError, ValueError):
                 continue
         return mean(values) if values else None
+
+    @staticmethod
+    def _min_from_history(history: list[dict[str, Any]], key: str) -> Optional[float]:
+        values = []
+        for item in history:
+            try:
+                values.append(float(item[key]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return min(values) if values else None
+
+    @staticmethod
+    def _max_from_history(history: list[dict[str, Any]], key: str) -> Optional[float]:
+        values = []
+        for item in history:
+            try:
+                values.append(float(item[key]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return max(values) if values else None
 
     @staticmethod
     def _seconds_until_next_run(now: datetime) -> Tuple[float, datetime]:

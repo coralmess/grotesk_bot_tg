@@ -52,6 +52,8 @@ BORDER_WIDTH = 2
 # ── colours ───────────────────────────────────────────────────────────────
 WHITE = (255, 255, 255)
 TEXT_SECONDARY = (200, 200, 220)
+STAT_MUTED = (150, 150, 170)       # min / max numbers & labels
+STAT_LINE = (110, 110, 135)        # connecting line between min–max
 GREEN = (52, 211, 153)
 RED = (248, 113, 113)
 
@@ -70,9 +72,13 @@ def render_exchange_rate_card(
     prev_eur_buy: Optional[float] = None,
     prev_eur_sell: Optional[float] = None,
     usd_spread: float,
-    eur_buy_minus_usd_sell: float,
+    eur_sell_minus_usd_buy: float,
     usd_spread_avg: Optional[float] = None,
     cross_avg: Optional[float] = None,
+    usd_spread_min: Optional[float] = None,
+    usd_spread_max: Optional[float] = None,
+    cross_min: Optional[float] = None,
+    cross_max: Optional[float] = None,
     background_path: Optional[Path] = None,
     date_label: Optional[str] = None,
 ) -> io.BytesIO:
@@ -176,9 +182,13 @@ def render_exchange_rate_card(
         draw,
         bot_rect,
         usd_spread=usd_spread,
-        cross=eur_buy_minus_usd_sell,
+        cross=eur_sell_minus_usd_buy,
         usd_spread_avg=usd_spread_avg,
         cross_avg=cross_avg,
+        usd_spread_min=usd_spread_min,
+        usd_spread_max=usd_spread_max,
+        cross_min=cross_min,
+        cross_max=cross_max,
         ft=ft,
     )
 
@@ -198,10 +208,12 @@ def _load_fonts() -> dict:
         "value": load_font(46, fonts_dir=FONTS_DIR, prefer_heavy=False),
         "label": load_font(30, fonts_dir=FONTS_DIR, prefer_heavy=False),
         "delta": load_font(28, fonts_dir=FONTS_DIR, prefer_heavy=False),
-        "mtitle": load_font(34, fonts_dir=FONTS_DIR, prefer_heavy=True),
-        "mval": load_font(40, fonts_dir=FONTS_DIR, prefer_heavy=False),
-        "mdetail": load_font(26, fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "mtitle": load_font(38, fonts_dir=FONTS_DIR, prefer_heavy=True),
+        "mval": load_font(44, fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "mdetail": load_font(28, fonts_dir=FONTS_DIR, prefer_heavy=False),
         "date": load_font(28, fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "stat": load_font(26, fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "stat_label": load_font(19, fonts_dir=FONTS_DIR, prefer_heavy=False),
     }
 
 
@@ -395,6 +407,74 @@ def _draw_currency_panel(
 # ── metrics panel (bottom) ───────────────────────────────────────────────
 
 
+def _draw_stats_row(
+    draw: ImageDraw.Draw,
+    cx: int,
+    y: int,
+    avg_val: Optional[float],
+    min_val: Optional[float],
+    max_val: Optional[float],
+    font: ImageFont.FreeTypeFont,
+    label_font: ImageFont.FreeTypeFont,
+) -> None:
+    """Draw min / avg / max with a single connecting line and dot markers."""
+    items: list[tuple[str, float]] = []
+    if min_val is not None:
+        items.append(("min", min_val))
+    if avg_val is not None:
+        items.append(("avg", avg_val))
+    if max_val is not None:
+        items.append(("max", max_val))
+
+    if not items:
+        draw.text((cx, y), "no data", font=font, fill=TEXT_SECONDARY, anchor="mm")
+        return
+
+    spacing = 130
+    total_w = spacing * (len(items) - 1) if len(items) > 1 else 0
+    start_x = cx - total_w // 2
+
+    # ── 1. Draw numbers ──────────────────────────────────────────────
+    positions: list[int] = []  # x-centres for each item
+    bottom_y = 0
+    for i, (label, val) in enumerate(items):
+        px = start_x + i * spacing
+        positions.append(px)
+        text = f"{val:.2f}"
+        color = TEXT_SECONDARY if label == "avg" else STAT_MUTED
+        draw.text((px, y), text, font=font, fill=color, anchor="mm")
+        bbox = draw.textbbox((px, y), text, font=font, anchor="mm")
+        bottom_y = max(bottom_y, bbox[3])
+
+    line_y = bottom_y + 7
+
+    # ── 2. Single connecting line (min → max) ────────────────────────
+    if len(positions) >= 2:
+        draw.line(
+            [(positions[0], line_y), (positions[-1], line_y)],
+            fill=STAT_LINE,
+            width=1,
+        )
+
+    # ── 3. Dot at each position + label underneath ───────────────────
+    dot_r = 3
+    for i, (label, _) in enumerate(items):
+        px = positions[i]
+        dot_fill = TEXT_SECONDARY if label == "avg" else STAT_MUTED
+        draw.ellipse(
+            [(px - dot_r, line_y - dot_r), (px + dot_r, line_y + dot_r)],
+            fill=dot_fill,
+        )
+        lbl_color = TEXT_SECONDARY if label == "avg" else STAT_MUTED
+        draw.text(
+            (px, line_y + 10),
+            label,
+            font=label_font,
+            fill=lbl_color,
+            anchor="mt",
+        )
+
+
 def _draw_metrics_panel(
     draw: ImageDraw.Draw,
     rect: tuple[int, int, int, int],
@@ -403,6 +483,10 @@ def _draw_metrics_panel(
     cross: float,
     usd_spread_avg: Optional[float],
     cross_avg: Optional[float],
+    usd_spread_min: Optional[float],
+    usd_spread_max: Optional[float],
+    cross_min: Optional[float],
+    cross_max: Optional[float],
     ft: dict,
 ) -> None:
     x1, y1, x2, y2 = rect
@@ -411,11 +495,11 @@ def _draw_metrics_panel(
     lcx = x1 + pw // 4
     rcx = x1 + 3 * pw // 4
 
-    row_title = y1 + int(ph * 0.12)
-    row_sub = y1 + int(ph * 0.28)
-    row_value = y1 + int(ph * 0.46)
-    row_delta = y1 + int(ph * 0.66)
-    row_avg = y1 + int(ph * 0.84)
+    row_title = y1 + int(ph * 0.10)
+    row_sub = y1 + int(ph * 0.23)
+    row_value = y1 + int(ph * 0.37)
+    row_delta = y1 + int(ph * 0.56)
+    row_stats = y1 + int(ph * 0.72)
 
     # ── Left: USD Spread ──
     draw.text(
@@ -448,12 +532,13 @@ def _draw_metrics_panel(
             ft["mdetail"],
             is_spread=True,
         )
-        draw.text(
-            (lcx, row_avg),
-            f"avg {usd_spread_avg:.2f}",
-            font=ft["mdetail"],
-            fill=TEXT_SECONDARY,
-            anchor="mt",
+        _draw_stats_row(
+            draw, lcx, row_stats,
+            avg_val=usd_spread_avg,
+            min_val=usd_spread_min,
+            max_val=usd_spread_max,
+            font=ft["stat"],
+            label_font=ft["stat_label"],
         )
     else:
         draw.text(
@@ -464,12 +549,19 @@ def _draw_metrics_panel(
             anchor="mt",
         )
 
-    # ── Right: EUR buy − USD sell ──
+    # ── Right: EUR to USD ──
     draw.text(
         (rcx, row_title),
-        "EUR buy − USD sell",
+        "EUR to USD",
         font=ft["mtitle"],
         fill=WHITE,
+        anchor="mt",
+    )
+    draw.text(
+        (rcx, row_sub),
+        "sell − buy",
+        font=ft["mdetail"],
+        fill=TEXT_SECONDARY,
         anchor="mt",
     )
     draw.text(
@@ -488,12 +580,13 @@ def _draw_metrics_panel(
             ft["mdetail"],
             is_spread=True,
         )
-        draw.text(
-            (rcx, row_avg),
-            f"avg {cross_avg:.2f}",
-            font=ft["mdetail"],
-            fill=TEXT_SECONDARY,
-            anchor="mt",
+        _draw_stats_row(
+            draw, rcx, row_stats,
+            avg_val=cross_avg,
+            min_val=cross_min,
+            max_val=cross_max,
+            font=ft["stat"],
+            label_font=ft["stat_label"],
         )
     else:
         draw.text(
