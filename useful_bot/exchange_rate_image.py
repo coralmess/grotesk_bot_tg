@@ -35,7 +35,7 @@ BG_IMAGE_PATH = (
 
 # ── canvas ────────────────────────────────────────────────────────────────
 CANVAS_W = 1200
-CANVAS_H = 850
+CANVAS_H = 936
 
 # ── layout ────────────────────────────────────────────────────────────────
 MARGIN = 28
@@ -56,6 +56,7 @@ STAT_MUTED = (150, 150, 170)       # min / max numbers & labels
 STAT_LINE = (110, 110, 135)        # connecting line between min–max
 GREEN = (52, 211, 153)
 RED = (248, 113, 113)
+TODAY_MARKER_COLOR = TEXT_SECONDARY  # matches avg text colour (200, 200, 220)
 
 
 # ── public API ────────────────────────────────────────────────────────────
@@ -79,6 +80,14 @@ def render_exchange_rate_card(
     usd_spread_max: Optional[float] = None,
     cross_min: Optional[float] = None,
     cross_max: Optional[float] = None,
+    usd_spread_current: Optional[float] = None,
+    cross_current: Optional[float] = None,
+    usd_buy_avg: Optional[float] = None,
+    usd_buy_min: Optional[float] = None,
+    usd_buy_max: Optional[float] = None,
+    eur_buy_avg: Optional[float] = None,
+    eur_buy_min: Optional[float] = None,
+    eur_buy_max: Optional[float] = None,
     background_path: Optional[Path] = None,
     date_label: Optional[str] = None,
 ) -> io.BytesIO:
@@ -102,7 +111,7 @@ def render_exchange_rate_card(
 
     panel_w = (CANVAS_W - 2 * MARGIN - GAP) // 2
     panel_top = MARGIN + DATE_PANEL_H + GAP
-    top_h = 400
+    top_h = 470
     usd_rect = (MARGIN, panel_top, MARGIN + panel_w, panel_top + top_h)
     eur_rect = (
         MARGIN + panel_w + GAP,
@@ -166,6 +175,9 @@ def render_exchange_rate_card(
         sell=usd_sell,
         prev_buy=prev_usd_buy,
         prev_sell=prev_usd_sell,
+        buy_avg=usd_buy_avg,
+        buy_min=usd_buy_min,
+        buy_max=usd_buy_max,
         ft=ft,
     )
     _draw_currency_panel(
@@ -176,6 +188,9 @@ def render_exchange_rate_card(
         sell=eur_sell,
         prev_buy=prev_eur_buy,
         prev_sell=prev_eur_sell,
+        buy_avg=eur_buy_avg,
+        buy_min=eur_buy_min,
+        buy_max=eur_buy_max,
         ft=ft,
     )
     _draw_metrics_panel(
@@ -189,6 +204,8 @@ def render_exchange_rate_card(
         usd_spread_max=usd_spread_max,
         cross_min=cross_min,
         cross_max=cross_max,
+        usd_spread_current=usd_spread_current,
+        cross_current=cross_current,
         ft=ft,
     )
 
@@ -338,15 +355,31 @@ def _draw_currency_panel(
     sell: float,
     prev_buy: Optional[float],
     prev_sell: Optional[float],
+    buy_avg: Optional[float] = None,
+    buy_min: Optional[float] = None,
+    buy_max: Optional[float] = None,
     ft: dict,
 ) -> None:
     x1, y1, x2, y2 = rect
     cx = (x1 + x2) // 2
     h = y2 - y1
 
+    # Spacing: small=8px, medium=18px, big=32px
+    # All positions computed cumulatively from top
+    S, M, B = 8, 18, 32
+
+    y_title = y1 + 14 + B                          # top padding big + title top
+    y_buy_lbl = y_title + 42 + B                    # after title (~42px) + big
+    y_buy_val = y_buy_lbl + 24 + M                  # after label (~24px) + medium
+    y_buy_delta = y_buy_val + 38 + S + 11           # after value (~38px) + small + half-delta
+    y_buy_stats = y_buy_delta + 11 + M + 22         # after delta half + medium + half-stats
+    y_sell_lbl = y_buy_stats + 23 + B               # after stats half + big
+    y_sell_val = y_sell_lbl + 24 + M                # after label + medium
+    y_sell_delta = y_sell_val + 38 + S + 11         # after value + small + half-delta
+
     # currency title
     draw.text(
-        (cx, y1 + int(h * 0.10)),
+        (cx, y_title),
         currency,
         font=ft["title"],
         fill=WHITE,
@@ -355,14 +388,14 @@ def _draw_currency_panel(
 
     # ── Buy ──
     draw.text(
-        (cx, y1 + int(h * 0.26)),
+        (cx, y_buy_lbl),
         "Buy",
         font=ft["label"],
         fill=TEXT_SECONDARY,
         anchor="mt",
     )
     draw.text(
-        (cx, y1 + int(h * 0.36)),
+        (cx, y_buy_val),
         f"{buy:.2f}",
         font=ft["value"],
         fill=WHITE,
@@ -372,22 +405,34 @@ def _draw_currency_panel(
         _draw_delta(
             draw,
             cx,
-            y1 + int(h * 0.50),
+            y_buy_delta,
             buy - prev_buy,
             ft["delta"],
             is_spread=False,
         )
 
+    # ── Buy stats (min / avg / max) ──
+    if buy_avg is not None:
+        _draw_stats_row(
+            draw, cx, y_buy_stats,
+            avg_val=buy_avg,
+            min_val=buy_min,
+            max_val=buy_max,
+            font=ft["stat"],
+            label_font=ft["stat_label"],
+            current_val=buy,
+        )
+
     # ── Sell ──
     draw.text(
-        (cx, y1 + int(h * 0.60)),
+        (cx, y_sell_lbl),
         "Sell",
         font=ft["label"],
         fill=TEXT_SECONDARY,
         anchor="mt",
     )
     draw.text(
-        (cx, y1 + int(h * 0.70)),
+        (cx, y_sell_val),
         f"{sell:.2f}",
         font=ft["value"],
         fill=WHITE,
@@ -397,7 +442,7 @@ def _draw_currency_panel(
         _draw_delta(
             draw,
             cx,
-            y1 + int(h * 0.84),
+            y_sell_delta,
             sell - prev_sell,
             ft["delta"],
             is_spread=False,
@@ -416,8 +461,10 @@ def _draw_stats_row(
     max_val: Optional[float],
     font: ImageFont.FreeTypeFont,
     label_font: ImageFont.FreeTypeFont,
+    current_val: Optional[float] = None,
 ) -> None:
-    """Draw min / avg / max with a single connecting line and dot markers."""
+    """Draw min / avg / max with a connecting line, dot markers, and a
+    white vertical tick + dot for today's *current_val*."""
     items: list[tuple[str, float]] = []
     if min_val is not None:
         items.append(("min", min_val))
@@ -446,7 +493,7 @@ def _draw_stats_row(
         bbox = draw.textbbox((px, y), text, font=font, anchor="mm")
         bottom_y = max(bottom_y, bbox[3])
 
-    line_y = bottom_y + 7
+    line_y = bottom_y + 11
 
     # ── 2. Single connecting line (min → max) ────────────────────────
     if len(positions) >= 2:
@@ -474,6 +521,30 @@ def _draw_stats_row(
             anchor="mt",
         )
 
+    # ── 4. White "today" marker on the min–max line ──────────────────
+    if (
+        current_val is not None
+        and min_val is not None
+        and max_val is not None
+        and len(positions) >= 2
+    ):
+        lo_x = positions[0]   # pixel x of min
+        hi_x = positions[-1]  # pixel x of max
+        span = max_val - min_val
+        if span > 0:
+            t = (current_val - min_val) / span
+        else:
+            t = 0.5
+        t = max(0.0, min(1.0, t))  # clamp
+        mark_x = int(lo_x + t * (hi_x - lo_x))
+
+        tick_half = 8  # half-height of the vertical tick
+        draw.line(
+            [(mark_x, line_y - tick_half), (mark_x, line_y + tick_half)],
+            fill=TODAY_MARKER_COLOR,
+            width=2,
+        )
+
 
 def _draw_metrics_panel(
     draw: ImageDraw.Draw,
@@ -487,6 +558,8 @@ def _draw_metrics_panel(
     usd_spread_max: Optional[float],
     cross_min: Optional[float],
     cross_max: Optional[float],
+    usd_spread_current: Optional[float] = None,
+    cross_current: Optional[float] = None,
     ft: dict,
 ) -> None:
     x1, y1, x2, y2 = rect
@@ -495,11 +568,14 @@ def _draw_metrics_panel(
     lcx = x1 + pw // 4
     rcx = x1 + 3 * pw // 4
 
-    row_title = y1 + int(ph * 0.10)
-    row_sub = y1 + int(ph * 0.23)
-    row_value = y1 + int(ph * 0.37)
-    row_delta = y1 + int(ph * 0.56)
-    row_stats = y1 + int(ph * 0.72)
+    # Spacing: small=8px, medium=18px, big=32px (same system as currency panels)
+    S, M, B = 8, 18, 32
+
+    row_title = y1 + 14 + B                        # top padding + big space
+    row_sub = row_title + 32 + S                    # after title (~32px) + small
+    row_value = row_sub + 22 + M                    # after subtitle (~22px) + medium
+    row_delta = row_value + 36 + S + 11             # after value (~36px) + small + half-delta
+    row_stats = row_delta + 11 + M + 22             # after delta half + medium + half-stats
 
     # ── Left: USD Spread ──
     draw.text(
@@ -539,6 +615,7 @@ def _draw_metrics_panel(
             max_val=usd_spread_max,
             font=ft["stat"],
             label_font=ft["stat_label"],
+            current_val=usd_spread_current if usd_spread_current is not None else usd_spread,
         )
     else:
         draw.text(
@@ -587,6 +664,7 @@ def _draw_metrics_panel(
             max_val=cross_max,
             font=ft["stat"],
             label_font=ft["stat_label"],
+            current_val=cross_current if cross_current is not None else cross,
         )
     else:
         draw.text(

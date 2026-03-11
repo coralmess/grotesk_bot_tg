@@ -125,12 +125,31 @@ class ExchangeRateHelper:
 
             usd_spread = snapshot.usd_sell - snapshot.usd_buy
             eur_sell_minus_usd_buy = snapshot.eur_sell - snapshot.usd_buy
-            usd_average = self._mean_from_history(history, "usd_spread")
-            cross_average = self._mean_from_history(history, "eur_sell_minus_usd_buy")
-            usd_spread_min = self._min_from_history(history, "usd_spread")
-            usd_spread_max = self._max_from_history(history, "usd_spread")
-            cross_min = self._min_from_history(history, "eur_sell_minus_usd_buy")
-            cross_max = self._max_from_history(history, "eur_sell_minus_usd_buy")
+
+            # Include today's values in statistics so the marker always fits
+            history_plus_today = history + [
+                {
+                    "usd_spread": usd_spread,
+                    "eur_sell_minus_usd_buy": eur_sell_minus_usd_buy,
+                    "usd_buy": snapshot.usd_buy,
+                    "eur_buy": snapshot.eur_buy,
+                },
+            ]
+            usd_average = self._mean_from_history(history_plus_today, "usd_spread")
+            cross_average = self._mean_from_history(history_plus_today, "eur_sell_minus_usd_buy")
+            usd_spread_min = self._min_from_history(history_plus_today, "usd_spread")
+            usd_spread_max = self._max_from_history(history_plus_today, "usd_spread")
+            cross_min = self._min_from_history(history_plus_today, "eur_sell_minus_usd_buy")
+            cross_max = self._max_from_history(history_plus_today, "eur_sell_minus_usd_buy")
+
+            # Last ~30 days stats for buy prices
+            recent_30 = history_plus_today[-30:]
+            usd_buy_avg = self._mean_from_history(recent_30, "usd_buy")
+            usd_buy_min = self._min_from_history(recent_30, "usd_buy")
+            usd_buy_max = self._max_from_history(recent_30, "usd_buy")
+            eur_buy_avg = self._mean_from_history(recent_30, "eur_buy")
+            eur_buy_min = self._min_from_history(recent_30, "eur_buy")
+            eur_buy_max = self._max_from_history(recent_30, "eur_buy")
 
             image_buf = render_exchange_rate_card(
                 usd_buy=snapshot.usd_buy,
@@ -149,6 +168,14 @@ class ExchangeRateHelper:
                 usd_spread_max=usd_spread_max,
                 cross_min=cross_min,
                 cross_max=cross_max,
+                usd_spread_current=usd_spread,
+                cross_current=eur_sell_minus_usd_buy,
+                usd_buy_avg=usd_buy_avg,
+                usd_buy_min=usd_buy_min,
+                usd_buy_max=usd_buy_max,
+                eur_buy_avg=eur_buy_avg,
+                eur_buy_min=eur_buy_min,
+                eur_buy_max=eur_buy_max,
             )
             await application.bot.send_photo(
                 chat_id=self._chat_id, photo=image_buf,
