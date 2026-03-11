@@ -20,6 +20,12 @@ MONOBANK_RATES_URL = "https://minfin.com.ua/ua/company/monobank/currency/"
 STATE_FILE = RUNTIME_JSON_DIR / "useful_monobank_rates_state.json"
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 CHECK_TIMES_KYIV = ((12, 0),)
+# Temporary switch for the hourly test behavior.
+# Set to False to keep original behavior (daily 12:00 check only).
+ENABLE_HOURLY_TEST_MODE = False
+TEST_MODE_DURATION_DAYS = 3
+TEST_MODE_INTERVAL = timedelta(hours=1)
+TEST_MODE_UNTIL_KEY = "test_mode_until"
 REQUEST_TIMEOUT_SECONDS = 20
 HISTORY_LIMIT = 600
 HTTP_HEADERS = {
@@ -50,15 +56,27 @@ class ExchangeRateHelper:
         self._state = self._load_state()
         self._lock = asyncio.Lock()
         self._monitor_task: Optional[asyncio.Task] = None
+        self._test_mode_until: Optional[datetime] = None
+        if ENABLE_HOURLY_TEST_MODE:
+            self._init_test_mode_window()
 
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CommandHandler("exchange_status", self.status_command))
         application.add_handler(CommandHandler("exchange_checknow", self.checknow_command))
 
     def start_lines(self) -> list[str]:
+        now_kyiv = datetime.now(KYIV_TZ)
+        if self._is_test_mode_active(now_kyiv) and self._test_mode_until is not None:
+            schedule_line = (
+                "Schedule: test mode hourly checks until "
+                f"{self._test_mode_until.strftime('%d.%m.%Y %H:%M')} (Kyiv)"
+            )
+        else:
+            schedule_line = "Schedule: once per day at 12:00 (Kyiv time)"
+
         return [
             "Exchange rate helper",
-            "Schedule: once per day at 12:00 (Kyiv time)",
+            schedule_line,
             "Commands: /exchange_status, /exchange_checknow",
         ]
 
@@ -87,8 +105,12 @@ class ExchangeRateHelper:
     async def _monitor_loop(self, application: Application) -> None:
         while True:
             now = datetime.now(KYIV_TZ)
-            sleep_seconds, next_run = self._seconds_until_next_run(now)
-            logging.info("Next monobank check at %s", next_run.strftime("%Y-%m-%d %H:%M:%S %Z"))
+            sleep_seconds, next_run, mode = self._seconds_until_next_run(now)
+            logging.info(
+                "Next monobank check at %s (%s mode)",
+                next_run.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                mode,
+            )
             await asyncio.sleep(sleep_seconds)
             await self._run_check(application, reason="scheduled")
 
@@ -116,7 +138,7 @@ class ExchangeRateHelper:
                     last_snapshot = None
 
             changed = last_snapshot is None or self._snapshot_signature(snapshot) != self._snapshot_signature(last_snapshot)
-            if not changed and reason not in ("scheduled", "manual", "status"):
+            if not changed:
                 return False
 
             history = self._state.get("history", [])
@@ -305,8 +327,14 @@ class ExchangeRateHelper:
                 continue
         return max(values) if values else None
 
-    @staticmethod
-    def _seconds_until_next_run(now: datetime) -> Tuple[float, datetime]:
+    def _seconds_until_next_run(self, now: datetime) -> Tuple[float, datetime, str]:
+        if self._is_test_mode_active(now):
+            next_run = (now + TEST_MODE_INTERVAL).replace(minute=0, second=0, microsecond=0)
+            if next_run <= now:
+                next_run += TEST_MODE_INTERVAL
+            seconds = max(1.0, (next_run - now).total_seconds())
+            return seconds, next_run, "hourly-test"
+
         candidates = []
         for hour, minute in CHECK_TIMES_KYIV:
             candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -316,7 +344,35 @@ class ExchangeRateHelper:
 
         next_run = min(candidates)
         seconds = max(1.0, (next_run - now).total_seconds())
-        return seconds, next_run
+        return seconds, next_run, "daily"
+
+    def _init_test_mode_window(self) -> None:
+        if not ENABLE_HOURLY_TEST_MODE:
+            self._test_mode_until = None
+            return
+
+        raw_until = self._state.get(TEST_MODE_UNTIL_KEY)
+        if isinstance(raw_until, str):
+            try:
+                parsed = datetime.fromisoformat(raw_until)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=KYIV_TZ)
+                self._test_mode_until = parsed.astimezone(KYIV_TZ)
+                return
+            except ValueError:
+                pass
+
+        now_kyiv = datetime.now(KYIV_TZ)
+        self._test_mode_until = now_kyiv + timedelta(days=TEST_MODE_DURATION_DAYS)
+        self._state[TEST_MODE_UNTIL_KEY] = self._test_mode_until.isoformat(timespec="seconds")
+        self._save_state()
+        logging.info(
+            "Exchange-rate test mode enabled until %s",
+            self._test_mode_until.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        )
+
+    def _is_test_mode_active(self, now: datetime) -> bool:
+        return ENABLE_HOURLY_TEST_MODE and self._test_mode_until is not None and now < self._test_mode_until
 
     def _load_state(self) -> Dict[str, Any]:
         if not STATE_FILE.exists():
@@ -327,6 +383,7 @@ class ExchangeRateHelper:
                 return {
                     "last_snapshot": data.get("last_snapshot"),
                     "history": data.get("history", []),
+                    TEST_MODE_UNTIL_KEY: data.get(TEST_MODE_UNTIL_KEY),
                 }
         except Exception:
             logging.exception("Could not load state from %s", STATE_FILE)
