@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from bs4 import BeautifulSoup
 from telegram import Update
+from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from helpers.runtime_paths import RUNTIME_JSON_DIR, ensure_runtime_dirs
@@ -22,7 +23,7 @@ KYIV_TZ = ZoneInfo("Europe/Kyiv")
 CHECK_TIMES_KYIV = ((12, 0),)
 # Temporary switch for the hourly test behavior.
 # Set to False to keep original behavior (daily 12:00 check only).
-ENABLE_HOURLY_TEST_MODE = False
+ENABLE_HOURLY_TEST_MODE = True
 TEST_MODE_DURATION_DAYS = 3
 TEST_MODE_INTERVAL = timedelta(hours=1)
 TEST_MODE_UNTIL_KEY = "test_mode_until"
@@ -104,15 +105,21 @@ class ExchangeRateHelper:
 
     async def _monitor_loop(self, application: Application) -> None:
         while True:
-            now = datetime.now(KYIV_TZ)
-            sleep_seconds, next_run, mode = self._seconds_until_next_run(now)
-            logging.info(
-                "Next monobank check at %s (%s mode)",
-                next_run.strftime("%Y-%m-%d %H:%M:%S %Z"),
-                mode,
-            )
-            await asyncio.sleep(sleep_seconds)
-            await self._run_check(application, reason="scheduled")
+            try:
+                now = datetime.now(KYIV_TZ)
+                sleep_seconds, next_run, mode = self._seconds_until_next_run(now)
+                logging.info(
+                    "Next monobank check at %s (%s mode)",
+                    next_run.strftime("%Y-%m-%d %H:%M:%S %Z"),
+                    mode,
+                )
+                await asyncio.sleep(sleep_seconds)
+                await self._run_check(application, reason="scheduled")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception("Exchange-rate monitor iteration failed")
+                await asyncio.sleep(30)
 
     async def _run_check(self, application: Application, reason: str) -> bool:
         async with self._lock:
@@ -199,9 +206,20 @@ class ExchangeRateHelper:
                 eur_buy_min=eur_buy_min,
                 eur_buy_max=eur_buy_max,
             )
-            await application.bot.send_photo(
-                chat_id=self._chat_id, photo=image_buf,
-            )
+            sent = False
+            for attempt in (1, 2):
+                try:
+                    await application.bot.send_photo(chat_id=self._chat_id, photo=image_buf)
+                    sent = True
+                    break
+                except RetryAfter as error:
+                    await asyncio.sleep(float(error.retry_after) + 1.0)
+                except (TimedOut, NetworkError):
+                    logging.warning("Temporary Telegram send_photo error (attempt %s)", attempt)
+
+            if not sent:
+                logging.error("Could not send exchange-rate update to Telegram; will retry on next check.")
+                return False
 
             history.append(
                 {
@@ -351,18 +369,20 @@ class ExchangeRateHelper:
             self._test_mode_until = None
             return
 
+        now_kyiv = datetime.now(KYIV_TZ)
         raw_until = self._state.get(TEST_MODE_UNTIL_KEY)
         if isinstance(raw_until, str):
             try:
                 parsed = datetime.fromisoformat(raw_until)
                 if parsed.tzinfo is None:
                     parsed = parsed.replace(tzinfo=KYIV_TZ)
-                self._test_mode_until = parsed.astimezone(KYIV_TZ)
-                return
+                parsed_kyiv = parsed.astimezone(KYIV_TZ)
+                if parsed_kyiv > now_kyiv:
+                    self._test_mode_until = parsed_kyiv
+                    return
             except ValueError:
                 pass
 
-        now_kyiv = datetime.now(KYIV_TZ)
         self._test_mode_until = now_kyiv + timedelta(days=TEST_MODE_DURATION_DAYS)
         self._state[TEST_MODE_UNTIL_KEY] = self._test_mode_until.isoformat(timespec="seconds")
         self._save_state()
