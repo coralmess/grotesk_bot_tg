@@ -744,5 +744,49 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Yoshitomo%20Nara&sort=4",
         "url_name": "Yoshitomo Nara"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Taichi%20Murakami&sort=4",
+        "url_name": "Taichi Murakami"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Coherence&sort=4",
+        "url_name": "Coherence"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=SEH%20Kelly&sort=4",
+        "url_name": "SEH Kelly"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Lownn&sort=4",
+        "url_name": "Lownn"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Yoko%20Sakamoto&sort=4",
+        "url_name": "Yoko Sakamoto"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Evan%20Kinori&sort=4",
+        "url_name": "Evan Kinori"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Sassafras&sort=4",
+        "url_name": "Sassafras"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Eastlogue&sort=4",
+        "url_name": "Eastlogue"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Phaedo%20&sort=4",
+        "url_name": "Phaedo"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Cantate%20&sort=4",
+        "url_name": "Cantate"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=JieDa&sort=4",
+        "url_name": "JieDa"
     }
 ]

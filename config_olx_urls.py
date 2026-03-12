@@ -1132,5 +1132,57 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/list/q-Yoshitomo-Nara/?search%5Border%5D=created_at:desc",
         "url_name": "Yoshitomo Nara"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Taichi-Murakami/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Taichi Murakami"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Coherence/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Coherence"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-SEH-Kelly/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "SEH Kelly"
+    },
+    {
+        "url": "http://olx.ua/uk/moda-i-stil/q-Lownn/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Lownn"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Umit-Benan/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Umit Benan"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Evan-Kinori/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Evan Kinori"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Yoko-Sakamoto/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Yoko Sakamoto"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Sassafras/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Sassafras"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Eastlogue/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Eastlogue"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Celso-de-Lemos/?search%5Border%5D=created_at:desc",
+        "url_name": "Celso de Lemos"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Phaedo/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Phaedo"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/wEaYg/#906850784",
+        "url_name": "Малик"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-JieDa/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "JieDa"
     }
 ]
