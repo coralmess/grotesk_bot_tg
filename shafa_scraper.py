@@ -8,7 +8,7 @@ from telegram.constants import ParseMode
 from PIL import Image
 import io, asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
-from functools import wraps
+from functools import wraps, lru_cache
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_UPSCALE_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
 from config_shafa_urls import SHAFA_URLS
@@ -48,6 +48,13 @@ _playwright_instance = None
 MIN_PRICE_DIFF = 50
 MIN_PRICE_DIFF_PERCENT = 25.0
 _PARSER = "lxml" if _LXML_AVAILABLE else "html.parser"
+# Hot-path regexes are precompiled once so repeated card parsing stays cheap.
+NON_DIGIT_RE = re.compile(r"[^\d]")
+HAS_DIGIT_RE = re.compile(r"\d")
+CURRENCY_RE = re.compile(r"(грн|uah|₴)", re.IGNORECASE)
+PRICE_NOISE_RE = re.compile(r"(грн|uah|₴|\d+\s*%?)", re.IGNORECASE)
+ITEM_ID_RE = re.compile(r"(\d+)")
+INVALID_SHAFA_PATH_PARTS = ("/my/", "/msg/", "/member/", "/api/", "/social/", "/login")
 
 class RetryableHttpStatus(Exception):
     def __init__(self, status: int, wait_s: float = 0.0, context: str = ""):
@@ -111,7 +118,7 @@ class ShafaItem:
     first_image_url: Optional[str] = None
 
 def normalize_price(text: str) -> Tuple[str, int]:
-    digits = re.sub(r"[^\d]", "", text or "")
+    digits = NON_DIGIT_RE.sub("", text or "")
     price_int = int(digits) if digits else 0
     return (f"{price_int} грн" if price_int else (text or "").strip()), price_int
 
@@ -119,14 +126,19 @@ def normalize_price(text: str) -> Tuple[str, int]:
 def _has_numeric_price(price_text: Optional[str], price_int: int) -> bool:
     if price_int <= 0:
         return False
-    return bool(re.search(r"\d", price_text or ""))
+    return bool(HAS_DIGIT_RE.search(price_text or ""))
 
 
 def _looks_like_item_href(href: Optional[str]) -> bool:
     if not href:
         return False
-    href = href.strip()
-    if href.startswith(("javascript:", "#", "mailto:", "tel:")):
+    return _looks_like_item_href_cached(href.strip())
+
+
+@lru_cache(maxsize=8192)
+def _looks_like_item_href_cached(href: str) -> bool:
+    # Cache avoids re-validating identical hrefs across cards/cycles.
+    if not href or href.startswith(("javascript:", "#", "mailto:", "tel:")):
         return False
     parsed = urlsplit(href)
     path = (parsed.path or "").rstrip("/")
@@ -135,17 +147,23 @@ def _looks_like_item_href(href: Optional[str]) -> bool:
         return False
     if low in ("/uk", "/uk/"):
         return False
-    for bad in ("/my/", "/msg/", "/member/", "/api/", "/social/", "/login"):
+    for bad in INVALID_SHAFA_PATH_PARTS:
         if bad in low:
             return False
     parts = [p for p in low.split("/") if p]
     if len(parts) < 4:
         return False
-    return bool(re.search(r"\d", parts[-1]))
+    return bool(HAS_DIGIT_RE.search(parts[-1]))
 
 
 def _normalize_item_url(href: str) -> str:
-    absolute = urljoin(BASE_SHAFA, (href or "").strip())
+    return _normalize_item_url_cached((href or "").strip())
+
+
+@lru_cache(maxsize=8192)
+def _normalize_item_url_cached(href: str) -> str:
+    # Canonical URL normalization is heavily reused; cache keeps it O(1) after first hit.
+    absolute = urljoin(BASE_SHAFA, href)
     parsed = urlsplit(absolute)
     path = (parsed.path or "").rstrip("/")
     if not path:
@@ -198,7 +216,7 @@ def _extract_price_from_card(card) -> Tuple[str, int]:
         if len(text_norm) > 40:
             continue
         low = text_norm.lower()
-        if not re.search(r"(грн|uah|₴)", low):
+        if not CURRENCY_RE.search(low):
             continue
         price_text, price_int = _extract_price_from_node_text(text_norm)
         if price_int > 0:
@@ -224,7 +242,7 @@ def _extract_price_from_card(card) -> Tuple[str, int]:
 
 def extract_id_from_link(link: str) -> str:
     slug = link.rstrip("/").split("/")[-1].split("?", 1)[0]
-    if match := re.match(r"(\d+)", slug):
+    if match := ITEM_ID_RE.match(slug):
         return match.group(1)
     return slug
 
@@ -304,7 +322,7 @@ def parse_card(card) -> Optional[ShafaItem]:
                 txt = " ".join(anchor.get_text(" ", strip=True).split())
                 if len(txt) < 3:
                     continue
-                if re.search(r"(грн|uah|₴|\d+\s*%?)", txt.lower()):
+                if PRICE_NOISE_RE.search(txt):
                     continue
                 name_candidates.append(txt)
             name = max(name_candidates, key=len) if name_candidates else ""

@@ -374,8 +374,11 @@ class LystContextPool:
 lyst_context_pool = LystContextPool()
 
 # Helper functions
+# Compiled once because link cleanup runs for many outgoing messages.
+DISPLAY_LINK_PREFIX_RE = re.compile(r'^(https?://)?(www\.)?', re.IGNORECASE)
+
 def clean_link_for_display(link):
-    cleaned_link = re.sub(r'^(https?://)?(www\.)?', '', link)
+    cleaned_link = DISPLAY_LINK_PREFIX_RE.sub('', link or "")
     return (cleaned_link[:22] + '...') if len(cleaned_link) > 25 else cleaned_link
 
 def _resume_key(base_url, country):
@@ -1291,12 +1294,43 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
 
 # Data extraction and processing
 PRICE_TOKEN_RE = re.compile(r'([\d.,]+\s*[^\d\s]+|[^\d\s]+\s*[\d.,]+)')
-CURRENCY_MARKERS = ("€", "£", "$", "â‚¬", "Â£", "EUR", "GBP", "USD", "UAH", "грн", "грн.", "uah")
+PRICE_TRAILING_TOKEN_RE = re.compile(r'(\d[\d.,]*)\s*([^\d\s]+)')
+# Canonical marker list (lower-cased) keeps token matching stable across locales.
+CURRENCY_MARKERS = tuple(
+    marker.lower()
+    for marker in (
+        "\u20ac",
+        "\u00a3",
+        "$",
+        "EUR",
+        "GBP",
+        "USD",
+        "UAH",
+        "\u0433\u0440\u043d",
+        "\u0433\u0440\u043d.",
+        "uah",
+    )
+)
 
 def extract_price(price_str):
     price_num = re.sub(r'[^\d.]', '', price_str)
     try: return float(price_num)
     except ValueError: return 0
+
+def _normalize_currency_token(token: str) -> str:
+    value = (token or "").replace("\xa0", "").strip()
+    if not value:
+        return ""
+    normalized_values = [value]
+    # Recover common UTF-8 -> latin1 mojibake when present.
+    # This prevents silent misses like "215â‚¬" where the symbol got garbled.
+    try:
+        repaired = value.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
+        if repaired:
+            normalized_values.append(repaired)
+    except Exception:
+        pass
+    return " ".join(normalized_values).lower()
 
 def extract_price_tokens(text):
     if not text:
@@ -1310,6 +1344,47 @@ def extract_price_tokens(text):
         if any(marker.lower() in token.lower() for marker in CURRENCY_MARKERS):
             tokens.append(token)
     return tokens
+
+def _extract_price_tokens_enhanced(text):
+    if not text:
+        return []
+    tokens = []
+    normalized_text = text.replace('\xa0', ' ')
+    for m in PRICE_TOKEN_RE.finditer(normalized_text):
+        raw_token = m.group(0).replace(' ', '')
+        candidates = [raw_token]
+        # Keep backward-compatible formatting for single-char trailing currency.
+        if raw_token and raw_token[-1] not in '0123456789' and (raw_token[0].isdigit() or raw_token[0] == '.'):
+            candidates.append(raw_token[-1] + raw_token[:-1])
+        for token in candidates:
+            normalized = _normalize_currency_token(token)
+            if any(marker in normalized for marker in CURRENCY_MARKERS):
+                tokens.append(token)
+                break
+    if tokens:
+        return tokens
+
+    # Second pass: run on repaired text too, so malformed encodings still produce tokens.
+    fallback_inputs = [normalized_text]
+    try:
+        repaired = normalized_text.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
+        if repaired:
+            fallback_inputs.append(repaired)
+    except Exception:
+        pass
+
+    seen = set()
+    for source_text in fallback_inputs:
+        for m in PRICE_TRAILING_TOKEN_RE.finditer(source_text):
+            token = f"{m.group(1)}{m.group(2)}"
+            normalized = _normalize_currency_token(token)
+            if any(marker in normalized for marker in CURRENCY_MARKERS) and token not in seen:
+                seen.add(token)
+                tokens.append(token)
+    return tokens
+
+# Keep the old function for debugging, but route runtime calls to the resilient one.
+extract_price_tokens = _extract_price_tokens_enhanced
 
 def _parse_price_amount(raw: str) -> float:
     if not raw:

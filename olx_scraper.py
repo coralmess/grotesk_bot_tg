@@ -14,6 +14,11 @@ from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_J
 from config_olx_urls import OLX_URLS
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
 from helpers.runtime_paths import OLX_ITEMS_DB_FILE
+try:
+    import lxml  # noqa: F401
+    _LXML_AVAILABLE = True
+except ImportError:
+    _LXML_AVAILABLE = False
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,7 +30,18 @@ _UPSCALE_SEMAPHORE = asyncio.Semaphore(OLX_UPSCALE_CONCURRENCY)
 _http_session: Optional[aiohttp.ClientSession] = None
 MIN_PRICE_DIFF = 50
 MIN_PRICE_DIFF_PERCENT = 20.0
-NO_LISTINGS_TEXT = "Ми знайшли 0 оголошень"
+# Precompiled patterns reduce overhead in tight parsing loops.
+PRICE_FRAGMENT_RE = re.compile(r"(\d[\d\s.,]*)")
+SRCSET_PART_RE = re.compile(r"^\s*(\S+)(?:\s+([\d.]+[wx]))?\s*$", re.IGNORECASE)
+NO_LISTINGS_UA_TEXT = "\u041c\u0438 \u0437\u043d\u0430\u0439\u0448\u043b\u0438 0 \u043e\u0433\u043e\u043b\u043e\u0448\u0435\u043d\u044c"
+NO_LISTINGS_PATTERNS = (
+    NO_LISTINGS_UA_TEXT.lower(),
+    "we found 0 listings",
+    "we found 0 ads",
+    "0 listings found",
+)
+_PARSER = "lxml" if _LXML_AVAILABLE else "html.parser"
+NO_LISTINGS_TEXT = NO_LISTINGS_UA_TEXT
 
 class RetryableHttpStatus(Exception):
     def __init__(self, status: int, wait_s: float = 0.0, context: str = ""):
@@ -43,6 +59,26 @@ def _get_http_session() -> aiohttp.ClientSession:
 
 def _clean_token(value: Optional[str]) -> str:
     return (value or "").strip().strip("'\"")
+
+
+def _normalize_search_text(text: str) -> str:
+    value = " ".join((text or "").replace("\xa0", " ").split())
+    if not value:
+        return value
+    normalized_values = [value]
+    # Recover common UTF-8 -> latin1 mojibake page text so "0 listings" is not missed.
+    try:
+        repaired = value.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
+        if repaired:
+            normalized_values.append(repaired)
+    except Exception:
+        pass
+    return " ".join(normalized_values).lower()
+
+
+def _contains_no_listings(text: str) -> bool:
+    normalized = _normalize_search_text(text)
+    return any(pattern in normalized for pattern in NO_LISTINGS_PATTERNS)
 
 def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
     """Decorator that retries async functions with exponential backoff."""
@@ -91,17 +127,30 @@ def normalize_price(text: str) -> Tuple[str, int]:
     raw = (text or "").replace(" ", " ").strip()
     if not raw:
         return "", 0
-    match = re.search(r"([\d\s]+[.,]?\d*)", raw)
+    match = PRICE_FRAGMENT_RE.search(raw)
     if not match:
         return raw, 0
-    num = match.group(1).replace(" ", "")
+    num = match.group(1).replace(" ", "").replace("\u00a0", "")
+    if not num:
+        return raw, 0
     if "." in num and "," in num:
-        if num.rfind(".") > num.rfind(","):
-            num = num.replace(",", "")
-        else:
-            num = num.replace(".", "").replace(",", ".")
+        # Mixed separators: infer decimal by the rightmost separator.
+        decimal_sep = "," if num.rfind(",") > num.rfind(".") else "."
+        thousands_sep = "." if decimal_sep == "," else ","
+        num = num.replace(thousands_sep, "")
+        if decimal_sep == ",":
+            num = num.replace(",", ".")
     elif "," in num:
-        num = num.replace(",", ".")
+        parts = num.split(",")
+        # Treat as thousands separators only when each group after the first has 3 digits.
+        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+            num = "".join(parts)
+        else:
+            num = ".".join(parts)
+    elif "." in num:
+        parts = num.split(".")
+        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+            num = "".join(parts)
     try:
         value = float(num)
     except ValueError:
@@ -227,13 +276,13 @@ async def scrape_olx_url(url: str) -> Optional[List[OlxItem]]:
         logger.warning(f"⚠️  No HTML content received from {url}")
         return None
     
-    if NO_LISTINGS_TEXT in html:
+    if _contains_no_listings(html):
         logger.info(f"No listings found at {url}")
         return []
 
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, _PARSER)
     try:
-        if NO_LISTINGS_TEXT in soup.get_text(" ", strip=True):
+        if _contains_no_listings(soup.get_text(" ", strip=True)):
             logger.info(f"No listings found at {url}")
             return []
     except Exception as e:
@@ -272,14 +321,40 @@ def build_message(item: OlxItem, prev: Optional[Dict[str, Any]], source_name: st
 def _parse_highest_from_srcset(srcset: str) -> Optional[str]:
     if not srcset:
         return None
-    best, best_w = None, -1
-    for part in srcset.split(','):
-        m = re.search(r"\s*(\S+)\s+(\d+)w\s*", part)
+    best_url = None
+    best_score = -1.0
+    # Supports both width descriptors (320w) and density descriptors (2x).
+    for part in srcset.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        m = SRCSET_PART_RE.match(part)
         if m:
-            url, w = m.group(1), int(m.group(2))
-            if w > best_w:
-                best_w, best = w, url
-    return best
+            url = m.group(1)
+            descriptor = (m.group(2) or "").lower()
+        else:
+            tokens = part.split()
+            if not tokens:
+                continue
+            url = tokens[0]
+            descriptor = (tokens[1].lower() if len(tokens) > 1 else "")
+
+        score = 1.0
+        if descriptor.endswith("w"):
+            try:
+                score = float(descriptor[:-1])
+            except Exception:
+                score = 1.0
+        elif descriptor.endswith("x"):
+            try:
+                score = float(descriptor[:-1]) * 1000.0
+            except Exception:
+                score = 1.0
+
+        if score >= best_score:
+            best_score = score
+            best_url = url
+    return best_url
 
 
 async def fetch_item_images(item_url: str, max_images: int = 3) -> List[str]:
@@ -287,7 +362,7 @@ async def fetch_item_images(item_url: str, max_images: int = 3) -> List[str]:
     try:
         if not (html := await fetch_html(item_url)):
             return []
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, _PARSER)
         if not (wrapper := soup.find("div", class_="swiper-wrapper")):
             return []
         imgs = []
@@ -307,7 +382,7 @@ async def fetch_first_image_best(item_url: str) -> Optional[str]:
     try:
         if not (html := await fetch_html(item_url)):
             return None
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html, _PARSER)
         if not (wrapper := soup.find("div", class_="swiper-wrapper")):
             return None
         img_tag = None
