@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Set
+from typing import Dict, Optional, Set
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -20,6 +20,7 @@ CHECK_INTERVAL_SECONDS = 60
 CONNECT_TIMEOUT_SECONDS = 8
 QUIET_HOURS_START = 23
 QUIET_HOURS_END = 9
+IGNORE_OUTAGE_SECONDS = 10 * 60
 
 SUBSCRIBERS_FILE = SVITLO_SUBSCRIBERS_JSON_FILE
 STATE_FILE = SVITLO_STATE_JSON_FILE
@@ -31,6 +32,8 @@ class PowerState:
     value: str
     updated_at: str
     changed_at: str
+    previous_changed_at: Optional[str] = None
+    transition_message_ids: Optional[Dict[str, int]] = None
 
 
 class SvitloBot:
@@ -90,12 +93,63 @@ class SvitloBot:
                     self._save_state()
                     logging.info("Initial power state: %s", new_value)
                 elif new_value != self._state.value:
-                    previous = self._state.value
-                    previous_duration = self._format_state_duration(self._state.changed_at, now_iso)
-                    self._state = PowerState(value=new_value, updated_at=now_iso, changed_at=now_iso)
-                    self._save_state()
-                    logging.info("Power state changed: %s -> %s", previous, new_value)
-                    await self._broadcast_state_change(application, previous, new_value, previous_duration)
+                    previous_state = self._state
+                    previous = previous_state.value
+                    previous_duration = self._format_state_duration(previous_state.changed_at, now_iso)
+                    if previous == "ON" and new_value == "OFF":
+                        self._state = PowerState(
+                            value="OFF",
+                            updated_at=now_iso,
+                            changed_at=now_iso,
+                            previous_changed_at=previous_state.changed_at,
+                        )
+                        self._save_state()
+                        logging.info("Power state changed: %s -> %s", previous, new_value)
+                        message_ids = await self._broadcast_state_change(
+                            application,
+                            previous,
+                            new_value,
+                            previous_duration,
+                        )
+                        self._state.transition_message_ids = message_ids
+                        self._save_state()
+                    elif previous == "OFF" and new_value == "ON":
+                        outage_seconds = self._duration_seconds(previous_state.changed_at, now_iso)
+                        if outage_seconds is not None and outage_seconds < IGNORE_OUTAGE_SECONDS:
+                            logging.info(
+                                "Ignoring short outage (%ss); deleting outage messages and restoring ON timing",
+                                outage_seconds,
+                            )
+                            await self._delete_transition_messages(
+                                application,
+                                previous_state.transition_message_ids,
+                            )
+                            self._state = PowerState(
+                                value="ON",
+                                updated_at=now_iso,
+                                changed_at=previous_state.previous_changed_at or now_iso,
+                            )
+                            self._save_state()
+                        else:
+                            self._state = PowerState(value="ON", updated_at=now_iso, changed_at=now_iso)
+                            self._save_state()
+                            logging.info("Power state changed: %s -> %s", previous, new_value)
+                            await self._broadcast_state_change(
+                                application,
+                                previous,
+                                new_value,
+                                previous_duration,
+                            )
+                    else:
+                        self._state = PowerState(value=new_value, updated_at=now_iso, changed_at=now_iso)
+                        self._save_state()
+                        logging.info("Power state changed: %s -> %s", previous, new_value)
+                        await self._broadcast_state_change(
+                            application,
+                            previous,
+                            new_value,
+                            previous_duration,
+                        )
                 else:
                     self._state.updated_at = now_iso
                     self._save_state()
@@ -126,7 +180,7 @@ class SvitloBot:
         old_state: str,
         new_state: str,
         previous_duration: str,
-    ) -> None:
+    ) -> Dict[str, int]:
         now_kyiv = datetime.now(KYIV_TZ)
         timestamp = now_kyiv.strftime("%d.%m %H:%M")
         silent = self._is_quiet_hours(now_kyiv)
@@ -142,14 +196,25 @@ class SvitloBot:
         async with self._lock:
             chat_ids = list(self._subscribers)
 
+        message_ids: Dict[str, int] = {}
         for chat_id in chat_ids:
             should_remove = False
             try:
-                await application.bot.send_message(chat_id=chat_id, text=text, disable_notification=silent)
+                message = await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    disable_notification=silent,
+                )
+                message_ids[str(chat_id)] = message.message_id
             except RetryAfter as error:
                 await asyncio.sleep(error.retry_after + 1)
                 try:
-                    await application.bot.send_message(chat_id=chat_id, text=text, disable_notification=silent)
+                    message = await application.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        disable_notification=silent,
+                    )
+                    message_ids[str(chat_id)] = message.message_id
                 except Exception:
                     logging.exception("Failed to notify chat_id=%s after retry", chat_id)
             except (Forbidden, BadRequest):
@@ -162,6 +227,24 @@ class SvitloBot:
 
             if should_remove:
                 await self._remove_subscriber(chat_id)
+        return message_ids
+
+    async def _delete_transition_messages(
+        self,
+        application: Application,
+        message_ids: Optional[Dict[str, int]],
+    ) -> None:
+        if not message_ids:
+            return
+        for chat_id_str, message_id in message_ids.items():
+            try:
+                await application.bot.delete_message(chat_id=int(chat_id_str), message_id=message_id)
+            except BadRequest:
+                continue
+            except Forbidden:
+                await self._remove_subscriber(int(chat_id_str))
+            except Exception:
+                logging.exception("Failed to delete short-outage message for chat_id=%s", chat_id_str)
 
     async def _remove_subscriber(self, chat_id: int) -> None:
         async with self._lock:
@@ -198,8 +281,26 @@ class SvitloBot:
             value = payload.get("value")
             updated_at = payload.get("updated_at")
             changed_at = payload.get("changed_at", updated_at)
+            previous_changed_at = payload.get("previous_changed_at")
+            transition_message_ids = payload.get("transition_message_ids")
             if value in {"ON", "OFF"} and isinstance(updated_at, str) and isinstance(changed_at, str):
-                return PowerState(value=value, updated_at=updated_at, changed_at=changed_at)
+                if not isinstance(previous_changed_at, str):
+                    previous_changed_at = None
+                if not isinstance(transition_message_ids, dict):
+                    transition_message_ids = None
+                else:
+                    transition_message_ids = {
+                        str(chat_id): int(message_id)
+                        for chat_id, message_id in transition_message_ids.items()
+                        if str(message_id).isdigit()
+                    }
+                return PowerState(
+                    value=value,
+                    updated_at=updated_at,
+                    changed_at=changed_at,
+                    previous_changed_at=previous_changed_at,
+                    transition_message_ids=transition_message_ids,
+                )
         except Exception:
             logging.exception("Could not load power state from %s", STATE_FILE)
         return None
@@ -214,6 +315,8 @@ class SvitloBot:
                     "value": self._state.value,
                     "updated_at": self._state.updated_at,
                     "changed_at": self._state.changed_at,
+                    "previous_changed_at": self._state.previous_changed_at,
+                    "transition_message_ids": self._state.transition_message_ids or {},
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -224,13 +327,9 @@ class SvitloBot:
 
     @staticmethod
     def _format_state_duration(start_iso: str, end_iso: str) -> str:
-        try:
-            start_dt = datetime.fromisoformat(start_iso)
-            end_dt = datetime.fromisoformat(end_iso)
-        except ValueError:
+        total_seconds = SvitloBot._duration_seconds(start_iso, end_iso)
+        if total_seconds is None:
             return "невідомо"
-
-        total_seconds = max(0, int((end_dt - start_dt).total_seconds()))
         days = total_seconds // 86400
         hours = (total_seconds % 86400) // 3600
         minutes = (total_seconds % 3600) // 60
@@ -243,6 +342,15 @@ class SvitloBot:
             hour_word = SvitloBot._plural_uk(hours, "година", "години", "годин")
             return f"{hours} {hour_word} {minutes}хв"
         return f"{max(1, minutes)}хв"
+
+    @staticmethod
+    def _duration_seconds(start_iso: str, end_iso: str) -> Optional[int]:
+        try:
+            start_dt = datetime.fromisoformat(start_iso)
+            end_dt = datetime.fromisoformat(end_iso)
+        except ValueError:
+            return None
+        return max(0, int((end_dt - start_dt).total_seconds()))
 
     @staticmethod
     def _plural_uk(n: int, one: str, few: str, many: str) -> str:

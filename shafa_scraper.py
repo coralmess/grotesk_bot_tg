@@ -54,6 +54,7 @@ HAS_DIGIT_RE = re.compile(r"\d")
 CURRENCY_RE = re.compile(r"(грн|uah|₴)", re.IGNORECASE)
 PRICE_NOISE_RE = re.compile(r"(грн|uah|₴|\d+\s*%?)", re.IGNORECASE)
 ITEM_ID_RE = re.compile(r"(\d+)")
+ITEM_SLUG_RE = re.compile(r"^\d{6,}(?:-[a-z0-9-]+)?$", re.IGNORECASE)
 INVALID_SHAFA_PATH_PARTS = ("/my/", "/msg/", "/member/", "/api/", "/social/", "/login")
 
 class RetryableHttpStatus(Exception):
@@ -150,10 +151,16 @@ def _looks_like_item_href_cached(href: str) -> bool:
     for bad in INVALID_SHAFA_PATH_PARTS:
         if bad in low:
             return False
+    # Filter links look like .../if/characteristics=123 and should never be treated as items.
+    if "/if/" in low:
+        return False
     parts = [p for p in low.split("/") if p]
     if len(parts) < 4:
         return False
-    return bool(HAS_DIGIT_RE.search(parts[-1]))
+    last = parts[-1]
+    if "=" in last:
+        return False
+    return bool(ITEM_SLUG_RE.match(last))
 
 
 def _normalize_item_url(href: str) -> str:
@@ -242,7 +249,7 @@ def _extract_price_from_card(card) -> Tuple[str, int]:
 
 def extract_id_from_link(link: str) -> str:
     slug = link.rstrip("/").split("/")[-1].split("?", 1)[0]
-    if match := ITEM_ID_RE.match(slug):
+    if ITEM_SLUG_RE.match(slug) and (match := ITEM_ID_RE.match(slug)):
         return match.group(1)
     return slug
 
@@ -329,6 +336,8 @@ def parse_card(card) -> Optional[ShafaItem]:
             if not name and (img := card.find("img")):
                 name = (img.get("alt") or "").strip()
         price_text, price_int = _extract_price_from_card(card)
+        if price_int <= 0:
+            return None
         brand_el = card.find("p", class_="i7zcRu")
         brand = brand_el.get_text(strip=True) if brand_el else None
         size_el = card.find("p", class_="NyHfpp")
