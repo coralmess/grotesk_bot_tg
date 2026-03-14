@@ -771,8 +771,15 @@ async def get_page_content_http(
                 # keeps the rest of the scraper concurrent while forcing the risky part
                 # to stay low-rate and predictable.
                 async with LYST_HTTP_SEMAPHORE:
+                    # Re-check after waiting for the semaphore. Many country/url tasks
+                    # queue here at startup, so a challenge from one task must stop the
+                    # queued requests before they make another HTTP hit on the same IP.
+                    if LYST_ABORT_EVENT.is_set():
+                        raise LystRunAborted("lyst_run_aborted")
                     if LYST_HTTP_REQUEST_JITTER_SEC > 0:
                         await asyncio.sleep(random.uniform(0, LYST_HTTP_REQUEST_JITTER_SEC))
+                    if LYST_ABORT_EVENT.is_set():
+                        raise LystRunAborted("lyst_run_aborted")
                     status_code, content = await asyncio.wait_for(
                         asyncio.to_thread(_fetch_lyst_http_content, url, country, variant),
                         timeout=LYST_HTTP_TIMEOUT_SEC + 5,
