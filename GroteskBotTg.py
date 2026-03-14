@@ -1003,6 +1003,11 @@ async def get_page_content(
             if content:
                 return content
             raise RuntimeError("http_only_empty_content")
+        except LystHttpTerminalPage:
+            # Preserve the terminal-page signal so the caller can stop pagination
+            # cleanly. If we let the generic fallback catch this, the scraper will
+            # incorrectly open Playwright for pages that are already past the end.
+            raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
