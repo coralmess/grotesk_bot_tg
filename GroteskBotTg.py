@@ -664,12 +664,41 @@ def is_cloudflare_challenge(content: str) -> bool:
         return True
     return False
 
-def _fetch_lyst_http_content(url: str, country: str):
+class LystHttpTerminalPage(Exception):
+    def __init__(self, status_code: int, content: str = ""):
+        super().__init__(f"http_only_terminal_status_{status_code}")
+        self.status_code = status_code
+        self.content = content or ""
+
+
+def _lyst_http_base_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    filtered_query = [(key, value) for key, value in query if key.lower() != "page"]
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(filtered_query, doseq=True), "")
+    )
+
+
+def _lyst_http_content_has_product_cards(content: str) -> bool:
+    if not content:
+        return False
+    lowered = content.lower()
+    return 'data-testid="product-card"' in lowered or "data-testid='product-card'" in lowered or "_693owt3" in content
+
+
+def _fetch_lyst_http_content(url: str, country: str, variant: str = "direct"):
+    # Instance tests showed that the direct HTTP request already returns the correct
+    # ordered item list. The best fallback was a warmed HTTP session with browser-like
+    # navigation headers, so we keep exactly that as the final HTTP attempt.
     headers = {
         "User-Agent": STEALTH_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": STEALTH_HEADERS.get("Accept-Language", "en-US,en;q=0.9"),
         "Upgrade-Insecure-Requests": "1",
         "DNT": "1",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
     with requests.Session() as session:
         session.headers.update(headers)
@@ -677,6 +706,20 @@ def _fetch_lyst_http_content(url: str, country: str):
             session.cookies.set("country", country, domain=".lyst.com", path="/")
         except Exception:
             session.cookies.set("country", country)
+        if variant == "home_warm":
+            session.headers.update(
+                {
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-Mode": "navigate",
+                    "Sec-Fetch-User": "?1",
+                    "Sec-Fetch-Dest": "document",
+                    "sec-ch-ua": '"Chromium";v="124", "Not.A/Brand";v="99", "Google Chrome";v="124"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                }
+            )
+            session.get("https://www.lyst.com/", timeout=LYST_HTTP_TIMEOUT_SEC)
+            session.headers["Referer"] = _lyst_http_base_url(url)
         resp = session.get(url, timeout=LYST_HTTP_TIMEOUT_SEC)
         return resp.status_code, resp.text
 
@@ -700,68 +743,89 @@ async def get_page_content_http(
     context_lines.append("http_only: true")
     http_attempt = 0
     last_exc = None
-    while True:
-        http_attempt += 1
-        _touch_lyst_progress(
-            "http_attempt",
-            url=url,
-            country=country,
-            url_name=url_name,
-            page_num=page_num,
-            attempt=http_attempt,
-        )
-        context_lines.append(f"http_attempt: {http_attempt}")
-        try:
-            status_code, content = await asyncio.wait_for(
-                asyncio.to_thread(_fetch_lyst_http_content, url, country),
-                timeout=LYST_HTTP_TIMEOUT_SEC + 5,
+    variants = ("direct", "home_warm")
+    for variant_index, variant in enumerate(variants, start=1):
+        for variant_attempt in range(1, 3):
+            http_attempt += 1
+            _touch_lyst_progress(
+                "http_attempt",
+                url=url,
+                country=country,
+                url_name=url_name,
+                page_num=page_num,
+                attempt=http_attempt,
             )
-        except asyncio.TimeoutError as exc:
-            status_code, content = None, ""
-            last_exc = exc
-        except Exception as exc:
-            status_code, content = None, ""
-            last_exc = exc
-        context_lines.append(f"http_status: {status_code if status_code is not None else 'error'}")
-        if status_code is None:
-            if http_attempt <= 2:
-                await asyncio.sleep(2)
-                continue
-            raise RuntimeError(f"http_only_exception: {last_exc}")
-        if is_cloudflare_challenge(content):
-            now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
-            log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+            context_lines.append(f"http_variant: {variant}")
+            context_lines.append(f"http_attempt: {http_attempt}")
+            context_lines.append(f"http_variant_attempt: {variant_attempt}")
             try:
-                await dump_lyst_debug_event(
-                    "lyst_cloudflare",
-                    reason="Cloudflare challenge",
-                    url=url,
-                    country=country,
-                    url_name=url_name,
-                    page_num=page_num,
-                    step="http",
-                    content=content,
-                    now_kyiv=now_kyiv,
-                    log_lines=log_lines,
-                    context_lines=context_lines,
+                status_code, content = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_lyst_http_content, url, country, variant),
+                    timeout=LYST_HTTP_TIMEOUT_SEC + 5,
                 )
-            except Exception:
-                pass
-            disable_lyst_http_only("cloudflare challenge")
-            raise LystCloudflareChallenge()
-        if not content.strip():
-            if http_attempt <= 2:
-                await asyncio.sleep(2)
-                continue
-            raise RuntimeError("http_only_empty_content")
-        if status_code >= 400:
-            if status_code in (403, 410, 429):
-                disable_lyst_http_only(f"http_status_{status_code}")
-            if status_code in (408, 429, 500, 502, 503, 504) and http_attempt <= 2:
-                await asyncio.sleep(2)
-                continue
-            raise RuntimeError(f"http_only_status_{status_code}")
-        return content
+            except asyncio.TimeoutError as exc:
+                status_code, content = None, ""
+                last_exc = exc
+            except Exception as exc:
+                status_code, content = None, ""
+                last_exc = exc
+            context_lines.append(f"http_status: {status_code if status_code is not None else 'error'}")
+            if status_code is None:
+                if variant_attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                break
+            if is_cloudflare_challenge(content):
+                now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+                log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
+                try:
+                    await dump_lyst_debug_event(
+                        "lyst_cloudflare",
+                        reason="Cloudflare challenge",
+                        url=url,
+                        country=country,
+                        url_name=url_name,
+                        page_num=page_num,
+                        step=f"http_{variant}",
+                        content=content,
+                        now_kyiv=now_kyiv,
+                        log_lines=log_lines,
+                        context_lines=context_lines,
+                    )
+                except Exception:
+                    pass
+                if variant_index < len(variants):
+                    await asyncio.sleep(2)
+                    continue
+                disable_lyst_http_only("cloudflare challenge")
+                raise LystCloudflareChallenge()
+            if status_code == 410:
+                # Lyst returns 410 when pagination runs past the real last page. Treat
+                # that as a clean terminal page instead of a scrape failure.
+                raise LystHttpTerminalPage(status_code, content)
+            if not content.strip():
+                if variant_attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                break
+            if status_code >= 400:
+                if status_code in (408, 429, 500, 502, 503, 504) and variant_attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                if variant_index < len(variants):
+                    await asyncio.sleep(2)
+                    break
+                if status_code in (403, 429):
+                    disable_lyst_http_only(f"http_status_{status_code}")
+                raise RuntimeError(f"http_only_status_{status_code}")
+            if _lyst_http_content_has_product_cards(content):
+                return content
+            if variant_index < len(variants):
+                # A 200 without product cards is still unusable. Before escalating to
+                # Playwright, retry once with the warmed HTTP variant proven on instance.
+                break
+            raise RuntimeError("http_only_missing_product_cards")
+    raise RuntimeError(f"http_only_exception: {last_exc}" if last_exc else "http_only_unusable_response")
 
 async def count_product_images_ready(page):
     return await page.evaluate("""
@@ -1740,6 +1804,8 @@ async def scrape_page(url, country, max_scroll_attempts=None, url_name=None, pag
         )
     except LystCloudflareChallenge:
         return [], None, "cloudflare"
+    except LystHttpTerminalPage as exc:
+        return [], exc.content, "terminal"
     if not soup:
         mark_lyst_issue("Failed to get soup")
         return [], content, "failed"
@@ -1822,6 +1888,16 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             )
             await mark_lyst_run_failed("Failed to get soup")
             log_lyst_run_progress_summary()
+            break
+        if status == "terminal":
+            logger.info(f"{base_url['url_name']} for {country} reached terminal page {page} (HTTP 410)")
+            await update_lyst_resume_entry(
+                key,
+                scrape_complete=True,
+                final_page=last_scraped_page,
+                last_url=url,
+                completed=False,
+            )
             break
         if not shoes:
             if use_pagination and page < 3:
