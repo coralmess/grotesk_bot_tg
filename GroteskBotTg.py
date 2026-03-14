@@ -1,4 +1,4 @@
-import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, threading, hashlib, os
+import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, threading, hashlib, os, random
 from pathlib import Path
 from telegram.constants import ParseMode
 from collections import defaultdict, namedtuple, deque
@@ -26,7 +26,7 @@ from helpers.dynamic_sources import add_dynamic_url, detect_source
 from helpers import image_pipeline as image_pipeline_helpers
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers import lyst_state as lyst_state_helpers
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -118,6 +118,10 @@ _EDSR_SUPERRES = None
 class LystCloudflareChallenge(Exception):
     pass
 
+
+class LystRunAborted(Exception):
+    pass
+
 LYST_RESUME_STATE = {"resume_active": False, "entries": {}}
 LYST_RESUME_LOCK = asyncio.Lock()
 LYST_ABORT_EVENT = asyncio.Event()
@@ -184,6 +188,7 @@ except Exception:
 
 # Database semaphore to prevent concurrent access issues
 DB_SEMAPHORE = Semaphore(1)
+LYST_HTTP_SEMAPHORE = asyncio.Semaphore(LYST_HTTP_CONCURRENCY)
 
 # Define namedtuples and container classes
 ConversionResult = namedtuple('ConversionResult', ['uah_amount', 'exchange_rate', 'currency_symbol'])
@@ -746,6 +751,8 @@ async def get_page_content_http(
     variants = ("direct", "home_warm")
     for variant_index, variant in enumerate(variants, start=1):
         for variant_attempt in range(1, 3):
+            if LYST_ABORT_EVENT.is_set():
+                raise LystRunAborted("lyst_run_aborted")
             http_attempt += 1
             _touch_lyst_progress(
                 "http_attempt",
@@ -759,10 +766,17 @@ async def get_page_content_http(
             context_lines.append(f"http_attempt: {http_attempt}")
             context_lines.append(f"http_variant_attempt: {variant_attempt}")
             try:
-                status_code, content = await asyncio.wait_for(
-                    asyncio.to_thread(_fetch_lyst_http_content, url, country, variant),
-                    timeout=LYST_HTTP_TIMEOUT_SEC + 5,
-                )
+                # The HTTP path is what triggers the instance-wide Lyst challenge, so we
+                # serialize it with a dedicated semaphore and add a small jitter. This
+                # keeps the rest of the scraper concurrent while forcing the risky part
+                # to stay low-rate and predictable.
+                async with LYST_HTTP_SEMAPHORE:
+                    if LYST_HTTP_REQUEST_JITTER_SEC > 0:
+                        await asyncio.sleep(random.uniform(0, LYST_HTTP_REQUEST_JITTER_SEC))
+                    status_code, content = await asyncio.wait_for(
+                        asyncio.to_thread(_fetch_lyst_http_content, url, country, variant),
+                        timeout=LYST_HTTP_TIMEOUT_SEC + 5,
+                    )
             except asyncio.TimeoutError as exc:
                 status_code, content = None, ""
                 last_exc = exc
@@ -775,13 +789,17 @@ async def get_page_content_http(
                     await asyncio.sleep(2)
                     continue
                 break
-            if is_cloudflare_challenge(content):
+            if status_code == 410:
+                # Lyst returns 410 when pagination runs past the real last page. Treat
+                # that as a clean terminal page instead of a scrape failure.
+                raise LystHttpTerminalPage(status_code, content)
+            if is_cloudflare_challenge(content) or status_code in (403, 429):
                 now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
                 log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
                 try:
                     await dump_lyst_debug_event(
                         "lyst_cloudflare",
-                        reason="Cloudflare challenge",
+                        reason=f"Cloudflare challenge ({status_code})" if status_code is not None else "Cloudflare challenge",
                         url=url,
                         country=country,
                         url_name=url_name,
@@ -794,29 +812,23 @@ async def get_page_content_http(
                     )
                 except Exception:
                     pass
-                if variant_index < len(variants):
-                    await asyncio.sleep(2)
-                    continue
-                disable_lyst_http_only("cloudflare challenge")
+                # Instance tests showed that once HTTP starts returning Cloudflare/429,
+                # the challenge is effectively IP-wide for the rest of the run and the
+                # Playwright fallback also fails. Bubble this up so the caller can abort
+                # the run quickly and resume later instead of escalating load.
                 raise LystCloudflareChallenge()
-            if status_code == 410:
-                # Lyst returns 410 when pagination runs past the real last page. Treat
-                # that as a clean terminal page instead of a scrape failure.
-                raise LystHttpTerminalPage(status_code, content)
             if not content.strip():
                 if variant_attempt < 2:
                     await asyncio.sleep(2)
                     continue
                 break
             if status_code >= 400:
-                if status_code in (408, 429, 500, 502, 503, 504) and variant_attempt < 2:
+                if status_code in (408, 500, 502, 503, 504) and variant_attempt < 2:
                     await asyncio.sleep(2)
                     continue
                 if variant_index < len(variants):
                     await asyncio.sleep(2)
                     break
-                if status_code in (403, 429):
-                    disable_lyst_http_only(f"http_status_{status_code}")
                 raise RuntimeError(f"http_only_status_{status_code}")
             if _lyst_http_content_has_product_cards(content):
                 return content
@@ -1008,6 +1020,13 @@ async def get_page_content(
             # cleanly. If we let the generic fallback catch this, the scraper will
             # incorrectly open Playwright for pages that are already past the end.
             raise
+        except LystCloudflareChallenge:
+            # When Lyst challenges the HTTP path on the instance, Playwright is also
+            # challenged in the same run. Re-raise so the run aborts and resumes later
+            # instead of increasing pressure with a browser fallback.
+            raise
+        except LystRunAborted:
+            raise
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1015,6 +1034,8 @@ async def get_page_content(
             logger.warning(f"LYST HTTP-only failed, falling back to Playwright for {url}{suffix} | {exc}")
     elif LYST_HTTP_ONLY and not LYST_HTTP_ONLY_ENABLED:
         logger.info("LYST HTTP-only disabled for this run; using Playwright")
+    if LYST_ABORT_EVENT.is_set():
+        raise LystRunAborted("lyst_run_aborted")
     await lyst_context_pool.init()
     sem = lyst_context_pool.get_country_semaphore(country)
     async with sem:
@@ -1175,7 +1196,6 @@ async def _get_soup_impl(
 ):
     attempt = 0
     target_closed_retry_used = False
-    cloudflare_retry_used = False
     while attempt < max_retries:
         try:
             try:
@@ -1210,16 +1230,14 @@ async def _get_soup_impl(
             return (soup, content) if return_content else soup
         except Exception as e:
             suffix = _lyst_url_suffix(url_name, page_num)
+            if isinstance(e, LystRunAborted):
+                raise
+            if isinstance(e, LystHttpTerminalPage):
+                raise
             if isinstance(e, LystCloudflareChallenge):
-                if not cloudflare_retry_used:
-                    cloudflare_retry_used = True
-                    logger.warning(f"LYST Cloudflare challenge: retrying after short wait for {url}{suffix}")
-                    await asyncio.sleep(8)
-                    continue
-                attempt += 1
-                if attempt < max_retries:
-                    await asyncio.sleep(8)
-                    continue
+                # The instance stays challenged for minutes once this starts happening,
+                # so local retries inside the same run do not recover. Let the caller
+                # abort the run and rely on resume state for the next scheduled cycle.
                 raise
             if is_target_closed_error(e) and not target_closed_retry_used:
                 target_closed_retry_used = True
@@ -1809,6 +1827,8 @@ async def scrape_page(url, country, max_scroll_attempts=None, url_name=None, pag
         )
     except LystCloudflareChallenge:
         return [], None, "cloudflare"
+    except LystRunAborted:
+        return [], None, "aborted"
     except LystHttpTerminalPage as exc:
         return [], exc.content, "terminal"
     if not soup:
@@ -1880,6 +1900,9 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             )
             await mark_lyst_run_failed("Cloudflare challenge")
             log_lyst_run_progress_summary()
+            break
+        if status == "aborted":
+            logger.info(f"Aborting {base_url['url_name']} for {country} after Lyst run abort signal")
             break
         if status == "failed":
             logger.error(f"Failed to fetch page for {base_url['url_name']} {country} page {page}")
