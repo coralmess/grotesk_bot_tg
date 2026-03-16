@@ -79,6 +79,11 @@ Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
 Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
 window.chrome = { runtime: {} };
 """
+BROWSER_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+]
 
 # Initialize constants and globals
 colorama.init(autoreset=True)
@@ -269,14 +274,7 @@ class BrowserPool:
     async def get_browser(self):
         await self.init()
         await self._semaphore.acquire()
-        browser = await self._browser_type.launch(
-            headless=not LIVE_MODE,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
+        browser = await _launch_browser(self._browser_type)
         return BrowserWrapper(browser, self._semaphore)
 
 class BrowserWrapper:
@@ -306,14 +304,7 @@ class LystContextPool:
             if self._playwright:
                 return
             self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=not LIVE_MODE,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            )
+            self._browser = await _launch_browser(self._playwright.chromium)
 
     def get_country_semaphore(self, country):
         sem = self._country_semaphores.get(country)
@@ -332,14 +323,7 @@ class LystContextPool:
             ctx = self._contexts.get(country)
             if ctx is not None:
                 return ctx, True
-            ctx = await self._browser.new_context(
-                user_agent=STEALTH_UA,
-                locale="en-US",
-                timezone_id="Europe/Kyiv",
-                extra_http_headers=STEALTH_HEADERS,
-            )
-            await ctx.add_init_script(STEALTH_SCRIPT)
-            await ctx.add_cookies([{'name': 'country', 'value': country, 'domain': '.lyst.com', 'path': '/'}])
+            ctx = await _create_lyst_country_context(self._browser, country)
             self._contexts[country] = ctx
             return ctx, False
 
@@ -367,18 +351,28 @@ class LystContextPool:
                 await self._browser.close()
         except Exception:
             pass
-        self._browser = await self._playwright.chromium.launch(
-            headless=not LIVE_MODE,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
-        )
+        self._browser = await _launch_browser(self._playwright.chromium)
 
 lyst_context_pool = LystContextPool()
 
 # Helper functions
+async def _launch_browser(browser_type):
+    return await browser_type.launch(
+        headless=not LIVE_MODE,
+        args=BROWSER_LAUNCH_ARGS,
+    )
+
+async def _create_lyst_country_context(browser, country):
+    ctx = await browser.new_context(
+        user_agent=STEALTH_UA,
+        locale="en-US",
+        timezone_id="Europe/Kyiv",
+        extra_http_headers=STEALTH_HEADERS,
+    )
+    await ctx.add_init_script(STEALTH_SCRIPT)
+    await ctx.add_cookies([{'name': 'country', 'value': country, 'domain': '.lyst.com', 'path': '/'}])
+    return ctx
+
 # Compiled once because link cleanup runs for many outgoing messages.
 DISPLAY_LINK_PREFIX_RE = re.compile(r'^(https?://)?(www\.)?', re.IGNORECASE)
 
@@ -2233,8 +2227,37 @@ def filter_duplicates(shoes, exchange_rates):
         filtered_shoes.append(replacement or base)
     return filtered_shoes
 
+def _shoe_key(shoe):
+    return f"{shoe['name']}_{shoe['unique_id']}"
+
+def _apply_new_shoe_state(shoe, uah_sale):
+    shoe.update({
+        'lowest_price': shoe['sale_price'],
+        'lowest_price_uah': uah_sale,
+        'uah_price': uah_sale,
+        'active': True
+    })
+
+def _apply_existing_shoe_state(shoe, old_shoe, uah_sale, exchange_rates):
+    old_sale_price = old_shoe['sale_price']
+    old_sale_country = old_shoe['country']
+    old_uah = old_shoe.get('uah_price') or convert_to_uah(old_sale_price, old_sale_country, exchange_rates, shoe['name']).uah_amount
+    lowest_price_uah = old_shoe.get('lowest_price_uah') or old_uah
+
+    shoe['uah_price'] = uah_sale
+    # Update lowest price if needed
+    if uah_sale < lowest_price_uah:
+        shoe['lowest_price'], shoe['lowest_price_uah'] = shoe['sale_price'], uah_sale
+    else:
+        shoe['lowest_price'], shoe['lowest_price_uah'] = old_shoe['lowest_price'], lowest_price_uah
+    shoe['active'] = True
+
+async def _save_single_shoe(key, shoe):
+    # Save individual shoe instead of entire dataset
+    await save_shoe_data_bulk([dict(shoe, key=key)])
+
 async def process_shoe(shoe, old_data, message_queue, exchange_rates):
-    key = f"{shoe['name']}_{shoe['unique_id']}"
+    key = _shoe_key(shoe)
     is_new_item = key not in old_data
     was_processed = await is_shoe_processed(key) if is_new_item else False
 
@@ -2245,12 +2268,7 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
 
     # Handle new shoe
     if is_new_item:
-        shoe.update({
-            'lowest_price': shoe['sale_price'],
-            'lowest_price_uah': uah_sale,
-            'uah_price': uah_sale,
-            'active': True
-        })
+        _apply_new_shoe_state(shoe, uah_sale)
         # Important: do NOT globally skip this function based on processed_shoes.
         # That old behavior prevented future state updates for existing items.
         # We only use processed_shoes to suppress duplicate "new item" notifications.
@@ -2259,27 +2277,13 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
             await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
             await mark_shoe_processed(key)
         old_data[key] = shoe
-        # Save individual shoe instead of entire dataset
-        await save_shoe_data_bulk([dict(shoe, key=key)])
+        await _save_single_shoe(key, shoe)
     else:
         # Update existing shoe
         old_shoe = old_data[key]
-        old_sale_price = old_shoe['sale_price']
-        old_sale_country = old_shoe['country']
-        old_uah = old_shoe.get('uah_price') or convert_to_uah(old_sale_price, old_sale_country, exchange_rates, shoe['name']).uah_amount
-        shoe['uah_price'] = uah_sale
-        lowest_price_uah = old_shoe.get('lowest_price_uah') or old_uah
-
-        # Update lowest price if needed
-        if uah_sale < lowest_price_uah:
-            shoe['lowest_price'], shoe['lowest_price_uah'] = shoe['sale_price'], uah_sale
-        else:
-            shoe['lowest_price'], shoe['lowest_price_uah'] = old_shoe['lowest_price'], lowest_price_uah
-        
-        shoe['active'] = True
+        _apply_existing_shoe_state(shoe, old_shoe, uah_sale, exchange_rates)
         old_data[key] = shoe
-        # Save individual shoe instead of entire dataset
-        await save_shoe_data_bulk([dict(shoe, key=key)])
+        await _save_single_shoe(key, shoe)
 
 async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     new_shoe_count = 0
@@ -2292,8 +2296,8 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
         async with semaphore:  # Limit concurrency
             try:
                 _touch_lyst_progress("process_shoe", index=i, total_items=total_items)
-                country, name, unique_id = shoe['country'], shoe['name'], shoe['unique_id']
-                key = f"{name}_{unique_id}"
+                country, name = shoe['country'], shoe['name']
+                key = _shoe_key(shoe)
                 sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
                 
                 if sale_percentage < shoe['base_url']['min_sale']: return
@@ -2328,7 +2332,7 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     # pages yet, so treating them as removed would corrupt active/inactive state.
     removed_shoes = []
     if not LYST_RUN_FAILED:
-        current_shoes = {f"{shoe['name']}_{shoe['unique_id']}" for shoe in all_shoes}
+        current_shoes = {_shoe_key(shoe) for shoe in all_shoes}
         removed_shoes = [dict(shoe, key=k, active=False) for k, shoe in old_data.items() if k not in current_shoes and shoe.get('active', True)]
         for s in removed_shoes:
             old_data[s['key']]['active'] = False
@@ -2388,28 +2392,34 @@ async def _clear_lyst_resume_state():
     async with LYST_RESUME_LOCK:
         LYST_RESUME_STATE["resume_active"] = False
         LYST_RESUME_STATE["entries"] = {}
-        LYST_RESUME_STATE.pop("last_run_progress", None)
-        LYST_RESUME_STATE.pop("last_failure_reason", None)
-        LYST_RESUME_STATE.pop("last_failure_at", None)
+        for key in ("last_run_progress", "last_failure_reason", "last_failure_at"):
+            LYST_RESUME_STATE.pop(key, None)
         save_lyst_resume_state(LYST_RESUME_STATE)
 
-async def _finalize_lyst_resume_state():
+async def _run_lyst_resume_step(progress_name, operation, timeout_issue, timeout_log):
     try:
-        _touch_lyst_progress("finalize_resume_start")
-        await asyncio.wait_for(finalize_lyst_resume_after_processing(), timeout=60)
-        _touch_lyst_progress("finalize_resume_done")
+        _touch_lyst_progress(f"{progress_name}_start")
+        await asyncio.wait_for(operation(), timeout=60)
+        _touch_lyst_progress(f"{progress_name}_done")
     except asyncio.TimeoutError:
-        mark_lyst_issue("resume finalize timeout")
-        logger.error("LYST finalize resume timed out; continuing without resume update")
+        mark_lyst_issue(timeout_issue)
+        logger.error(timeout_log)
+
+async def _finalize_lyst_resume_state():
+    await _run_lyst_resume_step(
+        "finalize_resume",
+        finalize_lyst_resume_after_processing,
+        "resume finalize timeout",
+        "LYST finalize resume timed out; continuing without resume update",
+    )
     if LYST_RUN_FAILED:
         return
-    try:
-        _touch_lyst_progress("finalize_clear_start")
-        await asyncio.wait_for(_clear_lyst_resume_state(), timeout=60)
-        _touch_lyst_progress("finalize_clear_done")
-    except asyncio.TimeoutError:
-        mark_lyst_issue("resume clear timeout")
-        logger.error("LYST resume clear timed out; continuing")
+    await _run_lyst_resume_step(
+        "finalize_clear",
+        _clear_lyst_resume_state,
+        "resume clear timeout",
+        "LYST resume clear timed out; continuing",
+    )
 
 async def _shutdown_background_tasks(tasks):
     for task in tasks:
@@ -2470,6 +2480,29 @@ async def run_lyst_cycle_impl(message_queue):
 
 
 
+DB_MAINTENANCE_PRAGMAS = (
+    "PRAGMA journal_mode=WAL;",
+    "PRAGMA synchronous=NORMAL;",
+    "PRAGMA busy_timeout=5000;",
+    "PRAGMA wal_checkpoint(TRUNCATE);",
+    "PRAGMA optimize;",
+    "ANALYZE;",
+)
+
+def _run_db_retention_cleanup(conn, db_path):
+    if db_path == OLX_DB_FILE and OLX_RETENTION_DAYS > 0:
+        conn.execute(
+            "DELETE FROM olx_items WHERE updated_at < datetime('now', ?)",
+            (f"-{OLX_RETENTION_DAYS} days",),
+        )
+        conn.commit()
+    if db_path == SHAFA_DB_FILE and SHAFA_RETENTION_DAYS > 0:
+        conn.execute(
+            "DELETE FROM shafa_items WHERE updated_at < datetime('now', ?)",
+            (f"-{SHAFA_RETENTION_DAYS} days",),
+        )
+        conn.commit()
+
 def _db_maintenance_sync(db_files=None):
     if db_files is None:
         db_files = [SHOES_DB_FILE, OLX_DB_FILE, SHAFA_DB_FILE]
@@ -2478,24 +2511,9 @@ def _db_maintenance_sync(db_files=None):
             continue
         try:
             conn = sqlite3.connect(db_path)
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
-            conn.execute("PRAGMA busy_timeout=5000;")
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-            conn.execute("PRAGMA optimize;")
-            conn.execute("ANALYZE;")
-            if db_path == OLX_DB_FILE and OLX_RETENTION_DAYS > 0:
-                conn.execute(
-                    "DELETE FROM olx_items WHERE updated_at < datetime('now', ?)",
-                    (f"-{OLX_RETENTION_DAYS} days",),
-                )
-                conn.commit()
-            if db_path == SHAFA_DB_FILE and SHAFA_RETENTION_DAYS > 0:
-                conn.execute(
-                    "DELETE FROM shafa_items WHERE updated_at < datetime('now', ?)",
-                    (f"-{SHAFA_RETENTION_DAYS} days",),
-                )
-                conn.commit()
+            for pragma in DB_MAINTENANCE_PRAGMAS:
+                conn.execute(pragma)
+            _run_db_retention_cleanup(conn, db_path)
             if DB_VACUUM:
                 conn.execute("VACUUM;")
             conn.commit()
