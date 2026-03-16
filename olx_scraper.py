@@ -824,7 +824,9 @@ async def run_olx_scraper():
                 price_diff = abs(it.price_int - previous_price)
                 percent_change = (price_diff / previous_price * 100.0) if previous_price > 0 else None
 
-                # Skip notifications when price delta does not meet configured thresholds.
+                # Intentionally keep the stored baseline unchanged for minor deltas.
+                # We only care about alerting against the last significant price, not
+                # every small oscillation, so sub-threshold changes must not update DB.
                 if price_diff < MIN_PRICE_DIFF or (percent_change is not None and percent_change < MIN_PRICE_DIFF_PERCENT):
                     pct_display = f"{percent_change:.2f}%" if percent_change is not None else "N/A"
                     logger.debug(

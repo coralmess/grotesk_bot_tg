@@ -823,6 +823,9 @@ async def run_shafa_scraper():
                     continue
                 price_diff = abs(it.price_int - previous_price)
                 percent_change = (price_diff / previous_price * 100.0) if previous_price > 0 else None
+                # Intentionally keep the stored baseline unchanged for minor deltas.
+                # Alerts are anchored to the last significant price, so sub-threshold
+                # moves must not rewrite DB state and dilute later larger drops.
                 if price_diff < MIN_PRICE_DIFF or (percent_change is not None and percent_change < MIN_PRICE_DIFF_PERCENT):
                     continue
                 items_to_send.append(it)
