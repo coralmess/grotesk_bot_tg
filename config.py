@@ -23,12 +23,18 @@ SHAFA_RETENTION_DAYS = int(os.getenv('SHAFA_RETENTION_DAYS', '0'))
 UPSCALE_IMAGES = os.getenv('UPSCALE_IMAGES', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 UPSCALE_METHOD = os.getenv('UPSCALE_METHOD', 'lanczos').strip().lower()
 BLOCK_RESOURCES = os.getenv('BLOCK_RESOURCES', 'true' if IS_INSTANCE else 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
-LYST_HTTP_ONLY = os.getenv('LYST_HTTP_ONLY', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+# Lyst now prefers the HTTP parser first. It is cheaper, returns images via LD-JSON,
+# and only falls back to Playwright when HTTP truly fails.
+LYST_HTTP_ONLY = os.getenv('LYST_HTTP_ONLY', 'true').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 LYST_HTTP_TIMEOUT_SEC = float(os.getenv('LYST_HTTP_TIMEOUT_SEC', '45'))
 # Lyst HTTP-only works on the instance, but bursty parallel requests trip Cloudflare.
 # Keep the HTTP fetch path serialized and slightly jittered there; local defaults stay looser.
 LYST_HTTP_CONCURRENCY = int(os.getenv('LYST_HTTP_CONCURRENCY', '1' if IS_INSTANCE else '2'))
 LYST_HTTP_REQUEST_JITTER_SEC = float(os.getenv('LYST_HTTP_REQUEST_JITTER_SEC', '1.0' if IS_INSTANCE else '0.25'))
+# A single delayed retry is the highest-signal compromise here: enough to recover from a
+# short-lived challenge, but not enough to keep burning the IP after Cloudflare engages.
+LYST_CLOUDFLARE_RETRY_COUNT = int(os.getenv('LYST_CLOUDFLARE_RETRY_COUNT', '1'))
+LYST_CLOUDFLARE_RETRY_DELAY_SEC = float(os.getenv('LYST_CLOUDFLARE_RETRY_DELAY_SEC', '30'))
 
 # Concurrency tuning (lower on instance to reduce CPU spikes)
 LYST_MAX_BROWSERS = int(os.getenv('LYST_MAX_BROWSERS', '2' if IS_INSTANCE else '6'))

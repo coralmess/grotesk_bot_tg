@@ -26,7 +26,7 @@ from helpers.dynamic_sources import add_dynamic_url, detect_source
 from helpers import image_pipeline as image_pipeline_helpers
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers import lyst_state as lyst_state_helpers
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -747,6 +747,7 @@ async def get_page_content_http(
     )
     context_lines.append("http_only: true")
     http_attempt = 0
+    cloudflare_retries = 0
     last_exc = None
     variants = ("direct", "home_warm")
     for variant_index, variant in enumerate(variants, start=1):
@@ -784,6 +785,25 @@ async def get_page_content_http(
                         asyncio.to_thread(_fetch_lyst_http_content, url, country, variant),
                         timeout=LYST_HTTP_TIMEOUT_SEC + 5,
                     )
+                    while (
+                        (is_cloudflare_challenge(content) or status_code in (403, 429))
+                        and cloudflare_retries < LYST_CLOUDFLARE_RETRY_COUNT
+                    ):
+                        cloudflare_retries += 1
+                        # Keep the semaphore during the cooldown+retry. If we released it
+                        # here, queued tasks could all hit the same challenge and create a
+                        # second wave of doomed requests before the abort signal propagates.
+                        logger.warning(
+                            f"LYST Cloudflare retry {cloudflare_retries}/{LYST_CLOUDFLARE_RETRY_COUNT} "
+                            f"for {url_name or url} [{country}] after {LYST_CLOUDFLARE_RETRY_DELAY_SEC:.0f}s"
+                        )
+                        await asyncio.sleep(LYST_CLOUDFLARE_RETRY_DELAY_SEC)
+                        if LYST_ABORT_EVENT.is_set():
+                            raise LystRunAborted("lyst_run_aborted")
+                        status_code, content = await asyncio.wait_for(
+                            asyncio.to_thread(_fetch_lyst_http_content, url, country, variant),
+                            timeout=LYST_HTTP_TIMEOUT_SEC + 5,
+                        )
             except asyncio.TimeoutError as exc:
                 status_code, content = None, ""
                 last_exc = exc
@@ -1897,6 +1917,9 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
         )
         if status == "cloudflare":
             logger.error(f"Cloudflare challenge for {base_url['url_name']} {country} page {page}")
+            # Status tracking must record this as a failed run; otherwise the bot can
+            # show a green last-run marker even though resume state says we aborted.
+            mark_lyst_issue("Cloudflare challenge")
             await update_lyst_resume_entry(
                 key,
                 next_page=page,
@@ -2300,19 +2323,23 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
     
     logger.info(f"Processed {new_shoe_count} new shoes in total")
 
-    # Handle removed shoes in batches
-    current_shoes = {f"{shoe['name']}_{shoe['unique_id']}" for shoe in all_shoes}
-    removed_shoes = [dict(shoe, key=k, active=False) for k, shoe in old_data.items() if k not in current_shoes and shoe.get('active', True)]
-    for s in removed_shoes:
-        old_data[s['key']]['active'] = False
-    if removed_shoes:
-        logger.info(f"Marking {len(removed_shoes)} removed shoes inactive")
-        chunk_size = 500
-        for i in range(0, len(removed_shoes), chunk_size):
-            chunk = removed_shoes[i:i + chunk_size]
-            await save_shoe_data_bulk(chunk)
-            _touch_lyst_progress("removed_shoes_batch", batch_start=i, batch_size=len(chunk), total_removed=len(removed_shoes))
-            await asyncio.sleep(0)
+    # Only deactivate missing items after a full successful Lyst run. On partial runs
+    # (Cloudflare aborts, timeouts, stalls), the scraper has not seen the untouched
+    # pages yet, so treating them as removed would corrupt active/inactive state.
+    removed_shoes = []
+    if not LYST_RUN_FAILED:
+        current_shoes = {f"{shoe['name']}_{shoe['unique_id']}" for shoe in all_shoes}
+        removed_shoes = [dict(shoe, key=k, active=False) for k, shoe in old_data.items() if k not in current_shoes and shoe.get('active', True)]
+        for s in removed_shoes:
+            old_data[s['key']]['active'] = False
+        if removed_shoes:
+            logger.info(f"Marking {len(removed_shoes)} removed shoes inactive")
+            chunk_size = 500
+            for i in range(0, len(removed_shoes), chunk_size):
+                chunk = removed_shoes[i:i + chunk_size]
+                await save_shoe_data_bulk(chunk)
+                _touch_lyst_progress("removed_shoes_batch", batch_start=i, batch_size=len(chunk), total_removed=len(removed_shoes))
+                await asyncio.sleep(0)
     _touch_lyst_progress("process_shoes_done", removed_total=len(removed_shoes), new_total=new_shoe_count)
 
 async def process_url(base_url, countries, exchange_rates):
@@ -2407,7 +2434,7 @@ async def run_lyst_cycle_impl(message_queue):
         ]
         url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
         all_shoes = _collect_successful_lyst_results(url_results)
-        if not all_shoes:
+        if not all_shoes and not LYST_RUN_FAILED:
             mark_lyst_issue("0 items scraped")
 
         collected_ids = {shoe['unique_id'] for shoe in all_shoes}
@@ -2418,6 +2445,9 @@ async def run_lyst_cycle_impl(message_queue):
         all_shoes = filter_duplicates(all_shoes, exchange_rates)
         special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
 
+        # Even when a later page aborts the run, keep already-scraped items. That is
+        # the whole point of the fail-fast Cloudflare flow: stop new requests, but do
+        # not throw away data we already paid to scrape successfully.
         await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
         await _finalize_lyst_resume_state()
         _touch_lyst_progress("finalize_run")

@@ -1184,5 +1184,29 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-JieDa/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "JieDa"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Phigvel/?search%5Border%5D=created_at:desc",
+        "url_name": "Phigvel"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/posuda-kuhonnaya-utvar/q-Puiforcat/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=3000",
+        "url_name": "Puiforcat"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/posuda-kuhonnaya-utvar/q-Ercuis/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Ercuis"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/posuda-kuhonnaya-utvar/q-Mepra/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=3000",
+        "url_name": "Mepra"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Robert-Welch/?currency=UAH&search%5Border%5D=created_at:desc&search%5Bfilter_float_price:to%5D=3000",
+        "url_name": "Robert Welch"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Hepp/?currency=UAH&search%5Bfilter_float_price:to%5D=3000",
+        "url_name": "Hepp"
     }
 ]

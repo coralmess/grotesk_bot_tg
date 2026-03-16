@@ -788,5 +788,9 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=JieDa&sort=4",
         "url_name": "JieDa"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Phigvel&sort=4",
+        "url_name": "Phigvel"
     }
 ]
