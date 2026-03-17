@@ -197,6 +197,18 @@ LYST_HTTP_SEMAPHORE = asyncio.Semaphore(LYST_HTTP_CONCURRENCY)
 
 # Define namedtuples and container classes
 ConversionResult = namedtuple('ConversionResult', ['uah_amount', 'exchange_rate', 'currency_symbol'])
+EMPTY_CONVERSION_RESULT = ConversionResult(0, 0, '')
+CURRENCY_CODE_BY_SYMBOL = {
+    '\u20ac': 'EUR',
+    '\u00e2\u201a\u00ac': 'EUR',
+    '\u00a3': 'GBP',
+    '\u00c2\u00a3': 'GBP',
+    '$': 'USD',
+}
+CURRENCY_DISPLAY_SYMBOL_BY_SYMBOL = {
+    '\u00e2\u201a\u00ac': '\u20ac',
+    '\u00c2\u00a3': '\u00a3',
+}
 
 # Statistics tracking
 max_wait_times = {'url_changes': 0, 'final_url_changes': 0}
@@ -1203,6 +1215,15 @@ def _build_soup(content):
     except Exception:
         return BeautifulSoup(content, 'html.parser')
 
+def _get_soup_request_kwargs(max_retries, max_scroll_attempts, url_name, page_num, use_pagination):
+    return {
+        "max_retries": max_retries,
+        "max_scroll_attempts": max_scroll_attempts,
+        "url_name": url_name,
+        "page_num": page_num,
+        "use_pagination": use_pagination,
+    }
+
 async def _get_soup_impl(
     url,
     country,
@@ -1282,12 +1303,8 @@ async def get_soup(url, country, max_retries=3, max_scroll_attempts=None, url_na
         url,
         country,
         return_content=False,
-        max_retries=max_retries,
-        max_scroll_attempts=max_scroll_attempts,
-        url_name=url_name,
-        page_num=page_num,
-        use_pagination=use_pagination,
         return_none_on_terminal_failure=False,
+        **_get_soup_request_kwargs(max_retries, max_scroll_attempts, url_name, page_num, use_pagination),
     )
 
 async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=None, url_name=None, page_num=None, use_pagination=None):
@@ -1295,12 +1312,8 @@ async def get_soup_and_content(url, country, max_retries=3, max_scroll_attempts=
         url,
         country,
         return_content=True,
-        max_retries=max_retries,
-        max_scroll_attempts=max_scroll_attempts,
-        url_name=url_name,
-        page_num=page_num,
-        use_pagination=use_pagination,
         return_none_on_terminal_failure=True,
+        **_get_soup_request_kwargs(max_retries, max_scroll_attempts, url_name, page_num, use_pagination),
     )
 
 def is_lyst_domain(url):
@@ -1866,59 +1879,56 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
     
     max_scroll_attempts = LYST_MAX_SCROLL_ATTEMPTS
     all_shoes = []
+    url_name = base_url['url_name']
     key = _resume_key(base_url, country)
     resume_active = LYST_RESUME_STATE.get("resume_active", False)
     entry = LYST_RESUME_STATE.get("entries", {}).get(key, {})
     if resume_active and entry.get("completed"):
-        logger.info(f"Skipping {base_url['url_name']} for {country} (completed in previous run)")
+        logger.info(f"Skipping {url_name} for {country} (completed in previous run)")
         return all_shoes
     page = entry.get("next_page", 1) if resume_active else 1
     last_scraped_page = entry.get("last_scraped_page", entry.get("last_success_page", 0))
     if use_pagination and page > 1:
-        logger.info(f"Resuming {base_url['url_name']} for {country} from page {page}")
+        logger.info(f"Resuming {url_name} for {country} from page {page}")
     
     while True:
         if LYST_ABORT_EVENT.is_set():
             break
         _touch_lyst_progress(
             "scrape_page_start",
-            url_name=base_url.get('url_name'),
+            url_name=url_name,
             country=country,
             page_num=page,
         )
-        if use_pagination:
-            url = base_url['url'] if page == 1 else f"{base_url['url']}&page={page}"
-            logger.info(f"Scraping page {page} for country {country} - {base_url['url_name']}")
-        else:
-            url = base_url['url']
-            logger.info(f"Scraping single page for country {country} - {base_url['url_name']}")
+        url = _scrape_target_url(base_url, page, use_pagination)
+        _log_scrape_target(url_name, country, page, use_pagination)
 
         shoes, content, status = await scrape_page(
             url,
             country,
             max_scroll_attempts=max_scroll_attempts,
-            url_name=base_url["url_name"],
+            url_name=url_name,
             page_num=page if use_pagination else None,
             use_pagination=use_pagination,
         )
         _touch_lyst_progress(
             "scrape_page_end",
             url=url,
-            url_name=base_url.get('url_name'),
+            url_name=url_name,
             country=country,
             page_num=page,
             status=status,
         )
         if status == "cloudflare":
-            logger.error(f"Cloudflare challenge for {base_url['url_name']} {country} page {page}")
+            logger.error(f"Cloudflare challenge for {url_name} {country} page {page}")
             # Status tracking must record this as a failed run; otherwise the bot can
             # show a green last-run marker even though resume state says we aborted.
             mark_lyst_issue("Cloudflare challenge")
-            await update_lyst_resume_entry(
+            await _update_resume_with_url(
                 key,
+                url,
                 next_page=page,
                 last_scraped_page=last_scraped_page,
-                last_url=url,
                 completed=False,
                 failure_reason="Cloudflare challenge",
             )
@@ -1926,15 +1936,15 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             log_lyst_run_progress_summary()
             break
         if status == "aborted":
-            logger.info(f"Aborting {base_url['url_name']} for {country} after Lyst run abort signal")
+            logger.info(f"Aborting {url_name} for {country} after Lyst run abort signal")
             break
         if status == "failed":
-            logger.error(f"Failed to fetch page for {base_url['url_name']} {country} page {page}")
-            await update_lyst_resume_entry(
+            logger.error(f"Failed to fetch page for {url_name} {country} page {page}")
+            await _update_resume_with_url(
                 key,
+                url,
                 next_page=page,
                 last_scraped_page=last_scraped_page,
-                last_url=url,
                 completed=False,
                 failure_reason="Failed to get soup",
             )
@@ -1942,18 +1952,18 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             log_lyst_run_progress_summary()
             break
         if status == "terminal":
-            logger.info(f"{base_url['url_name']} for {country} reached terminal page {page} (HTTP 410)")
-            await update_lyst_resume_entry(
+            logger.info(f"{url_name} for {country} reached terminal page {page} (HTTP 410)")
+            await _update_resume_with_url(
                 key,
+                url,
                 scrape_complete=True,
                 final_page=last_scraped_page,
-                last_url=url,
                 completed=False,
             )
             break
         if not shoes:
             if use_pagination and page < 3:
-                logger.error(f"{base_url['url_name']} for {country} Stopped too early. Please check for errors")
+                logger.error(f"{url_name} for {country} Stopped too early. Please check for errors")
                 mark_lyst_issue("Stopped too early")
                 now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
                 log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
@@ -1965,7 +1975,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
                     reason="Stopped too early",
                     url=url,
                     country=country,
-                    url_name=base_url['url_name'],
+                    url_name=url_name,
                     page_num=page,
                     content=content,
                     now_kyiv=now_kyiv,
@@ -1973,35 +1983,35 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
                     context_lines=context_lines,
                 )
                 if use_pagination == PAGE_SCRAPE:
-                    logger.info(f"Retrying {base_url['url_name']} for {country} with PAGE_SCRAPE={not use_pagination}")
+                    logger.info(f"Retrying {url_name} for {country} with PAGE_SCRAPE={not use_pagination}")
                     return await scrape_all_pages(base_url, country, use_pagination=not use_pagination)
             
-            logger.info(f"Total for {country} {base_url['url_name']}: {len(all_shoes)}. Stopped on page {page}")
-            await update_lyst_resume_entry(
+            logger.info(f"Total for {country} {url_name}: {len(all_shoes)}. Stopped on page {page}")
+            await _update_resume_with_url(
                 key,
+                url,
                 scrape_complete=True,
                 final_page=last_scraped_page,
-                last_url=url,
                 completed=False,
             )
             break
         all_shoes.extend(shoes)
         LYST_RUN_PROGRESS[key] = page
         last_scraped_page = page
-        await update_lyst_resume_entry(
+        await _update_resume_with_url(
             key,
+            url,
             last_scraped_page=page,
-            last_url=url,
             completed=False if use_pagination else True,
         )
         
         if not use_pagination:
-            await update_lyst_resume_entry(
+            await _update_resume_with_url(
                 key,
+                url,
                 last_scraped_page=page,
                 scrape_complete=True,
                 final_page=page,
-                last_url=url,
                 completed=False,
             )
             break
@@ -2062,24 +2072,16 @@ def update_exchange_rates():
 
 def convert_to_uah(price, country, exchange_rates, name):
     try:
-        currency_map = {
-            '\u20ac': 'EUR',
-            '\u00e2\u201a\u00ac': 'EUR',
-            '\u00a3': 'GBP',
-            '\u00c2\u00a3': 'GBP',
-            '$': 'USD',
-        }
-
         currency = None
         currency_symbol = ''
-        for symbol, code in currency_map.items():
+        for symbol, code in CURRENCY_CODE_BY_SYMBOL.items():
             if symbol in price:
                 currency = code
-                currency_symbol = symbol if symbol in ('\u20ac', '\u00a3', '$') else {'\u00e2\u201a\u00ac': '\u20ac', '\u00c2\u00a3': '\u00a3'}.get(symbol, symbol)
+                currency_symbol = CURRENCY_DISPLAY_SYMBOL_BY_SYMBOL.get(symbol, symbol)
                 break
         if not currency:
             logger.error(f"Unrecognized currency symbol in price '{price}' for '{name}' country '{country}'")
-            return ConversionResult(0, 0, '')
+            return EMPTY_CONVERSION_RESULT
         amount = _parse_price_amount(price)
         if amount <= 0:
             logger.error(f"Failed to parse price '{price}' for '{name}' country '{country}'")
@@ -2088,13 +2090,13 @@ def convert_to_uah(price, country, exchange_rates, name):
         rate = exchange_rates.get(currency)
         if not rate:
             logger.error(f"Exchange rate not found for currency '{currency}' (country: {country})")
-            return ConversionResult(0, 0, '')
+            return EMPTY_CONVERSION_RESULT
 
         uah_amount = amount / rate
         return ConversionResult(round(uah_amount / 10) * 10, round(1 / rate, 2), currency_symbol)
     except (ValueError, KeyError) as e:
         logger.error(f"Error converting price '{price}' for '{name}' country '{country}': {e}")
-        return ConversionResult(0, 0, '')
+        return EMPTY_CONVERSION_RESULT
 
 # Message formatting and sending
 def get_sale_emoji(sale_percentage, uah_sale):
@@ -2191,10 +2193,20 @@ async def _run_shafa_and_mark():
     mark_shafa_run(err if err else None)
 
 # Processing functions
+def _merge_base_url_into_shoes(result, base_url, country):
+    merged = []
+    for shoe in result:
+        if isinstance(shoe, dict):
+            shoe['base_url'] = base_url
+            merged.append(shoe)
+        else:
+            logger.error(f"Unexpected item data type for {country}: {type(shoe)}")
+    return merged
+
 def filter_duplicates(shoes, exchange_rates):
     filtered_shoes, grouped_shoes = [], defaultdict(list)
     for shoe in shoes:
-        grouped_shoes[f"{shoe['name']}_{shoe['unique_id']}"] .append(shoe)
+        grouped_shoes[_shoe_key(shoe)].append(shoe)
 
     for group in grouped_shoes.values():
         # Deduplicate within same country: prefer item with valid image_url
@@ -2346,18 +2358,25 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
                 await asyncio.sleep(0)
     _touch_lyst_progress("process_shoes_done", removed_total=len(removed_shoes), new_total=new_shoe_count)
 
+def _scrape_target_url(base_url, page, use_pagination):
+    return base_url['url'] if not use_pagination or page == 1 else f"{base_url['url']}&page={page}"
+
+def _log_scrape_target(url_name, country, page, use_pagination):
+    if use_pagination:
+        logger.info(f"Scraping page {page} for country {country} - {url_name}")
+    else:
+        logger.info(f"Scraping single page for country {country} - {url_name}")
+
+async def _update_resume_with_url(key, url, **fields):
+    await update_lyst_resume_entry(key, last_url=url, **fields)
+
 async def process_url(base_url, countries, exchange_rates):
     _touch_lyst_progress()
     mark_lyst_start()
     all_shoes = []
     country_results = await asyncio.gather(*(scrape_all_pages(base_url, c) for c in countries))
     for country, result in zip(countries, country_results):
-        for shoe in result:
-            if isinstance(shoe, dict):
-                shoe['base_url'] = base_url
-                all_shoes.append(shoe)
-            else:
-                logger.error(f"Unexpected item data type for {country}: {type(shoe)}")
+        all_shoes.extend(_merge_base_url_into_shoes(result, base_url, country))
         special_logger.info(f"Found {len(result)} items for {country} - {base_url['url_name']}")
     return all_shoes
 
@@ -2427,6 +2446,26 @@ async def _shutdown_background_tasks(tasks):
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
 
+def _log_lyst_collection_stats(all_shoes, exchange_rates):
+    if not all_shoes and not LYST_RUN_FAILED:
+        mark_lyst_issue("0 items scraped")
+
+    collected_ids = {shoe['unique_id'] for shoe in all_shoes}
+    recovered_count = sum(1 for uid in SKIPPED_ITEMS if uid in collected_ids)
+    special_logger.stat(f"Items skipped due to image but present in final list: {recovered_count}/{len(SKIPPED_ITEMS)}")
+
+    unfiltered_len = len(all_shoes)
+    all_shoes = filter_duplicates(all_shoes, exchange_rates)
+    special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
+    return all_shoes
+
+def _finalize_lyst_cycle(issue=None, error=None):
+    if error is not None:
+        logger.error(f"Lyst run failed: {error}")
+    if issue is not None:
+        mark_lyst_issue(issue)
+    finalize_lyst_run()
+
 async def run_lyst_cycle_impl(message_queue):
     global LYST_LAST_PROGRESS_TS, LYST_ACTIVE_TASK
     LYST_ACTIVE_TASK = asyncio.current_task()
@@ -2444,16 +2483,7 @@ async def run_lyst_cycle_impl(message_queue):
         ]
         url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
         all_shoes = _collect_successful_lyst_results(url_results)
-        if not all_shoes and not LYST_RUN_FAILED:
-            mark_lyst_issue("0 items scraped")
-
-        collected_ids = {shoe['unique_id'] for shoe in all_shoes}
-        recovered_count = sum(1 for uid in SKIPPED_ITEMS if uid in collected_ids)
-        special_logger.stat(f"Items skipped due to image but present in final list: {recovered_count}/{len(SKIPPED_ITEMS)}")
-
-        unfiltered_len = len(all_shoes)
-        all_shoes = filter_duplicates(all_shoes, exchange_rates)
-        special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
+        all_shoes = _log_lyst_collection_stats(all_shoes, exchange_rates)
 
         # Even when a later page aborts the run, keep already-scraped items. That is
         # the whole point of the fail-fast Cloudflare flow: stop new requests, but do
@@ -2461,19 +2491,16 @@ async def run_lyst_cycle_impl(message_queue):
         await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
         await _finalize_lyst_resume_state()
         _touch_lyst_progress("finalize_run")
-        finalize_lyst_run()
+        _finalize_lyst_cycle()
         logger.info("LYST run completed")
 
         print_statistics()
         print_link_statistics()
     except asyncio.CancelledError:
-        mark_lyst_issue("stalled")
-        finalize_lyst_run()
+        _finalize_lyst_cycle(issue="stalled")
         raise
     except Exception as exc:
-        logger.error(f"Lyst run failed: {exc}")
-        mark_lyst_issue("failed")
-        finalize_lyst_run()
+        _finalize_lyst_cycle(issue="failed", error=exc)
         raise
     finally:
         LYST_ACTIVE_TASK = None
