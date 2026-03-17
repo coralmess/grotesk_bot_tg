@@ -20,13 +20,7 @@ from useful_bot.exchange_rate_image import render_exchange_rate_card
 MONOBANK_RATES_URL = "https://minfin.com.ua/ua/company/monobank/currency/"
 STATE_FILE = RUNTIME_JSON_DIR / "useful_monobank_rates_state.json"
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
-CHECK_TIMES_KYIV = ((12, 0),)
-# Temporary switch for the hourly test behavior.
-# Set to False to keep original behavior (daily 12:00 check only).
-ENABLE_HOURLY_TEST_MODE = True
-TEST_MODE_DURATION_DAYS = 3
-TEST_MODE_INTERVAL = timedelta(hours=1)
-TEST_MODE_UNTIL_KEY = "test_mode_until"
+CHECK_HOURS_KYIV = tuple(range(8, 20))
 REQUEST_TIMEOUT_SECONDS = 20
 HISTORY_LIMIT = 600
 HTTP_HEADERS = {
@@ -57,24 +51,13 @@ class ExchangeRateHelper:
         self._state = self._load_state()
         self._lock = asyncio.Lock()
         self._monitor_task: Optional[asyncio.Task] = None
-        self._test_mode_until: Optional[datetime] = None
-        if ENABLE_HOURLY_TEST_MODE:
-            self._init_test_mode_window()
 
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CommandHandler("exchange_status", self.status_command))
         application.add_handler(CommandHandler("exchange_checknow", self.checknow_command))
 
     def start_lines(self) -> list[str]:
-        now_kyiv = datetime.now(KYIV_TZ)
-        if self._is_test_mode_active(now_kyiv) and self._test_mode_until is not None:
-            schedule_line = (
-                "Schedule: test mode hourly checks until "
-                f"{self._test_mode_until.strftime('%d.%m.%Y %H:%M')} (Kyiv)"
-            )
-        else:
-            schedule_line = "Schedule: once per day at 12:00 (Kyiv time)"
-
+        schedule_line = "Schedule: every hour from 08:00 to 19:00 (Kyiv time)"
         return [
             "Exchange rate helper",
             schedule_line,
@@ -346,53 +329,16 @@ class ExchangeRateHelper:
         return max(values) if values else None
 
     def _seconds_until_next_run(self, now: datetime) -> Tuple[float, datetime, str]:
-        if self._is_test_mode_active(now):
-            next_run = (now + TEST_MODE_INTERVAL).replace(minute=0, second=0, microsecond=0)
-            if next_run <= now:
-                next_run += TEST_MODE_INTERVAL
-            seconds = max(1.0, (next_run - now).total_seconds())
-            return seconds, next_run, "hourly-test"
-
         candidates = []
-        for hour, minute in CHECK_TIMES_KYIV:
-            candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        for hour in CHECK_HOURS_KYIV:
+            candidate = now.replace(hour=hour, minute=0, second=0, microsecond=0)
             if candidate <= now:
                 candidate += timedelta(days=1)
             candidates.append(candidate)
 
         next_run = min(candidates)
         seconds = max(1.0, (next_run - now).total_seconds())
-        return seconds, next_run, "daily"
-
-    def _init_test_mode_window(self) -> None:
-        if not ENABLE_HOURLY_TEST_MODE:
-            self._test_mode_until = None
-            return
-
-        now_kyiv = datetime.now(KYIV_TZ)
-        raw_until = self._state.get(TEST_MODE_UNTIL_KEY)
-        if isinstance(raw_until, str):
-            try:
-                parsed = datetime.fromisoformat(raw_until)
-                if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=KYIV_TZ)
-                parsed_kyiv = parsed.astimezone(KYIV_TZ)
-                if parsed_kyiv > now_kyiv:
-                    self._test_mode_until = parsed_kyiv
-                    return
-            except ValueError:
-                pass
-
-        self._test_mode_until = now_kyiv + timedelta(days=TEST_MODE_DURATION_DAYS)
-        self._state[TEST_MODE_UNTIL_KEY] = self._test_mode_until.isoformat(timespec="seconds")
-        self._save_state()
-        logging.info(
-            "Exchange-rate test mode enabled until %s",
-            self._test_mode_until.strftime("%Y-%m-%d %H:%M:%S %Z"),
-        )
-
-    def _is_test_mode_active(self, now: datetime) -> bool:
-        return ENABLE_HOURLY_TEST_MODE and self._test_mode_until is not None and now < self._test_mode_until
+        return seconds, next_run, "hourly-window"
 
     def _load_state(self) -> Dict[str, Any]:
         if not STATE_FILE.exists():
@@ -403,7 +349,6 @@ class ExchangeRateHelper:
                 return {
                     "last_snapshot": data.get("last_snapshot"),
                     "history": data.get("history", []),
-                    TEST_MODE_UNTIL_KEY: data.get(TEST_MODE_UNTIL_KEY),
                 }
         except Exception:
             logging.exception("Could not load state from %s", STATE_FILE)
