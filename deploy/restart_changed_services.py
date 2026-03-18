@@ -16,10 +16,11 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Keep rules explicit. For tsekbot we only restart when its own code changes or
-# when shared config values it imports from config.py change.
+# Keep rules explicit. Each service restart should be tied only to files that
+# can actually change its runtime behavior after a pull.
 SERVICE_RULES = {
     "tsekbot.service": ("config.py", "tsek_bot/"),
+    "usefulbot.service": ("useful_bot/", "usefulbot.service"),
 }
 
 
