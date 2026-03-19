@@ -132,6 +132,8 @@ LYST_RESUME_LOCK = asyncio.Lock()
 LYST_ABORT_EVENT = asyncio.Event()
 LYST_RUN_FAILED = False
 LYST_RUN_PROGRESS = {}
+LYST_CYCLE_STARTED_IN_RESUME = False
+LYST_RESUME_ENTRY_OUTCOMES = {}
 LYST_HTTP_ONLY_ENABLED = LYST_HTTP_ONLY
 LYST_HTTP_ONLY_DISABLE_REASON = ""
 
@@ -419,13 +421,15 @@ async def update_lyst_resume_entry(key, **fields):
     )
 
 def init_lyst_resume_state():
-    global LYST_RESUME_STATE, LYST_RUN_FAILED, LYST_RUN_PROGRESS
+    global LYST_RESUME_STATE, LYST_RUN_FAILED, LYST_RUN_PROGRESS, LYST_CYCLE_STARTED_IN_RESUME, LYST_RESUME_ENTRY_OUTCOMES
     # Wrapper keeps old API while shared helper owns the state-reset rules.
     loaded_state = load_lyst_resume_state()
     LYST_RESUME_STATE, LYST_RUN_FAILED, LYST_RUN_PROGRESS = lyst_state_helpers.init_resume_state(
         loaded_state=loaded_state,
         abort_event=LYST_ABORT_EVENT,
     )
+    LYST_CYCLE_STARTED_IN_RESUME = bool(LYST_RESUME_STATE.get("resume_active", False))
+    LYST_RESUME_ENTRY_OUTCOMES = {}
 
 async def mark_lyst_run_failed(reason: str):
     global LYST_RUN_FAILED
@@ -1887,6 +1891,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
         logger.info(f"Skipping {url_name} for {country} (completed in previous run)")
         return all_shoes
     page = entry.get("next_page", 1) if resume_active else 1
+    started_from_resume_page = bool(resume_active and use_pagination and page > 1)
     last_scraped_page = entry.get("last_scraped_page", entry.get("last_success_page", 0))
     if use_pagination and page > 1:
         logger.info(f"Resuming {url_name} for {country} from page {page}")
@@ -1920,6 +1925,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             status=status,
         )
         if status == "cloudflare":
+            LYST_RESUME_ENTRY_OUTCOMES[key] = "cloudflare"
             logger.error(f"Cloudflare challenge for {url_name} {country} page {page}")
             # Status tracking must record this as a failed run; otherwise the bot can
             # show a green last-run marker even though resume state says we aborted.
@@ -1936,9 +1942,11 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             log_lyst_run_progress_summary()
             break
         if status == "aborted":
+            LYST_RESUME_ENTRY_OUTCOMES[key] = "aborted"
             logger.info(f"Aborting {url_name} for {country} after Lyst run abort signal")
             break
         if status == "failed":
+            LYST_RESUME_ENTRY_OUTCOMES[key] = "failed"
             logger.error(f"Failed to fetch page for {url_name} {country} page {page}")
             await _update_resume_with_url(
                 key,
@@ -1953,6 +1961,10 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             break
         if status == "terminal":
             logger.info(f"{url_name} for {country} reached terminal page {page} (HTTP 410)")
+            if started_from_resume_page and not all_shoes:
+                LYST_RESUME_ENTRY_OUTCOMES[key] = "terminal_only_resume"
+            else:
+                LYST_RESUME_ENTRY_OUTCOMES[key] = "terminal"
             await _update_resume_with_url(
                 key,
                 url,
@@ -1962,6 +1974,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             )
             break
         if not shoes:
+            LYST_RESUME_ENTRY_OUTCOMES[key] = "empty"
             if use_pagination and page < 3:
                 logger.error(f"{url_name} for {country} Stopped too early. Please check for errors")
                 mark_lyst_issue("Stopped too early")
@@ -1996,6 +2009,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             )
             break
         all_shoes.extend(shoes)
+        LYST_RESUME_ENTRY_OUTCOMES[key] = "scraped"
         LYST_RUN_PROGRESS[key] = page
         last_scraped_page = page
         await _update_resume_with_url(
@@ -2407,6 +2421,14 @@ def _collect_successful_lyst_results(url_results):
         all_shoes.extend(result)
     return all_shoes
 
+
+def _should_restart_after_terminal_resume(all_shoes):
+    if all_shoes or not LYST_CYCLE_STARTED_IN_RESUME:
+        return False
+    if not LYST_RESUME_ENTRY_OUTCOMES:
+        return False
+    return all(outcome == "terminal_only_resume" for outcome in LYST_RESUME_ENTRY_OUTCOMES.values())
+
 async def _clear_lyst_resume_state():
     async with LYST_RESUME_LOCK:
         LYST_RESUME_STATE["resume_active"] = False
@@ -2467,7 +2489,7 @@ def _finalize_lyst_cycle(issue=None, error=None):
     finalize_lyst_run()
 
 async def run_lyst_cycle_impl(message_queue):
-    global LYST_LAST_PROGRESS_TS, LYST_ACTIVE_TASK
+    global LYST_LAST_PROGRESS_TS, LYST_ACTIVE_TASK, LYST_CYCLE_STARTED_IN_RESUME, LYST_RESUME_ENTRY_OUTCOMES
     LYST_ACTIVE_TASK = asyncio.current_task()
     init_lyst_resume_state()
     SKIPPED_ITEMS.clear()
@@ -2477,12 +2499,31 @@ async def run_lyst_cycle_impl(message_queue):
     try:
         old_data = await load_shoe_data()
         exchange_rates = load_exchange_rates()
-        url_tasks = [
-            asyncio.wait_for(process_url(base_url, COUNTRIES, exchange_rates), timeout=LYST_URL_TIMEOUT_SEC)
-            for base_url in BASE_URLS
-        ]
-        url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
-        all_shoes = _collect_successful_lyst_results(url_results)
+
+        async def _run_lyst_url_batch():
+            url_tasks = [
+                asyncio.wait_for(process_url(base_url, COUNTRIES, exchange_rates), timeout=LYST_URL_TIMEOUT_SEC)
+                for base_url in BASE_URLS
+            ]
+            url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
+            return _collect_successful_lyst_results(url_results)
+
+        all_shoes = await _run_lyst_url_batch()
+        # When a stale resume state points only at already-finished pages, every URL
+        # can cleanly return HTTP 410 with 0 items. That is resume cleanup, not a real
+        # empty-catalog run. Clear resume state and immediately rerun once from page 1
+        # before any "0 items" status or inactive-item marking can fire.
+        if _should_restart_after_terminal_resume(all_shoes):
+            logger.warning(
+                "LYST resume pass reached only terminal pages with 0 items; "
+                "clearing resume state and restarting once from page 1"
+            )
+            await _clear_lyst_resume_state()
+            LYST_RUN_PROGRESS.clear()
+            LYST_CYCLE_STARTED_IN_RESUME = False
+            LYST_RESUME_ENTRY_OUTCOMES = {}
+            all_shoes = await _run_lyst_url_batch()
+
         all_shoes = _log_lyst_collection_stats(all_shoes, exchange_rates)
 
         # Even when a later page aborts the run, keep already-scraped items. That is
