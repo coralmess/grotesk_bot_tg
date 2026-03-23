@@ -1208,5 +1208,53 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/dom-i-sad/q-Hepp/?currency=UAH&search%5Bfilter_float_price:to%5D=3000",
         "url_name": "Hepp"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/predmety-interera/q-Porthault/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Porthault"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/predmety-interera/q-Quagliotti/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Quagliotti"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Namesake/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Namesake"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-Wendelbo/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Wendelbo"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Omar-Afridi/?search%5Border%5D=created_at:desc",
+        "url_name": "Omar Afridi"
+    },
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/mebel/q-Camerich/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Camerich"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Hamilton-Hare/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Hamilton Hare"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Mack-Weldon/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Mack Weldon"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Raccagni/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Raccagni"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskaya-odezhda/q-sea-island/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Sea Island"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Baby-Cashmere/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Baby Cashmere"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Cobrax/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Cobrax"
     }
 ]

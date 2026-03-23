@@ -792,5 +792,45 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/clothes?search_text=Phigvel&sort=4",
         "url_name": "Phigvel"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Namesake&sort=4",
+        "url_name": "Namesake"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/obuv?search_text=Vandevorst",
+        "url_name": "Vandevorst"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Omar%20Afridi&sort=4",
+        "url_name": "Omar Afridi"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Christian%20Dada&sort=4",
+        "url_name": "Christian Dada"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/nizhnee-bele/trusy?search_text=%20La%20Perla",
+        "url_name": "La Perla"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/nizhnee-bele/trusy?conditions=1&search_text=Schiesser%20&sort=4",
+        "url_name": "Schiesser"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=%20Hamilton%20Hare&sort=4",
+        "url_name": "Hamilton Hare"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Mack%20Weldon&sort=4",
+        "url_name": "Mack Weldon"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Raccagni&sort=4",
+        "url_name": "Raccagni"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/nizhnee-bele?conditions=2&conditions=1&search_text=Hanro&sizes=149&sort=4",
+        "url_name": "Hanro"
     }
 ]

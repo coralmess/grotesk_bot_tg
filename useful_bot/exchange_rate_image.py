@@ -521,22 +521,20 @@ def _draw_stats_row(
             anchor="mt",
         )
 
-    # ── 4. White "today" marker on the min–max line ──────────────────
+    # ── 4. White "today" marker on the min–avg–max line ──────────────
     if (
         current_val is not None
         and min_val is not None
         and max_val is not None
         and len(positions) >= 2
     ):
-        lo_x = positions[0]   # pixel x of min
-        hi_x = positions[-1]  # pixel x of max
-        span = max_val - min_val
-        if span > 0:
-            t = (current_val - min_val) / span
-        else:
-            t = 0.5
-        t = max(0.0, min(1.0, t))  # clamp
-        mark_x = int(lo_x + t * (hi_x - lo_x))
+        mark_x = _compute_stats_marker_x(
+            min_val=min_val,
+            avg_val=avg_val,
+            max_val=max_val,
+            current_val=current_val,
+            positions=positions,
+        )
 
         tick_half = 8  # half-height of the vertical tick
         draw.line(
@@ -544,6 +542,51 @@ def _draw_stats_row(
             fill=TODAY_MARKER_COLOR,
             width=2,
         )
+
+
+def _compute_stats_marker_x(
+    *,
+    min_val: float,
+    avg_val: Optional[float],
+    max_val: float,
+    current_val: float,
+    positions: list[int],
+) -> int:
+    # The chart gives avg its own visual midpoint, so marker placement must be
+    # piecewise: min→avg for values on the left half, avg→max for values on the
+    # right half. A single min→max interpolation can put a value that is above
+    # avg to the left of the avg dot when the numeric range is skewed.
+    if avg_val is not None and len(positions) >= 3:
+        min_x = positions[0]
+        avg_x = positions[1]
+        max_x = positions[-1]
+
+        if current_val <= avg_val:
+            span = avg_val - min_val
+            if span > 0:
+                t = (current_val - min_val) / span
+            else:
+                t = 1.0
+            t = max(0.0, min(1.0, t))
+            return round(min_x + t * (avg_x - min_x))
+
+        span = max_val - avg_val
+        if span > 0:
+            t = (current_val - avg_val) / span
+        else:
+            t = 0.0
+        t = max(0.0, min(1.0, t))
+        return round(avg_x + t * (max_x - avg_x))
+
+    lo_x = positions[0]
+    hi_x = positions[-1]
+    span = max_val - min_val
+    if span > 0:
+        t = (current_val - min_val) / span
+    else:
+        t = 0.5
+    t = max(0.0, min(1.0, t))
+    return round(lo_x + t * (hi_x - lo_x))
 
 
 def _draw_metrics_panel(
