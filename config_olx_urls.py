@@ -1256,5 +1256,17 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Cobrax/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Cobrax"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskoe-bele-plavki/noski/q-Bresciani/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Bresciani"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskoe-bele-plavki/noski/q-Mazarin/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Mazarin"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskoe-bele-plavki/noski/q-Pantherella/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Pantherella"
     }
 ]

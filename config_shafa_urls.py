@@ -832,5 +832,21 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/men/nizhnee-bele?conditions=2&conditions=1&search_text=Hanro&sizes=149&sort=4",
         "url_name": "Hanro"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Bresciani&sort=4",
+        "url_name": "Bresciani"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/nizhnee-bele/noski?search_text=Mazarin%20&sort=4",
+        "url_name": "Mazarin"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/nizhnee-bele/noski?search_text=Pantherella%20%20&sort=4",
+        "url_name": "Pantherella"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?conditions=1&search_text=Falke&sizes=242&sizes=177&sizes=241&sizes=240&sizes=175&sizes=176&sort=4",
+        "url_name": "Falke"
     }
 ]
