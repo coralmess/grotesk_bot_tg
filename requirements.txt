@@ -9,5 +9,7 @@ playwright>=1.40.0
 colorama>=0.4.6,<1.0
 requests>=2.31.0,<3.0
 python-dotenv>=1.0.0,<2.0
+ibapi>=9.81.1.post1,<10.0
+yfinance>=0.2.54,<1.0
 opencv-contrib-python>=4.8
 numpy>=1.24

@@ -13,6 +13,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from useful_bot.exchange_rate_helper import ExchangeRateHelper
+from useful_bot.ibkr_portfolio_helper import IBKRPortfolioHelper
 
 
 class UsefulHelper(Protocol):
@@ -78,6 +79,7 @@ def build_application() -> Application:
 
     helpers: list[UsefulHelper] = [
         ExchangeRateHelper(chat_id=chat_id),
+        IBKRPortfolioHelper(chat_id=chat_id),
     ]
 
     index = UsefulBotIndex(helpers=helpers)
