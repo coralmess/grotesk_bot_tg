@@ -669,6 +669,33 @@ class IBKRPortfolioHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(app.bot.sent_photos), 1)
         self.assertEqual(helper._last_trade_date(), "2026-03-23")
 
+    async def test_run_check_renders_via_worker_thread(self) -> None:
+        app = FakeApplication()
+        snapshot = make_snapshot()
+        thread_handoff = {"called": False}
+
+        async def fake_to_thread(func, *args, **kwargs):
+            thread_handoff["called"] = True
+            return func(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            helper = IBKRPortfolioHelper(
+                chat_id=328968480,
+                snapshot_fetcher=lambda settings, now_ny: snapshot,
+                settings_factory=make_settings,
+                now_provider=lambda tz: datetime(2026, 3, 23, 16, 31, tzinfo=tz),
+                state_file=Path(temp_dir) / "ibkr_state.json",
+            )
+            with patch(
+                "useful_bot.ibkr_portfolio_helper.render_ibkr_portfolio_card",
+                return_value=io.BytesIO(b"fake-image"),
+            ), patch("useful_bot.ibkr_portfolio_helper.asyncio.to_thread", side_effect=fake_to_thread):
+                sent = await helper._run_check(app, reason="manual", force=True)
+
+        self.assertTrue(sent)
+        self.assertTrue(thread_handoff["called"])
+        self.assertEqual(len(app.bot.sent_photos), 1)
+
     async def test_run_check_skips_before_close(self) -> None:
         app = FakeApplication()
         calls = {"count": 0}

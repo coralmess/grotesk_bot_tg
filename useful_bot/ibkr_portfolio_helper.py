@@ -239,7 +239,8 @@ class IBKRPortfolioHelper:
                 )
                 return False
 
-            image_buf = render_ibkr_portfolio_card(
+            image_buf = await asyncio.to_thread(
+                render_ibkr_portfolio_card,
                 snapshot=snapshot,
                 previous_snapshot=previous_snapshot,
             )
