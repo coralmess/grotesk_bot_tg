@@ -116,6 +116,36 @@ class TradeSnapshot:
             return cash_spent
         return None
 
+    @property
+    def is_equity_sell(self) -> bool:
+        return self.buy_sell.upper() == "SELL" and self.sec_type.upper() in {"STK", "ETF"}
+
+    @property
+    def cash_received(self) -> Optional[float]:
+        if not self.is_equity_sell:
+            return None
+        if self.net_cash is not None and abs(self.net_cash) > 1e-9:
+            return abs(self.net_cash)
+
+        if self.proceeds is not None:
+            cash_received = abs(self.proceeds)
+            if self.commission is not None:
+                cash_received -= abs(self.commission)
+            return max(cash_received, 0.0)
+
+        if self.trade_money is not None:
+            cash_received = abs(self.trade_money)
+            if self.commission is not None:
+                cash_received -= abs(self.commission)
+            return max(cash_received, 0.0)
+
+        if self.trade_price is not None and abs(self.quantity) > 1e-9:
+            cash_received = abs(self.trade_price * self.quantity)
+            if self.commission is not None:
+                cash_received -= abs(self.commission)
+            return max(cash_received, 0.0)
+        return None
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -150,10 +180,12 @@ class PortfolioSnapshot:
     positions: list[PositionSnapshot]
     daily_data_complete: bool
     trades: list[TradeSnapshot]
+    cash_events: list[dict[str, Any]]
     corporate_actions: list[dict[str, Any]]
     source_from_date: str = ""
     source_to_date: str = ""
     source_period: str = ""
+    qqqm_total_diff: Optional[float] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -167,10 +199,12 @@ class PortfolioSnapshot:
             "daily_data_complete": self.daily_data_complete,
             "positions": [position.to_dict() for position in self.positions],
             "trades": [trade.to_dict() for trade in self.trades],
+            "cash_events": self.cash_events,
             "corporate_actions": self.corporate_actions,
             "source_from_date": self.source_from_date,
             "source_to_date": self.source_to_date,
             "source_period": self.source_period,
+            "qqqm_total_diff": self.qqqm_total_diff,
         }
 
     @classmethod
@@ -181,6 +215,9 @@ class PortfolioSnapshot:
         trades = data.get("trades", [])
         if not isinstance(trades, list):
             trades = []
+        cash_events = data.get("cash_events", [])
+        if not isinstance(cash_events, list):
+            cash_events = []
         corporate_actions = data.get("corporate_actions", [])
         if not isinstance(corporate_actions, list):
             corporate_actions = []
@@ -195,10 +232,12 @@ class PortfolioSnapshot:
             positions=[PositionSnapshot.from_dict(item) for item in positions if isinstance(item, dict)],
             daily_data_complete=bool(data.get("daily_data_complete", False)),
             trades=[TradeSnapshot.from_dict(item) for item in trades if isinstance(item, dict)],
+            cash_events=[item for item in cash_events if isinstance(item, dict)],
             corporate_actions=[item for item in corporate_actions if isinstance(item, dict)],
             source_from_date=str(data.get("source_from_date", "")),
             source_to_date=str(data.get("source_to_date", "")),
             source_period=str(data.get("source_period", "")),
+            qqqm_total_diff=coerce_optional_float(data.get("qqqm_total_diff")),
         )
 
 
@@ -238,10 +277,12 @@ def build_portfolio_snapshot(
     raw_positions: Iterable[dict[str, Any]],
     nav_starting_value: Optional[float] = None,
     raw_trades: Iterable[dict[str, Any]] = (),
+    raw_cash_events: Iterable[dict[str, Any]] = (),
     raw_corporate_actions: Iterable[dict[str, Any]] = (),
     source_from_date: str = "",
     source_to_date: str = "",
     source_period: str = "",
+    qqqm_total_diff: Optional[float] = None,
 ) -> PortfolioSnapshot:
     positions: list[PositionSnapshot] = []
     for raw_position in raw_positions:
@@ -304,6 +345,16 @@ def build_portfolio_snapshot(
             )
         )
 
+    cash_events = [item for item in raw_cash_events if isinstance(item, dict) and str(item.get("event_date", "")).strip()]
+    cash_events.sort(
+        key=lambda item: (
+            str(item.get("event_date", "")),
+            str(item.get("section", "")),
+            str(item.get("description", "")),
+            float(coerce_optional_float(item.get("amount")) or 0.0),
+        )
+    )
+
     positions.sort(key=lambda item: item.symbol)
     trades.sort(key=lambda item: (item.trade_date, item.symbol, item.con_id, item.quantity))
     total_unrealized_pnl = sum(position.unrealized_pnl for position in positions)
@@ -319,10 +370,12 @@ def build_portfolio_snapshot(
         positions=positions,
         daily_data_complete=daily_data_complete,
         trades=trades,
+        cash_events=cash_events,
         corporate_actions=[item for item in raw_corporate_actions if isinstance(item, dict)],
         source_from_date=source_from_date,
         source_to_date=source_to_date,
         source_period=source_period,
+        qqqm_total_diff=qqqm_total_diff,
     )
 
 

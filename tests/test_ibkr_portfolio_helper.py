@@ -26,7 +26,8 @@ from useful_bot.ibkr_portfolio_image import (
     RENDER_STYLE_VERSION,
     _build_portfolio_html,
     _qqqm_hypothetical_pnl,
-    _qqqm_ytd_difference,
+    compute_qqqm_total_diff,
+    initialize_qqqm_benchmark_baseline,
     render_ibkr_portfolio_card,
 )
 
@@ -65,6 +66,12 @@ FLEX_STATEMENT_WITH_TRADES_SAMPLE = """\
         <Trade transactionType="ExchTrade" buySell="BUY" assetCategory="STK" accountId="U20984427" currency="USD" symbol="AAPL" conid="265598" reportDate="20240103" tradeDate="20240103" quantity="5" tradePrice="180" tradeMoney="900" ibCommission="-1" netCash="-901" proceeds="900" />
         <Trade transactionType="ExchTrade" buySell="SELL" assetCategory="STK" accountId="U20984427" currency="USD" symbol="MSFT" conid="272093" reportDate="20240105" tradeDate="20240105" quantity="-2" tradePrice="400" tradeMoney="-800" ibCommission="-1" netCash="799" proceeds="800" />
       </Trades>
+      <CashTransactions>
+        <CashTransaction accountId="U20984427" currency="USD" reportDate="20240104" type="Deposits &amp; Withdrawals" description="Deposit" amount="250" />
+      </CashTransactions>
+      <Transfers>
+        <Transfer accountId="U20984427" currency="USD" reportDate="20240106" type="Transfer" description="Transfer Out" amount="-100" />
+      </Transfers>
       <CorporateActions>
         <CorporateAction accountId="U20984427" assetCategory="STK" symbol="AAPL" conid="265598" reportDate="20240201" description="Split" proceeds="0" />
       </CorporateActions>
@@ -202,10 +209,12 @@ def make_snapshot(
     cash_value: float = 25000.0,
     raw_positions=None,
     raw_trades=(),
+    raw_cash_events=(),
     raw_corporate_actions=(),
     source_from_date: str = "",
     source_to_date: str = "",
     source_period: str = "",
+    qqqm_total_diff: float | None = None,
 ):
     if raw_positions is None:
         raw_positions = [
@@ -241,10 +250,12 @@ def make_snapshot(
         cash_value=cash_value,
         raw_positions=raw_positions,
         raw_trades=raw_trades,
+        raw_cash_events=raw_cash_events,
         raw_corporate_actions=raw_corporate_actions,
         source_from_date=source_from_date,
         source_to_date=source_to_date,
         source_period=source_period,
+        qqqm_total_diff=qqqm_total_diff,
     )
 
 
@@ -338,6 +349,10 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
         self.assertEqual(snapshot.trades[0].buy_sell, "BUY")
         self.assertAlmostEqual(snapshot.trades[0].cash_spent or 0.0, 901.0)
         self.assertEqual(snapshot.trades[1].buy_sell, "SELL")
+        self.assertEqual(len(snapshot.cash_events), 2)
+        self.assertEqual(snapshot.cash_events[0]["event_date"], "2024-01-04")
+        self.assertAlmostEqual(snapshot.cash_events[0]["amount"], 250.0)
+        self.assertEqual(snapshot.cash_events[1]["section"], "Transfers")
         self.assertEqual(len(snapshot.corporate_actions), 1)
 
     def test_build_portfolio_snapshot_filters_and_normalizes_positions(self) -> None:
@@ -462,181 +477,171 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
         self.assertGreater(seconds, 0.0)
         self.assertEqual(next_run.date().isoformat(), "2026-03-24")
 
-    def test_qqqm_values_use_yfinance_quote_and_ytd_difference(self) -> None:
+    def test_qqqm_values_use_yfinance_quote_and_total_difference(self) -> None:
         snapshot = make_snapshot(
-            raw_positions=[
+            trade_date="2026-03-23",
+            net_liquidation=105000.0,
+            raw_trades=[
                 {
                     "symbol": "AAPL",
                     "con_id": 1,
                     "sec_type": "STK",
-                    "quantity": 10,
-                    "market_price": 210.0,
-                    "market_value": 2100.0,
-                    "average_cost": 150.0,
-                    "unrealized_pnl": 600.0,
-                    "daily_pnl": 42.0,
+                    "trade_date": "2026-03-21",
+                    "buy_sell": "BUY",
+                    "quantity": 1,
+                    "trade_price": 549.0,
+                    "trade_money": 549.0,
+                    "net_cash": -550.0,
+                    "commission": -1.0,
                 },
                 {
                     "symbol": "MSFT",
                     "con_id": 2,
                     "sec_type": "STK",
-                    "quantity": 5,
-                    "market_price": 420.0,
-                    "market_value": 2100.0,
-                    "average_cost": 390.0,
-                    "unrealized_pnl": 150.0,
-                    "daily_pnl": -21.0,
+                    "trade_date": "2026-03-23",
+                    "buy_sell": "SELL",
+                    "quantity": -1,
+                    "trade_price": 221.0,
+                    "trade_money": -221.0,
+                    "proceeds": 221.0,
+                    "net_cash": 220.0,
+                    "commission": -1.0,
                 },
             ],
-            nav_starting_value=80000.0,
-            net_liquidation=100000.0,
-            source_from_date="2026-01-01",
-            source_to_date="2026-03-23",
-            source_period="YearToDate",
+            raw_cash_events=[
+                {
+                    "event_date": "2026-03-23",
+                    "amount": 110.0,
+                    "section": "CashTransactions",
+                    "description": "Dividend",
+                }
+            ],
         )
         benchmark = QQQMBenchmarkQuote(current_price=210.0, prior_close=200.0, daily_return_pct=5.0)
-        close_history = QQQMCloseHistory(latest_close=220.0, close_by_date={"2026-01-02": 200.0, "2026-03-23": 220.0})
-        end_closes = {"AAPL": 210.0, "MSFT": 420.0}
+        close_history = QQQMCloseHistory(
+            latest_close=110.0,
+            close_by_date={"2026-03-20": 100.0, "2026-03-23": 110.0},
+        )
 
         with patch("useful_bot.ibkr_portfolio_image._fetch_qqqm_benchmark_quote", return_value=benchmark), patch(
             "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
             return_value=close_history,
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_position_end_closes",
-            return_value=end_closes,
         ):
             qqqm_pnl = _qqqm_hypothetical_pnl(snapshot)
-            qqqm_ytd_difference = _qqqm_ytd_difference(snapshot)
+            qqqm_total_difference = compute_qqqm_total_diff(
+                snapshot,
+                baseline_trade_date="2026-03-20",
+                baseline_net_liquidation=100000.0,
+                baseline_qqqm_start_close=100.0,
+            )
 
-        self.assertAlmostEqual(qqqm_pnl, 5000.0)
-        self.assertAlmostEqual(qqqm_ytd_difference, -58800.0)
+        self.assertAlmostEqual(qqqm_pnl, 5250.0)
+        self.assertAlmostEqual(qqqm_total_difference, -5110.0)
 
     def test_qqqm_values_return_none_when_quote_is_unavailable(self) -> None:
-        snapshot = make_snapshot(
-            nav_starting_value=80000.0,
-            source_from_date="2026-01-01",
-            source_to_date="2026-03-23",
-            source_period="YearToDate",
-        )
+        snapshot = make_snapshot()
 
         with patch("useful_bot.ibkr_portfolio_image._fetch_qqqm_benchmark_quote", return_value=None), patch(
             "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
             return_value=None,
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_position_end_closes",
-            return_value=None,
         ):
             qqqm_pnl = _qqqm_hypothetical_pnl(snapshot)
-            qqqm_ytd_difference = _qqqm_ytd_difference(snapshot)
+            baseline = initialize_qqqm_benchmark_baseline(snapshot)
 
         self.assertIsNone(qqqm_pnl)
-        self.assertIsNone(qqqm_ytd_difference)
+        self.assertIsNone(baseline)
 
-    def test_qqqm_ytd_difference_returns_none_when_nav_start_is_missing(self) -> None:
-        snapshot = make_snapshot(
-            nav_starting_value=None,
-            source_from_date="2026-01-01",
-            source_to_date="2026-03-23",
-            source_period="YearToDate",
-        )
+    def test_initialize_qqqm_benchmark_baseline_uses_first_available_close(self) -> None:
+        snapshot = make_snapshot(trade_date="2026-03-23", net_liquidation=95000.0)
 
         with patch(
             "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
-            return_value=QQQMCloseHistory(latest_close=220.0, close_by_date={"2026-01-02": 200.0, "2026-03-23": 220.0}),
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_position_end_closes",
-            return_value={"AAPL": 210.0, "MSFT": 420.0},
+            return_value=QQQMCloseHistory(latest_close=101.0, close_by_date={"2026-03-23": 101.0}),
         ):
-            qqqm_ytd_difference = _qqqm_ytd_difference(snapshot)
+            baseline = initialize_qqqm_benchmark_baseline(snapshot)
 
-        self.assertIsNone(qqqm_ytd_difference)
+        self.assertIsNotNone(baseline)
+        self.assertEqual(baseline["trade_date"], "2026-03-23")
+        self.assertAlmostEqual(float(baseline["net_liquidation"]), 95000.0)
+        self.assertAlmostEqual(float(baseline["qqqm_start_close"]), 101.0)
 
-    def test_qqqm_ytd_difference_returns_none_when_range_has_no_qqqm_close(self) -> None:
-        snapshot = make_snapshot(
-            nav_starting_value=80000.0,
-            source_from_date="2026-01-01",
-            source_to_date="2026-03-23",
-            source_period="YearToDate",
-        )
+    def test_qqqm_total_difference_returns_none_when_close_history_is_missing(self) -> None:
+        snapshot = make_snapshot()
 
         with patch(
             "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
-            return_value=QQQMCloseHistory(latest_close=220.0, close_by_date={}),
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_position_end_closes",
-            return_value={"AAPL": 210.0, "MSFT": 420.0},
-        ):
-            qqqm_ytd_difference = _qqqm_ytd_difference(snapshot)
-
-        self.assertIsNone(qqqm_ytd_difference)
-
-    def test_qqqm_ytd_difference_returns_none_when_portfolio_end_closes_are_missing(self) -> None:
-        snapshot = make_snapshot(
-            nav_starting_value=80000.0,
-            source_from_date="2026-01-01",
-            source_to_date="2026-03-23",
-            source_period="YearToDate",
-        )
-
-        with patch(
-            "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
-            return_value=QQQMCloseHistory(latest_close=220.0, close_by_date={"2026-01-02": 200.0, "2026-03-23": 220.0}),
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_position_end_closes",
             return_value=None,
         ):
-            qqqm_ytd_difference = _qqqm_ytd_difference(snapshot)
+            qqqm_total_difference = compute_qqqm_total_diff(
+                snapshot,
+                baseline_trade_date="2026-03-20",
+                baseline_net_liquidation=100000.0,
+                baseline_qqqm_start_close=100.0,
+            )
 
-        self.assertIsNone(qqqm_ytd_difference)
+        self.assertIsNone(qqqm_total_difference)
+
+    def test_qqqm_total_difference_returns_none_when_trade_price_lookup_is_missing(self) -> None:
+        snapshot = make_snapshot(
+            trade_date="2026-03-23",
+            raw_trades=[
+                {
+                    "symbol": "AAPL",
+                    "con_id": 1,
+                    "sec_type": "STK",
+                    "trade_date": "2026-03-21",
+                    "buy_sell": "BUY",
+                    "quantity": 1,
+                    "trade_price": 549.0,
+                    "trade_money": 549.0,
+                    "net_cash": -550.0,
+                    "commission": -1.0,
+                }
+            ],
+        )
+
+        with patch(
+            "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
+            return_value=QQQMCloseHistory(latest_close=110.0, close_by_date={"2026-03-20": 100.0}),
+        ):
+            qqqm_total_difference = compute_qqqm_total_diff(
+                snapshot,
+                baseline_trade_date="2026-03-20",
+                baseline_net_liquidation=100000.0,
+                baseline_qqqm_start_close=100.0,
+            )
+
+        self.assertIsNone(qqqm_total_difference)
 
     def test_build_portfolio_html_renders_positive_negative_and_missing_qqqm_proxy_states(self) -> None:
         snapshot = make_snapshot(
-            nav_starting_value=80000.0,
             net_liquidation=100000.0,
-            source_from_date="2026-01-01",
-            source_to_date="2026-03-23",
-            source_period="YearToDate",
+            qqqm_total_diff=1250.0,
         )
 
         with patch(
             "useful_bot.ibkr_portfolio_image._fetch_qqqm_benchmark_quote",
             return_value=QQQMBenchmarkQuote(current_price=210.0, prior_close=200.0, daily_return_pct=5.0),
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
-            return_value=QQQMCloseHistory(latest_close=220.0, close_by_date={"2026-01-02": 200.0, "2026-03-23": 220.0}),
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_position_end_closes",
-            return_value={"AAPL": 210.0, "MSFT": 420.0},
         ):
             positive_html = _build_portfolio_html(snapshot=snapshot, previous_snapshot=None)
 
+        negative_snapshot = make_snapshot(net_liquidation=100000.0, qqqm_total_diff=-4200.0)
         with patch(
             "useful_bot.ibkr_portfolio_image._fetch_qqqm_benchmark_quote",
             return_value=QQQMBenchmarkQuote(current_price=190.0, prior_close=200.0, daily_return_pct=-5.0),
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
-            return_value=QQQMCloseHistory(latest_close=260.0, close_by_date={"2026-01-02": 200.0, "2026-03-23": 260.0}),
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_position_end_closes",
-            return_value={"AAPL": 210.0, "MSFT": 420.0},
         ):
-            negative_html = _build_portfolio_html(snapshot=snapshot, previous_snapshot=None)
+            negative_html = _build_portfolio_html(snapshot=negative_snapshot, previous_snapshot=None)
 
-        with patch("useful_bot.ibkr_portfolio_image._fetch_qqqm_benchmark_quote", return_value=None), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
-            return_value=None,
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_position_end_closes",
-            return_value=None,
-        ):
-            missing_html = _build_portfolio_html(snapshot=snapshot, previous_snapshot=None)
+        missing_snapshot = make_snapshot(net_liquidation=100000.0, qqqm_total_diff=None)
+        with patch("useful_bot.ibkr_portfolio_image._fetch_qqqm_benchmark_quote", return_value=None):
+            missing_html = _build_portfolio_html(snapshot=missing_snapshot, previous_snapshot=None)
 
-        self.assertIn("QQQM YTD Diff", positive_html)
+        self.assertIn("QQQM Total Diff", positive_html)
         self.assertIn("QQQM P&amp;L", positive_html)
         self.assertIn("+$5,000", positive_html)
-        self.assertIn("$-58,800", positive_html)
+        self.assertIn("+$1,250", positive_html)
         self.assertIn("$-5,000", negative_html)
-        self.assertIn("$-74,800", negative_html)
+        self.assertIn("$-4,200", negative_html)
         self.assertEqual(missing_html.count("No proxy"), 2)
 
 
@@ -695,6 +700,39 @@ class IBKRPortfolioHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sent)
         self.assertTrue(thread_handoff["called"])
         self.assertEqual(len(app.bot.sent_photos), 1)
+
+    async def test_run_check_initializes_qqqm_benchmark_baseline(self) -> None:
+        app = FakeApplication()
+        snapshot = make_snapshot(net_liquidation=95000.0, trade_date="2026-03-23")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            helper = IBKRPortfolioHelper(
+                chat_id=328968480,
+                snapshot_fetcher=lambda settings, now_ny: snapshot,
+                settings_factory=make_settings,
+                now_provider=lambda tz: datetime(2026, 3, 23, 16, 31, tzinfo=tz),
+                state_file=Path(temp_dir) / "ibkr_state.json",
+            )
+            with patch(
+                "useful_bot.ibkr_portfolio_helper.initialize_qqqm_benchmark_baseline",
+                return_value={
+                    "trade_date": "2026-03-23",
+                    "net_liquidation": 95000.0,
+                    "qqqm_start_close": 101.0,
+                    "started_at": "2026-03-23T16:30:00-04:00",
+                },
+            ), patch(
+                "useful_bot.ibkr_portfolio_helper.compute_qqqm_total_diff",
+                return_value=1234.0,
+            ), patch(
+                "useful_bot.ibkr_portfolio_helper.render_ibkr_portfolio_card",
+                return_value=io.BytesIO(b"fake-image"),
+            ):
+                sent = await helper._run_check(app, reason="manual", force=True)
+
+        self.assertTrue(sent)
+        self.assertEqual(helper._state["qqqm_benchmark"]["trade_date"], "2026-03-23")
+        self.assertAlmostEqual(helper._last_snapshot().qqqm_total_diff or 0.0, 1234.0)
 
     async def test_run_check_skips_before_close(self) -> None:
         app = FakeApplication()
@@ -826,9 +864,6 @@ class IBKRPortfolioRenderSmokeTests(unittest.TestCase):
         ), patch(
             "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
             return_value=QQQMCloseHistory(latest_close=220.0, close_by_date={}),
-        ), patch(
-            "useful_bot.ibkr_portfolio_image._fetch_position_end_closes",
-            return_value={},
         ):
             for name, (snapshot, previous) in scenarios.items():
                 image = render_ibkr_portfolio_card(snapshot=snapshot, previous_snapshot=previous)

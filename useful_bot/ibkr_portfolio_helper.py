@@ -28,7 +28,11 @@ from useful_bot.ibkr_portfolio_core import (
     should_run_daily_snapshot,
     should_skip_for_missing_daily_data,
 )
-from useful_bot.ibkr_portfolio_image import render_ibkr_portfolio_card
+from useful_bot.ibkr_portfolio_image import (
+    compute_qqqm_total_diff,
+    initialize_qqqm_benchmark_baseline,
+    render_ibkr_portfolio_card,
+)
 
 try:
     from ibapi.client import EClient
@@ -57,6 +61,10 @@ FLEX_GET_STATEMENT_URL = "https://gdcdyn.interactivebrokers.com/AccountManagemen
 FLEX_API_VERSION = "3"
 FLEX_PENDING_ERROR_CODE = "1019"
 DEFAULT_FLEX_POLL_INTERVAL_SECONDS = 2.0
+FLEX_CASH_EVENT_PATHS = (
+    ("CashTransactions", "./CashTransactions/*"),
+    ("Transfers", "./Transfers/*"),
+)
 
 
 @dataclass
@@ -230,6 +238,18 @@ class IBKRPortfolioHelper:
                 return False
 
             previous_snapshot = self._last_snapshot()
+            baseline = self._qqqm_benchmark_baseline()
+            if baseline is None:
+                baseline = initialize_qqqm_benchmark_baseline(snapshot)
+                if baseline is not None:
+                    self._state["qqqm_benchmark"] = baseline
+            if baseline is not None:
+                snapshot.qqqm_total_diff = compute_qqqm_total_diff(
+                    snapshot,
+                    baseline_trade_date=str(baseline["trade_date"]),
+                    baseline_net_liquidation=float(baseline["net_liquidation"]),
+                    baseline_qqqm_start_close=float(baseline["qqqm_start_close"]),
+                )
             if not force and previous_snapshot and previous_snapshot.trade_date == snapshot.trade_date:
                 return False
             if should_skip_for_missing_daily_data(snapshot):
@@ -290,6 +310,22 @@ class IBKRPortfolioHelper:
         if snapshot is None:
             return None
         return snapshot.trade_date or None
+
+    def _qqqm_benchmark_baseline(self) -> Optional[dict[str, Any]]:
+        baseline = self._state.get("qqqm_benchmark")
+        if not isinstance(baseline, dict):
+            return None
+        trade_date = str(baseline.get("trade_date", "") or "")
+        net_liquidation = coerce_optional_float(baseline.get("net_liquidation"))
+        qqqm_start_close = coerce_optional_float(baseline.get("qqqm_start_close"))
+        if not trade_date or net_liquidation is None or net_liquidation <= 0 or qqqm_start_close is None or qqqm_start_close <= 0:
+            return None
+        return {
+            "trade_date": trade_date,
+            "net_liquidation": net_liquidation,
+            "qqqm_start_close": qqqm_start_close,
+            "started_at": str(baseline.get("started_at", "") or ""),
+        }
 
     def _last_snapshot(self) -> Optional[PortfolioSnapshot]:
         last_snapshot = self._state.get("last_snapshot")
@@ -464,6 +500,17 @@ def _parse_flex_statement_xml(
         if raw_trade is not None:
             raw_trades.append(raw_trade)
 
+    raw_cash_events: list[dict[str, Any]] = []
+    for section_name, section_path in FLEX_CASH_EVENT_PATHS:
+        for cash_node in statement.findall(section_path):
+            raw_cash_event = _parse_flex_cash_event(
+                node=cash_node,
+                account_id=settings.account_id,
+                section_name=section_name,
+            )
+            if raw_cash_event is not None:
+                raw_cash_events.append(raw_cash_event)
+
     raw_corporate_actions: list[dict[str, Any]] = []
     for action_node in statement.findall("./CorporateActions/*"):
         raw_action = dict(action_node.attrib)
@@ -483,6 +530,7 @@ def _parse_flex_statement_xml(
         cash_value=cash_value,
         raw_positions=raw_positions,
         raw_trades=raw_trades,
+        raw_cash_events=raw_cash_events,
         raw_corporate_actions=raw_corporate_actions,
         source_from_date=source_from_date,
         source_to_date=source_to_date,
@@ -552,6 +600,54 @@ def _parse_flex_trade(*, node: ET.Element, account_id: str) -> Optional[dict[str
         "net_cash": coerce_optional_float(node.attrib.get("netCash")),
         "commission": coerce_optional_float(node.attrib.get("ibCommission")),
         "currency": str(node.attrib.get("currency", "USD") or "USD"),
+        "account": account_id,
+    }
+
+
+def _parse_flex_cash_event(
+    *,
+    node: ET.Element,
+    account_id: str,
+    section_name: str,
+) -> Optional[dict[str, Any]]:
+    event_date = _format_flex_trade_date(
+        str(
+            node.attrib.get("reportDate")
+            or node.attrib.get("settleDate")
+            or node.attrib.get("date")
+            or node.attrib.get("dateTime")
+            or ""
+        ).strip()
+    )
+    if not event_date:
+        return None
+
+    amount = (
+        coerce_optional_float(node.attrib.get("amount"))
+        or coerce_optional_float(node.attrib.get("amountInBase"))
+        or coerce_optional_float(node.attrib.get("netCash"))
+        or coerce_optional_float(node.attrib.get("proceeds"))
+    )
+    if amount is None:
+        credit = coerce_optional_float(node.attrib.get("credit"))
+        debit = coerce_optional_float(node.attrib.get("debit"))
+        if credit is not None or debit is not None:
+            amount = (credit or 0.0) - (debit or 0.0)
+    if amount is None or abs(amount) < 1e-9:
+        return None
+
+    description = (
+        str(node.attrib.get("description") or "")
+        or str(node.attrib.get("type") or "")
+        or str(node.attrib.get("transactionType") or "")
+    ).strip()
+
+    return {
+        "event_date": event_date,
+        "amount": amount,
+        "currency": str(node.attrib.get("currency", "USD") or "USD"),
+        "description": description,
+        "section": section_name,
         "account": account_id,
     }
 
