@@ -33,6 +33,10 @@ from useful_bot.ibkr_portfolio_image import (
     initialize_qqqm_benchmark_baseline,
     render_ibkr_portfolio_card,
 )
+try:
+    import yfinance as yf
+except Exception:  # pragma: no cover - exercised when dependency is absent
+    yf = None
 
 try:
     from ibapi.client import EClient
@@ -368,7 +372,8 @@ def fetch_ibkr_snapshot(settings: IBKRConnectionSettings, now_ny: datetime) -> P
 
 def fetch_ibkr_flex_snapshot(settings: IBKRConnectionSettings, now_ny: datetime) -> PortfolioSnapshot:
     statement_xml = _download_flex_statement_xml(settings)
-    return _parse_flex_statement_xml(statement_xml=statement_xml, settings=settings, now_ny=now_ny)
+    snapshot = _parse_flex_statement_xml(statement_xml=statement_xml, settings=settings, now_ny=now_ny)
+    return _enrich_snapshot_with_live_quotes(snapshot)
 
 
 def _download_flex_statement_xml(settings: IBKRConnectionSettings) -> str:
@@ -468,18 +473,6 @@ def _parse_flex_statement_xml(
     source_to_date = _format_flex_trade_date((statement.attrib.get("toDate") or "").strip()) or trade_date
     source_period = str(statement.attrib.get("period", "") or "")
 
-    mtm_by_key: dict[int | str, float] = {}
-    for mtm_node in statement.findall("./MTMPerformanceSummaryInBase/MTMPerformanceSummaryUnderlying"):
-        position_key = _flex_position_key(
-            symbol=mtm_node.attrib.get("symbol"),
-            con_id=mtm_node.attrib.get("conid"),
-        )
-        if position_key is None:
-            continue
-        daily_pnl = coerce_optional_float(mtm_node.attrib.get("total"))
-        if daily_pnl is not None:
-            mtm_by_key[position_key] = daily_pnl
-
     raw_positions: list[dict[str, Any]] = []
     total_position_value = 0.0
     for open_position in statement.findall("./OpenPositions/OpenPosition"):
@@ -489,7 +482,6 @@ def _parse_flex_statement_xml(
         raw_position = _parse_flex_open_position(
             node=open_position,
             account_id=settings.account_id,
-            daily_pnl_map=mtm_by_key,
         )
         if raw_position is not None:
             raw_positions.append(raw_position)
@@ -542,11 +534,9 @@ def _parse_flex_open_position(
     *,
     node: ET.Element,
     account_id: str,
-    daily_pnl_map: dict[int | str, float],
 ) -> Optional[dict[str, Any]]:
     symbol = str(node.attrib.get("symbol", "") or "").upper()
-    position_key = _flex_position_key(symbol=symbol, con_id=node.attrib.get("conid"))
-    if position_key is None:
+    if _flex_position_key(symbol=symbol, con_id=node.attrib.get("conid")) is None:
         return None
 
     asset_category = str(node.attrib.get("assetCategory", "") or "")
@@ -560,8 +550,10 @@ def _parse_flex_open_position(
         "market_value": coerce_optional_float(node.attrib.get("positionValue")),
         "average_cost": coerce_optional_float(node.attrib.get("costBasisPrice"))
         or coerce_optional_float(node.attrib.get("openPrice")),
+        "cost_basis_money": coerce_optional_float(node.attrib.get("costBasisMoney")),
         "unrealized_pnl": coerce_optional_float(node.attrib.get("fifoPnlUnrealized")),
-        "daily_pnl": daily_pnl_map.get(position_key),
+        "daily_pnl": None,
+        "percent_of_nav": coerce_optional_float(node.attrib.get("percentOfNAV")),
         "account": account_id,
     }
 
@@ -670,6 +662,100 @@ def _format_flex_trade_date(value: str) -> Optional[str]:
     if len(digits) != 8:
         return None
     return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}"
+
+
+def _enrich_snapshot_with_live_quotes(snapshot: PortfolioSnapshot) -> PortfolioSnapshot:
+    if not snapshot.positions:
+        return snapshot
+
+    symbols = [position.symbol for position in snapshot.positions if position.sec_type.upper() in {"STK", "ETF"}]
+    quotes = _fetch_live_equity_quotes(symbols)
+    if not quotes:
+        return snapshot
+
+    enriched_positions = []
+    live_net_liquidation = snapshot.cash_value
+    live_total_unrealized_pnl = 0.0
+    daily_data_complete = True
+
+    for position in snapshot.positions:
+        current_price = position.market_price
+        market_value = position.market_value
+        unrealized_pnl = position.unrealized_pnl
+        daily_pnl = position.daily_pnl
+        prior_close_price = position.prior_close_price
+
+        quote = quotes.get(position.symbol)
+        if quote is None:
+            daily_data_complete = False
+        else:
+            current_price, prior_close_price = quote
+            market_value = current_price * position.quantity
+            daily_pnl = (current_price - prior_close_price) * position.quantity
+            if position.cost_basis_money is not None:
+                unrealized_pnl = market_value - position.cost_basis_money
+            elif position.average_cost is not None:
+                unrealized_pnl = market_value - (position.average_cost * position.quantity)
+
+        live_net_liquidation += market_value
+        live_total_unrealized_pnl += unrealized_pnl
+        enriched_positions.append(
+            position.__class__(
+                symbol=position.symbol,
+                con_id=position.con_id,
+                sec_type=position.sec_type,
+                quantity=position.quantity,
+                market_price=current_price,
+                market_value=market_value,
+                average_cost=position.average_cost,
+                cost_basis_money=position.cost_basis_money,
+                unrealized_pnl=unrealized_pnl,
+                daily_pnl=daily_pnl if quote is not None else None,
+                percent_of_nav=position.percent_of_nav,
+                prior_close_price=prior_close_price if quote is not None else None,
+                currency=position.currency,
+                account=position.account,
+            )
+        )
+
+    snapshot.positions = enriched_positions
+    snapshot.net_liquidation = live_net_liquidation
+    snapshot.total_unrealized_pnl = live_total_unrealized_pnl
+    snapshot.daily_data_complete = daily_data_complete
+    return snapshot
+
+
+def _fetch_live_equity_quotes(symbols: list[str]) -> dict[str, tuple[float, float]]:
+    if yf is None:
+        return {}
+
+    quotes: dict[str, tuple[float, float]] = {}
+    for symbol in sorted({item.strip().upper() for item in symbols if item.strip()}):
+        try:
+            ticker = yf.Ticker(symbol)
+            daily_history = ticker.history(period="5d", interval="1d", auto_adjust=False, prepost=False)
+            if daily_history is None or getattr(daily_history, "empty", True) or "Close" not in getattr(daily_history, "columns", []):
+                continue
+            daily_closes = [float(value) for value in daily_history["Close"].tolist() if float(value) > 0]
+            if len(daily_closes) < 2:
+                continue
+            prior_close = daily_closes[-2]
+            current_price: Optional[float] = None
+
+            intraday_history = ticker.history(period="1d", interval="1m", auto_adjust=False, prepost=False)
+            if intraday_history is not None and not getattr(intraday_history, "empty", True) and "Close" in getattr(intraday_history, "columns", []):
+                intraday_closes = [float(value) for value in intraday_history["Close"].tolist() if float(value) > 0]
+                if intraday_closes:
+                    current_price = intraday_closes[-1]
+            if current_price is None:
+                current_price = daily_closes[-1]
+
+            if current_price > 0 and prior_close > 0:
+                quotes[symbol] = (current_price, prior_close)
+        except Exception:
+            continue
+
+    return quotes
 
 
 class _IBKRCollector(EWrapper, EClient):

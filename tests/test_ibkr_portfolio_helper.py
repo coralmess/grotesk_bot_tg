@@ -18,6 +18,7 @@ from useful_bot.ibkr_portfolio_core import (
 from useful_bot.ibkr_portfolio_helper import (
     IBKRConnectionSettings,
     IBKRPortfolioHelper,
+    _enrich_snapshot_with_live_quotes,
     _parse_flex_statement_xml,
 )
 from useful_bot.ibkr_portfolio_image import (
@@ -42,8 +43,8 @@ FLEX_STATEMENT_SAMPLE = """\
         <MTMPerformanceSummaryUnderlying assetCategory="STK" symbol="XMMO" closePrice="145.15" total="29.07" accountId="U20984427" subCategory="ETF" conid="319357127" reportDate="20260323" prevCloseQuantity="9" closeQuantity="9" />
       </MTMPerformanceSummaryInBase>
       <OpenPositions>
-        <OpenPosition symbol="EL" position="8" markPrice="79.29" positionValue="634.32" costBasisPrice="89.590022" costBasisMoney="716.720176" fifoPnlUnrealized="-82.400176" accountId="U20984427" currency="USD" assetCategory="STK" subCategory="COMMON" conid="1448477" reportDate="20260323" />
-        <OpenPosition symbol="XMMO" position="9" markPrice="145.15" positionValue="1306.35" costBasisPrice="136.591133111" costBasisMoney="1229.320198" fifoPnlUnrealized="77.029802" accountId="U20984427" currency="USD" assetCategory="STK" subCategory="ETF" conid="319357127" reportDate="20260323" />
+        <OpenPosition symbol="EL" position="8" markPrice="79.29" positionValue="634.32" costBasisPrice="89.590022" costBasisMoney="716.720176" fifoPnlUnrealized="-82.400176" percentOfNAV="6.35" accountId="U20984427" currency="USD" assetCategory="STK" subCategory="COMMON" conid="1448477" reportDate="20260323" />
+        <OpenPosition symbol="XMMO" position="9" markPrice="145.15" positionValue="1306.35" costBasisPrice="136.591133111" costBasisMoney="1229.320198" fifoPnlUnrealized="77.029802" percentOfNAV="13.08" accountId="U20984427" currency="USD" assetCategory="STK" subCategory="ETF" conid="319357127" reportDate="20260323" />
       </OpenPositions>
     </FlexStatement>
   </FlexStatements>
@@ -60,7 +61,7 @@ FLEX_STATEMENT_WITH_TRADES_SAMPLE = """\
         <MTMPerformanceSummaryUnderlying assetCategory="STK" symbol="EL" closePrice="79.29" total="-53.04" accountId="U20984427" subCategory="COMMON" conid="1448477" reportDate="20260323" prevCloseQuantity="8" closeQuantity="8" />
       </MTMPerformanceSummaryInBase>
       <OpenPositions>
-        <OpenPosition symbol="EL" position="8" markPrice="79.29" positionValue="634.32" costBasisPrice="89.590022" costBasisMoney="716.720176" fifoPnlUnrealized="-82.400176" accountId="U20984427" currency="USD" assetCategory="STK" subCategory="COMMON" conid="1448477" reportDate="20260323" />
+        <OpenPosition symbol="EL" position="8" markPrice="79.29" positionValue="634.32" costBasisPrice="89.590022" costBasisMoney="716.720176" fifoPnlUnrealized="-82.400176" percentOfNAV="6.35" accountId="U20984427" currency="USD" assetCategory="STK" subCategory="COMMON" conid="1448477" reportDate="20260323" />
       </OpenPositions>
       <Trades>
         <Trade transactionType="ExchTrade" buySell="BUY" assetCategory="STK" accountId="U20984427" currency="USD" symbol="AAPL" conid="265598" reportDate="20240103" tradeDate="20240103" quantity="5" tradePrice="180" tradeMoney="900" ibCommission="-1" netCash="-901" proceeds="900" />
@@ -318,8 +319,10 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
         self.assertAlmostEqual(snapshot.net_liquidation, 10251.19)
         self.assertAlmostEqual(snapshot.cash_value, 8310.52, places=2)
         self.assertEqual([item.symbol for item in snapshot.positions], ["EL", "XMMO"])
-        self.assertAlmostEqual(snapshot.positions[0].daily_pnl, -53.04)
-        self.assertAlmostEqual(snapshot.positions[1].daily_pnl, 29.07)
+        self.assertIsNone(snapshot.positions[0].daily_pnl)
+        self.assertIsNone(snapshot.positions[0].prior_close_price)
+        self.assertAlmostEqual(snapshot.positions[0].percent_of_nav or 0.0, 6.35)
+        self.assertAlmostEqual(snapshot.positions[0].cost_basis_money or 0.0, 716.720176)
         self.assertAlmostEqual(snapshot.total_unrealized_pnl, -5.370374, places=6)
         self.assertEqual(snapshot.source_period, "LastBusinessDay")
         self.assertEqual(snapshot.source_from_date, "2026-03-23")
@@ -354,6 +357,55 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
         self.assertAlmostEqual(snapshot.cash_events[0]["amount"], 250.0)
         self.assertEqual(snapshot.cash_events[1]["section"], "Transfers")
         self.assertEqual(len(snapshot.corporate_actions), 1)
+
+    def test_enrich_snapshot_with_live_quotes_updates_live_metrics(self) -> None:
+        settings = IBKRConnectionSettings(
+            account_id="U20984427",
+            source="flex",
+            query_id="1445890",
+            query_token="secret-token",
+        )
+
+        snapshot = _parse_flex_statement_xml(
+            statement_xml=FLEX_STATEMENT_SAMPLE,
+            settings=settings,
+            now_ny=datetime(2026, 3, 24, 10, 14, tzinfo=NEW_YORK_TZ),
+        )
+
+        with patch(
+            "useful_bot.ibkr_portfolio_helper._fetch_live_equity_quotes",
+            return_value={"EL": (79.29, 80.0), "XMMO": (145.15, 140.0)},
+        ):
+            snapshot = _enrich_snapshot_with_live_quotes(snapshot)
+
+        self.assertTrue(snapshot.daily_data_complete)
+        self.assertAlmostEqual(snapshot.positions[0].daily_pnl or 0.0, -5.68, places=2)
+        self.assertAlmostEqual(snapshot.positions[1].daily_pnl or 0.0, 46.35, places=2)
+        self.assertAlmostEqual(snapshot.positions[0].prior_close_price or 0.0, 80.0)
+        self.assertAlmostEqual(snapshot.total_unrealized_pnl, -5.370374, places=6)
+
+    def test_enrich_snapshot_with_live_quotes_disables_daily_metrics_when_quotes_are_incomplete(self) -> None:
+        settings = IBKRConnectionSettings(
+            account_id="U20984427",
+            source="flex",
+            query_id="1445890",
+            query_token="secret-token",
+        )
+
+        snapshot = _parse_flex_statement_xml(
+            statement_xml=FLEX_STATEMENT_SAMPLE,
+            settings=settings,
+            now_ny=datetime(2026, 3, 24, 10, 14, tzinfo=NEW_YORK_TZ),
+        )
+
+        with patch(
+            "useful_bot.ibkr_portfolio_helper._fetch_live_equity_quotes",
+            return_value={"EL": (79.29, 80.0)},
+        ):
+            snapshot = _enrich_snapshot_with_live_quotes(snapshot)
+
+        self.assertFalse(snapshot.daily_data_complete)
+        self.assertIsNone(snapshot.positions[1].daily_pnl)
 
     def test_build_portfolio_snapshot_filters_and_normalizes_positions(self) -> None:
         snapshot = build_portfolio_snapshot(

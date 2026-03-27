@@ -21,8 +21,11 @@ class PositionSnapshot:
     market_price: float
     market_value: float
     average_cost: Optional[float]
+    cost_basis_money: Optional[float]
     unrealized_pnl: float
     daily_pnl: Optional[float]
+    percent_of_nav: Optional[float] = None
+    prior_close_price: Optional[float] = None
     currency: str = "USD"
     account: str = ""
 
@@ -34,6 +37,11 @@ class PositionSnapshot:
 
     @property
     def prior_close_value(self) -> Optional[float]:
+        if self.prior_close_price is not None and abs(self.quantity) > 1e-9:
+            prior_close_value = self.prior_close_price * self.quantity
+            if not is_valid_number(prior_close_value) or abs(prior_close_value) < 1e-9:
+                return None
+            return prior_close_value
         if self.daily_pnl is None:
             return None
         prior_close_value = self.market_value - self.daily_pnl
@@ -43,6 +51,10 @@ class PositionSnapshot:
 
     @property
     def daily_change_pct(self) -> Optional[float]:
+        if self.prior_close_price is not None:
+            if abs(self.prior_close_price) < 1e-9:
+                return None
+            return ((self.market_price - self.prior_close_price) / self.prior_close_price) * 100.0
         prior_close_value = self.prior_close_value
         if prior_close_value is None:
             return None
@@ -63,8 +75,11 @@ class PositionSnapshot:
             market_price=float(data.get("market_price", 0.0) or 0.0),
             market_value=float(data.get("market_value", 0.0) or 0.0),
             average_cost=coerce_optional_float(data.get("average_cost")),
+            cost_basis_money=coerce_optional_float(data.get("cost_basis_money")),
             unrealized_pnl=float(data.get("unrealized_pnl", 0.0) or 0.0),
             daily_pnl=coerce_optional_float(data.get("daily_pnl")),
+            percent_of_nav=coerce_optional_float(data.get("percent_of_nav")),
+            prior_close_price=coerce_optional_float(data.get("prior_close_price")),
             currency=str(data.get("currency", "USD") or "USD"),
             account=str(data.get("account", "")),
         )
@@ -298,10 +313,15 @@ def build_portfolio_snapshot(
         if market_value is None:
             market_value = market_price * quantity
         average_cost = coerce_optional_float(raw_position.get("average_cost"))
+        cost_basis_money = coerce_optional_float(raw_position.get("cost_basis_money"))
         unrealized_pnl = coerce_optional_float(raw_position.get("unrealized_pnl"))
+        if unrealized_pnl is None and cost_basis_money is not None:
+            unrealized_pnl = market_value - cost_basis_money
         if unrealized_pnl is None and average_cost is not None:
             unrealized_pnl = market_value - (average_cost * quantity)
         daily_pnl = coerce_optional_float(raw_position.get("daily_pnl"))
+        percent_of_nav = coerce_optional_float(raw_position.get("percent_of_nav"))
+        prior_close_price = coerce_optional_float(raw_position.get("prior_close_price"))
         currency = str(raw_position.get("currency", "USD") or "USD")
         account = str(raw_position.get("account", account_id) or account_id)
 
@@ -314,8 +334,11 @@ def build_portfolio_snapshot(
                 market_price=market_price,
                 market_value=market_value,
                 average_cost=average_cost,
+                cost_basis_money=cost_basis_money,
                 unrealized_pnl=unrealized_pnl or 0.0,
                 daily_pnl=daily_pnl,
+                percent_of_nav=percent_of_nav,
+                prior_close_price=prior_close_price,
                 currency=currency,
                 account=account,
             )

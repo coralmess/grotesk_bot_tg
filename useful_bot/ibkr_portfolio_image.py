@@ -96,7 +96,7 @@ def _build_portfolio_html(
     delta = compute_balance_delta(snapshot, previous_snapshot)
     delta_text, delta_class = _format_delta(delta)
     gainers_html = _build_gainer_rows(snapshot, top_lifetime_gainers(snapshot.positions))
-    movers_html = _build_rank_rows(top_daily_movers(snapshot.positions))
+    movers_html = _build_rank_rows(top_daily_movers(snapshot.positions) if snapshot.daily_data_complete else [])
     ring = _ring_segments(snapshot.net_liquidation, snapshot.total_unrealized_pnl)
     font_face_css = _font_face_css()
     today_change = _format_optional_currency(_portfolio_daily_pnl(snapshot), missing_text="No daily data")
