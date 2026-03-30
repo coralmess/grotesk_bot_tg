@@ -633,10 +633,10 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Poeme-Bohemien/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Poeme Bohemien"
     },
-    {
-        "url": "https://www.olx.ua/uk/moda-i-stil/q-Kazuyuki-Kumagai/?currency=UAH&search%5Border%5D=created_at:desc",
-        "url_name": "Kazuyuki Kumagai"
-    },
+    # {
+    #     "url": "https://www.olx.ua/uk/moda-i-stil/q-Kazuyuki-Kumagai/?currency=UAH&search%5Border%5D=created_at:desc",
+    #     "url_name": "Kazuyuki Kumagai"
+    # },
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Barbara-Gongini/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Barbara Gongini"

@@ -27,7 +27,7 @@ FONTS_DIR = PROJECT_ROOT / "fonts"
 CANVAS_W = 1200
 CANVAS_H = 1500
 
-RENDER_STYLE_VERSION = "v41"
+RENDER_STYLE_VERSION = "v42"
 
 BACKGROUND = "#0A0F17"
 SURFACE = "#111824"
@@ -97,13 +97,13 @@ def _build_portfolio_html(
     delta_text, delta_class = _format_delta(delta)
     gainers_html = _build_gainer_rows(snapshot, top_lifetime_gainers(snapshot.positions))
     movers_html = _build_rank_rows(top_daily_movers(snapshot.positions) if snapshot.daily_data_complete else [])
-    ring = _ring_segments(snapshot.net_liquidation, snapshot.total_unrealized_pnl)
     font_face_css = _font_face_css()
     today_change = _format_optional_currency(_portfolio_daily_pnl(snapshot), missing_text="No daily data")
     qqqm_change = _format_optional_currency(_qqqm_hypothetical_pnl(snapshot), missing_text="No proxy")
     qqqm_total_diff = _format_optional_currency(snapshot.qqqm_total_diff, missing_text="No proxy")
+    portfolio_performance = _format_optional_percent(_portfolio_performance_pct(snapshot), missing_text="No data")
+    hero_unrealized = _format_optional_currency(snapshot.total_unrealized_pnl, missing_text="No data")
     holdings_text = f"{len(snapshot.positions)} holdings"
-    hero_visual_html = _build_hero_visual(snapshot, ring, hero_variant)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -133,12 +133,6 @@ def _build_portfolio_html(
       --track: {TRACK};
       --tile-shadow: 0 26px 64px rgba(1, 4, 10, 0.48), 0 6px 18px rgba(1, 4, 10, 0.26);
       --tile-shadow-strong: 0 38px 86px rgba(1, 4, 10, 0.62), 0 10px 22px rgba(1, 4, 10, 0.3);
-      --ring-start: {RING_START}deg;
-      --ring-sweep: {RING_SWEEP}deg;
-      --ring-yellow-end: {ring["yellow_end_deg"]}deg;
-      --ring-end: {ring["end_deg"]}deg;
-      --ring-accent-1: {ring["accent_1"]};
-      --ring-accent-2: {ring["accent_2"]};
     }}
 
     * {{
@@ -225,20 +219,20 @@ def _build_portfolio_html(
     .meta {{
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
     }}
 
     .meta-pill {{
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      min-height: 42px;
-      padding: 0 16px;
+      min-height: 40px;
+      padding: 0 15px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255,255,255,0.08);
-      color: #dce3ef;
-      font-size: 14px;
+      background: rgba(255, 255, 255, 0.035);
+      border: 1px solid rgba(255,255,255,0.06);
+      color: #cfd8e5;
+      font-size: 13px;
       font-weight: 700;
       letter-spacing: -0.02em;
       white-space: nowrap;
@@ -251,12 +245,12 @@ def _build_portfolio_html(
     }}
 
     .hero {{
-      grid-column: 1 / span 7;
+      grid-column: 1 / span 6;
       grid-row: 2;
-      padding: 36px 36px 34px;
+      padding: 34px 34px 30px;
       background:
-        radial-gradient(circle at 82% 18%, rgba(255, 182, 46, 0.14), transparent 28%),
-        radial-gradient(circle at 14% 6%, rgba(93, 135, 255, 0.12), transparent 22%),
+        radial-gradient(circle at 18% 10%, rgba(93, 135, 255, 0.12), transparent 24%),
+        radial-gradient(circle at 100% 0%, rgba(255, 182, 46, 0.10), transparent 26%),
         linear-gradient(145deg, rgba(18, 26, 39, 0.98), rgba(11, 16, 25, 0.98)),
         linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0));
       box-shadow: var(--tile-shadow-strong);
@@ -268,8 +262,10 @@ def _build_portfolio_html(
       display: flex;
       flex-direction: column;
       align-items: flex-start;
-      gap: 20px;
-      width: 58%;
+      justify-content: space-between;
+      gap: 14px;
+      width: 100%;
+      height: 100%;
       min-width: 0;
     }}
 
@@ -297,7 +293,7 @@ def _build_portfolio_html(
     }}
 
     .hero-value {{
-      font-size: 82px;
+      font-size: 88px;
       line-height: 0.9;
       font-weight: 800;
       letter-spacing: -0.075em;
@@ -308,44 +304,72 @@ def _build_portfolio_html(
 
     .hero-label {{
       font-family: "Nunito Sans", "Segoe UI", sans-serif;
-      font-size: 24px;
+      font-size: 23px;
       font-weight: 700;
       color: #94a2b7;
       letter-spacing: -0.02em;
     }}
 
-    .hero-delta {{
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      min-height: 54px;
-      padding: 0 18px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.08);
-      font-size: 19px;
-      font-weight: 800;
-      letter-spacing: -0.02em;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    .hero-main {{
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
     }}
 
-    .hero-delta.positive {{
+    .hero-center {{
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 20px;
+      flex: 1 1 auto;
+      width: 100%;
+    }}
+
+    .hero-inline-stat {{
+      display: inline-flex;
+      align-items: flex-start;
+      gap: 14px;
+      min-height: 68px;
+      flex-wrap: wrap;
+    }}
+
+    .hero-inline-value {{
+      font-size: 54px;
+      line-height: 0.9;
+      font-weight: 800;
+      letter-spacing: -0.065em;
+      color: var(--text);
+      white-space: nowrap;
+    }}
+
+    .hero-inline-value.positive {{
       color: var(--green);
     }}
 
-    .hero-delta.negative {{
+    .hero-inline-value.negative {{
       color: var(--red);
     }}
 
-    .hero-delta.neutral {{
+    .hero-inline-value.neutral {{
       color: #93a0b5;
+    }}
+
+    .hero-inline-label {{
+      font-family: "Nunito Sans", "Segoe UI", sans-serif;
+      font-size: 16px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: #92a0b6;
+      line-height: 1.15;
+      padding-top: 11px;
     }}
 
     .hero-foot {{
       display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: auto;
       font-family: "Nunito Sans", "Segoe UI", sans-serif;
       font-size: 15px;
       font-weight: 700;
@@ -363,328 +387,38 @@ def _build_portfolio_html(
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
     }}
 
-    .hero-visual {{
-      position: absolute;
-      pointer-events: none;
-      z-index: 1;
-    }}
-
-    .hero-orbit {{
-      position: absolute;
-      right: -83px;
-      top: 79px;
-      width: 330px;
-      height: 330px;
-      border-radius: 50%;
-      pointer-events: none;
-      z-index: 1;
-      transform: none;
-    }}
-
-    .hero-orbit-ring {{
-      position: absolute;
-      inset: 0;
-      border-radius: 50%;
-    }}
-
-    .hero-orbit-ring.track {{
-      background: conic-gradient(
-        from var(--ring-start),
-        var(--track) 0deg var(--ring-sweep),
-        transparent var(--ring-sweep) 360deg
-      );
-      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 47px), #000 calc(100% - 46px));
-      mask: radial-gradient(farthest-side, transparent calc(100% - 47px), #000 calc(100% - 46px));
-      opacity: 1;
-    }}
-
-    .hero-orbit-ring.accent {{
-      background: conic-gradient(
-        from var(--ring-start),
-        color-mix(in srgb, white 18%, var(--ring-accent-1)) 0deg,
-        var(--ring-accent-1) calc(var(--ring-yellow-end) - 10deg),
-        color-mix(in srgb, black 10%, var(--ring-accent-1)) var(--ring-yellow-end),
-        color-mix(in srgb, white 14%, var(--ring-accent-2)) calc(var(--ring-yellow-end) + 2deg),
-        var(--ring-accent-2) calc(var(--ring-end) - 6deg),
-        color-mix(in srgb, black 12%, var(--ring-accent-2)) var(--ring-end),
-        transparent var(--ring-end) 360deg
-      );
-      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 47px), #000 calc(100% - 46px));
-      mask: radial-gradient(farthest-side, transparent calc(100% - 47px), #000 calc(100% - 46px));
-      filter: drop-shadow(0 12px 24px rgba(255, 182, 46, 0.18));
-    }}
-
-    .hero-pillars {{
-      right: 34px;
-      top: 60px;
-      width: 230px;
-      height: 356px;
-      display: flex;
-      align-items: flex-end;
-      justify-content: space-between;
-      gap: 18px;
-    }}
-
-    .hero-pillars-grid {{
-      position: absolute;
-      inset: 16px 6px 18px 6px;
-      display: flex;
-      align-items: flex-end;
-      justify-content: space-between;
-      gap: 14px;
-    }}
-
-    .hero-pillar {{
-      position: relative;
-      flex: 1 1 0;
-      border-radius: 32px 32px 18px 18px;
-      background: linear-gradient(180deg, rgba(30, 40, 58, 0.9), rgba(13, 19, 29, 0.96));
-      border: 1px solid rgba(255,255,255,0.06);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 34px rgba(1,4,10,0.28);
-      overflow: hidden;
-    }}
-
-    .hero-pillar-fill {{
-      position: absolute;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      border-radius: 24px 24px 16px 16px;
-    }}
-
-    .hero-pillar-fill.actual {{
-      background: linear-gradient(180deg, rgba(255, 193, 75, 0.96), rgba(255, 182, 46, 0.82));
-    }}
-
-    .hero-pillar-fill.benchmark {{
-      background: linear-gradient(180deg, rgba(102, 143, 255, 0.9), rgba(74, 110, 214, 0.78));
-    }}
-
-    .hero-pillar-tag {{
-      position: absolute;
-      left: 50%;
-      bottom: 12px;
-      transform: translateX(-50%);
-      min-width: 58px;
-      min-height: 28px;
-      padding: 0 10px;
-      border-radius: 999px;
+    .hero-foot-note {{
+      font-family: "Nunito Sans", "Segoe UI", sans-serif;
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
       display: inline-flex;
       align-items: center;
-      justify-content: center;
-      background: rgba(10,15,23,0.72);
-      color: #dbe4f2;
-      font-family: "Nunito Sans", "Segoe UI", sans-serif;
-      font-size: 11px;
-      font-weight: 800;
-      letter-spacing: 0.02em;
-    }}
-
-    .hero-stack {{
-      right: 26px;
-      top: 92px;
-      width: 286px;
-      height: 164px;
-      padding: 18px;
-      border-radius: 30px;
-      background: linear-gradient(180deg, rgba(22, 30, 44, 0.9), rgba(14, 20, 31, 0.96));
-      border: 1px solid rgba(255,255,255,0.05);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 18px 34px rgba(1,4,10,0.28);
-    }}
-
-    .hero-stack-track {{
-      position: relative;
-      width: 100%;
-      height: 56px;
+      min-height: 36px;
+      padding: 0 14px;
       border-radius: 999px;
-      overflow: hidden;
-      background: rgba(255,255,255,0.05);
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.07);
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
     }}
 
-    .hero-stack-segment {{
-      position: absolute;
-      top: 0;
-      bottom: 0;
+    .hero-foot-note.positive {{
+      color: var(--green);
     }}
 
-    .hero-stack-segment.cash {{
-      background: linear-gradient(180deg, rgba(102, 143, 255, 0.94), rgba(78, 112, 208, 0.84));
+    .hero-foot-note.negative {{
+      color: var(--red);
     }}
 
-    .hero-stack-segment.invested {{
-      background: linear-gradient(180deg, rgba(255, 193, 75, 0.96), rgba(255, 182, 46, 0.86));
-    }}
-
-    .hero-stack-marker {{
-      position: absolute;
-      top: -6px;
-      width: 6px;
-      height: 68px;
-      border-radius: 999px;
-      background: rgba(45, 218, 135, 0.95);
-      box-shadow: 0 0 0 6px rgba(45, 218, 135, 0.08);
-    }}
-
-    .hero-stack-legend {{
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      margin-top: 18px;
-      flex-wrap: wrap;
-    }}
-
-    .hero-stack-key {{
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      color: #a6b2c5;
-      font-family: "Nunito Sans", "Segoe UI", sans-serif;
-      font-size: 13px;
-      font-weight: 800;
-    }}
-
-    .hero-stack-swatch {{
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      flex: 0 0 auto;
-    }}
-
-    .hero-skyline {{
-      right: 28px;
-      top: 76px;
-      width: 290px;
-      height: 280px;
-      display: flex;
-      align-items: flex-end;
-      gap: 14px;
-      padding: 0 4px 8px;
-    }}
-
-    .hero-skyline-bar {{
-      position: relative;
-      flex: 1 1 0;
-      border-radius: 24px 24px 12px 12px;
-      background: linear-gradient(180deg, rgba(27, 36, 52, 0.9), rgba(14, 20, 31, 0.96));
-      border: 1px solid rgba(255,255,255,0.05);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
-      overflow: hidden;
-    }}
-
-    .hero-skyline-bar::after {{
-      content: "";
-      position: absolute;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      height: var(--bar-fill, 60%);
-      background: linear-gradient(180deg, rgba(255, 193, 75, 0.95), rgba(255, 182, 46, 0.78));
-      border-radius: 18px 18px 10px 10px;
-    }}
-
-    .hero-skyline-bar.alt::after {{
-      background: linear-gradient(180deg, rgba(102, 143, 255, 0.9), rgba(74, 110, 214, 0.72));
-    }}
-
-    .hero-skyline-cap {{
-      position: absolute;
-      left: 50%;
-      top: 12px;
-      transform: translateX(-50%);
-      min-width: 34px;
-      padding: 4px 8px;
-      border-radius: 999px;
-      background: rgba(10,15,23,0.7);
-      color: #d5deed;
-      font-family: "Nunito Sans", "Segoe UI", sans-serif;
-      font-size: 10px;
-      font-weight: 800;
-      text-align: center;
-    }}
-
-    .hero-arcs {{
-      right: 6px;
-      top: 54px;
-      width: 340px;
-      height: 340px;
-    }}
-
-    .hero-arc {{
-      position: absolute;
-      inset: 0;
-      border-radius: 50%;
-      background: conic-gradient(from 180deg, transparent 0deg 180deg, rgba(255,255,255,0.05) 180deg 360deg);
-      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 28px), #000 calc(100% - 27px));
-      mask: radial-gradient(farthest-side, transparent calc(100% - 28px), #000 calc(100% - 27px));
-    }}
-
-    .hero-arc.outer {{
-      background: conic-gradient(
-        from 180deg,
-        transparent 0deg 180deg,
-        rgba(255, 182, 46, 0.14) 180deg 360deg
-      );
-    }}
-
-    .hero-arc.outer-fill {{
-      background: conic-gradient(
-        from 180deg,
-        transparent 0deg 180deg,
-        rgba(255, 182, 46, 0.98) 180deg var(--actual-end),
-        transparent var(--actual-end) 360deg
-      );
-      filter: drop-shadow(0 10px 18px rgba(255, 182, 46, 0.16));
-    }}
-
-    .hero-arc.inner {{
-      inset: 44px;
-      background: conic-gradient(
-        from 180deg,
-        transparent 0deg 180deg,
-        rgba(93, 135, 255, 0.14) 180deg 360deg
-      );
-    }}
-
-    .hero-arc.inner-fill {{
-      inset: 44px;
-      background: conic-gradient(
-        from 180deg,
-        transparent 0deg 180deg,
-        rgba(93, 135, 255, 0.94) 180deg var(--benchmark-end),
-        transparent var(--benchmark-end) 360deg
-      );
-      filter: drop-shadow(0 10px 18px rgba(93, 135, 255, 0.14));
-    }}
-
-    .hero-arc-labels {{
-      position: absolute;
-      right: 6px;
-      bottom: 6px;
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }}
-
-    .hero-arc-pill {{
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      min-height: 28px;
-      padding: 0 10px;
-      border-radius: 999px;
-      background: rgba(10,15,23,0.72);
-      color: #d8e0ef;
-      font-family: "Nunito Sans", "Segoe UI", sans-serif;
-      font-size: 11px;
-      font-weight: 800;
+    .hero-foot-note.neutral {{
+      color: #93a0b5;
     }}
 
     .metrics-cluster {{
-      grid-column: 8 / -1;
+      grid-column: 7 / -1;
       grid-row: 2;
       display: grid;
-      grid-template-columns: 1.03fr 0.97fr;
+      grid-template-columns: 1fr 1fr;
       grid-template-rows: 1fr 1fr;
       gap: 18px;
       align-items: stretch;
@@ -692,7 +426,7 @@ def _build_portfolio_html(
     }}
 
     .metric-tile {{
-      padding: 24px 22px 22px;
+      padding: 26px 24px 24px;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
@@ -809,7 +543,7 @@ def _build_portfolio_html(
       align-items: center;
       gap: 10px;
       font-family: "Nunito Sans", "Segoe UI", sans-serif;
-      font-size: 16px;
+      font-size: 18px;
       font-weight: 800;
       color: #97a4bb;
       letter-spacing: -0.03em;
@@ -825,7 +559,7 @@ def _build_portfolio_html(
     }}
 
     .chip-value {{
-      font-size: 50px;
+      font-size: 58px;
       line-height: 0.92;
       font-weight: 800;
       letter-spacing: -0.06em;
@@ -840,9 +574,16 @@ def _build_portfolio_html(
       color: var(--red);
     }}
 
+    .chip-value.neutral {{
+      font-size: 44px;
+      line-height: 0.98;
+      letter-spacing: -0.045em;
+      color: #cfd8e5;
+    }}
+
     .chip-note {{
       font-family: "Nunito Sans", "Segoe UI", sans-serif;
-      font-size: 12px;
+      font-size: 13px;
       font-weight: 700;
       color: #728097;
       letter-spacing: -0.02em;
@@ -896,7 +637,7 @@ def _build_portfolio_html(
       align-items: flex-start;
       justify-content: space-between;
       gap: 14px;
-      margin-bottom: 18px;
+      margin-bottom: 16px;
     }}
 
     .panel-kicker {{
@@ -910,7 +651,7 @@ def _build_portfolio_html(
     }}
 
     .panel-title {{
-      font-size: 36px;
+      font-size: 38px;
       line-height: 1;
       font-weight: 800;
       letter-spacing: -0.045em;
@@ -956,18 +697,18 @@ def _build_portfolio_html(
       flex: 1 1 auto;
       flex-direction: column;
       justify-content: space-between;
-      gap: 6px;
+      gap: 8px;
       padding-bottom: 0;
       margin-top: 6px;
     }}
 
     .row {{
-      min-height: 78px;
+      min-height: 82px;
       border-radius: 24px;
       background:
-        linear-gradient(180deg, rgba(24,31,46,0.98), rgba(18,24,35,0.96));
-      border: 1px solid rgba(255,255,255,0.05);
-      box-shadow: 0 18px 34px rgba(1, 4, 10, 0.24);
+        linear-gradient(180deg, rgba(22,29,42,0.96), rgba(17,23,34,0.95));
+      border: 1px solid rgba(255,255,255,0.045);
+      box-shadow: 0 12px 24px rgba(1, 4, 10, 0.18);
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -1019,7 +760,7 @@ def _build_portfolio_html(
     }}
 
     .row-symbol {{
-      font-size: 20px;
+      font-size: 22px;
       font-weight: 800;
       letter-spacing: -0.03em;
       color: var(--text);
@@ -1031,7 +772,7 @@ def _build_portfolio_html(
 
     .row-weight {{
       font-family: "Nunito Sans", "Segoe UI", sans-serif;
-      font-size: 13px;
+      font-size: 14px;
       font-weight: 700;
       color: var(--muted);
       white-space: nowrap;
@@ -1041,7 +782,7 @@ def _build_portfolio_html(
     .row-value {{
       min-width: 112px;
       text-align: right;
-      font-size: 21px;
+      font-size: 24px;
       font-weight: 800;
       letter-spacing: -0.04em;
     }}
@@ -1083,22 +824,9 @@ def _build_portfolio_html(
       z-index: 0;
     }}
 
-    .hero::before {{
-      content: "";
-      position: absolute;
-      left: 26px;
-      bottom: 22px;
-      width: 180px;
-      height: 180px;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(255,182,46,0.12), transparent 68%);
-      filter: blur(4px);
-      z-index: 0;
-    }}
-
     .hero::after {{
       background:
-        radial-gradient(circle at 78% 18%, rgba(255,255,255,0.05), transparent 18%),
+        radial-gradient(circle at 100% 0%, rgba(255,255,255,0.04), transparent 18%),
         linear-gradient(180deg, rgba(255,255,255,0.03), transparent 34%);
     }}
 
@@ -1136,22 +864,26 @@ def _build_portfolio_html(
       <section class="tile hero">
         <div class="hero-copy">
           <div class="eyebrow"><span class="eyebrow-dot"></span>Daily snapshot</div>
-          <div>
-            <div class="hero-label">Net liquidation</div>
-            <div class="hero-value">{_e(_format_currency(snapshot.net_liquidation, show_sign=False))}</div>
+          <div class="hero-center">
+            <div class="hero-main">
+              <div class="hero-label">Net liquidation</div>
+              <div class="hero-value">{_e(_format_currency(snapshot.net_liquidation, show_sign=False))}</div>
+            </div>
+            <div class="hero-inline-stat">
+              <div class="hero-inline-value {hero_unrealized["class_name"]}">{_e(hero_unrealized["text"])}</div>
+              <div class="hero-inline-label">Unrealized P&amp;L</div>
+            </div>
           </div>
-          <div class="hero-delta {delta_class}">{_e(delta_text)}</div>
           <div class="hero-foot">
             <div class="hero-foot-chip">{_e(holdings_text)}</div>
-            <div>Benchmark tracking active</div>
+            <div class="hero-foot-note {delta_class}">{_e(delta_text)}</div>
           </div>
         </div>
-        {hero_visual_html}
       </section>
 
       <section class="metrics-cluster">
         <div class="tile metric-tile soft-mint">
-          {_build_chip("Unrealized P&L", _format_currency(snapshot.total_unrealized_pnl, show_sign=True), GREEN if snapshot.total_unrealized_pnl >= 0 else RED, value_class="positive" if snapshot.total_unrealized_pnl >= 0 else "negative", tile_note="Open positions")}
+          {_build_chip("Portfolio Performance", portfolio_performance["text"], GREEN if portfolio_performance["class_name"] == "positive" else RED if portfolio_performance["class_name"] == "negative" else TEXT_FAINT, value_class=portfolio_performance["class_name"], tile_note="Open positions")}
         </div>
         <div class="tile metric-tile highlight">
           {_build_chip("QQQM Total Diff", qqqm_total_diff["text"], GREEN if qqqm_total_diff["class_name"] == "positive" else RED if qqqm_total_diff["class_name"] == "negative" else TEXT_FAINT, value_class=qqqm_total_diff["class_name"], tile_note="Actual vs synthetic QQQM")}
@@ -1550,6 +1282,32 @@ def _format_optional_currency(value: Optional[float], *, missing_text: str) -> d
     if value < 0:
         return {"text": _format_currency(value, show_sign=True), "class_name": "negative"}
     return {"text": "$0", "class_name": "neutral"}
+
+
+def _format_optional_percent(value: Optional[float], *, missing_text: str) -> dict[str, str]:
+    if value is None:
+        return {"text": missing_text, "class_name": "neutral"}
+    if value > 0:
+        return {"text": _format_percent(value), "class_name": "positive"}
+    if value < 0:
+        return {"text": _format_percent(value), "class_name": "negative"}
+    return {"text": "0.00%", "class_name": "neutral"}
+
+
+def _portfolio_performance_pct(snapshot: PortfolioSnapshot) -> Optional[float]:
+    total_cost_basis = 0.0
+    total_unrealized = 0.0
+    for position in snapshot.positions:
+        cost_basis_money = position.cost_basis_money
+        if cost_basis_money is None and position.average_cost is not None:
+            cost_basis_money = position.average_cost * position.quantity
+        if cost_basis_money is None or cost_basis_money <= 0:
+            continue
+        total_cost_basis += cost_basis_money
+        total_unrealized += position.unrealized_pnl
+    if total_cost_basis <= 0:
+        return None
+    return (total_unrealized / total_cost_basis) * 100.0
 
 
 def _ring_segments(net_liquidation: float, pnl: float) -> dict[str, object]:
