@@ -1111,24 +1111,7 @@ def _qqqm_hypothetical_pnl(snapshot: PortfolioSnapshot) -> Optional[float]:
     benchmark = _fetch_qqqm_benchmark_quote()
     if benchmark is None:
         return None
-    invested_value = _portfolio_prior_close_invested_value(snapshot)
-    if invested_value is None or invested_value <= 0:
-        return None
-    return invested_value * benchmark.daily_return_pct / 100.0
-
-
-def _portfolio_prior_close_invested_value(snapshot: PortfolioSnapshot) -> Optional[float]:
-    if snapshot.positions and not snapshot.daily_data_complete:
-        return None
-    total = 0.0
-    has_data = False
-    for position in snapshot.positions:
-        prior_close_value = position.prior_close_value
-        if prior_close_value is None:
-            continue
-        total += prior_close_value
-        has_data = True
-    return total if has_data else None
+    return snapshot.net_liquidation * benchmark.daily_return_pct / 100.0
 
 
 def initialize_qqqm_benchmark_baseline(snapshot: PortfolioSnapshot) -> Optional[dict[str, float | str]]:
@@ -1171,9 +1154,27 @@ def compute_qqqm_total_diff(
     synthetic_shares = baseline_net_liquidation / baseline_qqqm_start_close
     synthetic_cash = 0.0
 
-    for cash_event in snapshot.cash_events:
-        if not _is_external_benchmark_cash_flow(cash_event):
+    for trade in snapshot.trades:
+        if trade.trade_date < baseline_trade_date:
             continue
+        benchmark_close = _first_close_on_or_after(benchmark_history.close_by_date, trade.trade_date)
+        if benchmark_close is None or benchmark_close <= 0:
+            return None
+
+        if trade.is_equity_buy:
+            amount = trade.cash_spent
+            if amount is None or amount <= 0:
+                return None
+            synthetic_shares += amount / benchmark_close
+            synthetic_cash -= amount
+        elif trade.is_equity_sell:
+            amount = trade.cash_received
+            if amount is None or amount <= 0:
+                return None
+            synthetic_shares -= amount / benchmark_close
+            synthetic_cash += amount
+
+    for cash_event in snapshot.cash_events:
         event_date = str(cash_event.get("event_date", "") or "")
         if not event_date or event_date < baseline_trade_date:
             continue
@@ -1187,29 +1188,6 @@ def compute_qqqm_total_diff(
 
     synthetic_value = synthetic_cash + (synthetic_shares * current_close)
     return snapshot.net_liquidation - synthetic_value
-
-
-def _is_external_benchmark_cash_flow(cash_event: dict[str, object]) -> bool:
-    section = str(cash_event.get("section", "") or "").strip().lower()
-    description = str(cash_event.get("description", "") or "").strip().lower()
-
-    if section == "transfers":
-        return True
-
-    if section != "cashtransactions":
-        return False
-
-    external_flow_markers = (
-        "deposit",
-        "withdraw",
-        "withdrawal",
-        "wire",
-        "ach",
-        "transfer",
-        "received",
-        "disbursement",
-    )
-    return any(marker in description for marker in external_flow_markers)
 
 
 def _fetch_qqqm_benchmark_quote() -> Optional[QQQMBenchmarkQuote]:

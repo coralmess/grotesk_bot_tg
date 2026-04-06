@@ -73,6 +73,17 @@ def _get_http_session() -> aiohttp.ClientSession:
         _http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25), connector=aiohttp.TCPConnector(limit=SHAFA_HTTP_CONNECTOR_LIMIT))
     return _http_session
 
+
+def _normalize_duplicate_name(name: str) -> str:
+    return " ".join((name or "").split()).casefold()
+
+
+def _duplicate_key(name: str, price_int: int) -> Optional[Tuple[str, int]]:
+    normalized_name = _normalize_duplicate_name(name)
+    if not normalized_name or price_int <= 0:
+        return None
+    return normalized_name, int(price_int)
+
 def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(func)
@@ -645,6 +656,7 @@ def _db_init_sync():
         except Exception:
             pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shafa_items_source ON shafa_items(source);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_shafa_items_price_name ON shafa_items(price_int, name);")
         conn.commit()
 
 def _db_upsert_items_sync(items: List[Tuple[ShafaItem, bool]], source_name: str):
@@ -682,6 +694,32 @@ def _db_fetch_existing_sync(item_ids: List[str]) -> List[Optional[Dict[str, Any]
         items_dict = {row['id']: dict(row) for row in rows}
         # Return results in same order as input item_ids (preserving None for missing items)
         return [items_dict.get(item_id) for item_id in item_ids]
+    finally:
+        conn.close()
+
+
+def _db_fetch_duplicate_keys_sync(items: List[ShafaItem]) -> set[Tuple[str, int]]:
+    candidate_map: Dict[Tuple[str, int], set[str]] = {}
+    for item in items:
+        if key := _duplicate_key(item.name, item.price_int):
+            candidate_map.setdefault(key, set()).add(item.id)
+    if not candidate_map:
+        return set()
+
+    conn = _db_connect()
+    try:
+        prices = sorted({price for _, price in candidate_map})
+        placeholders = ",".join("?" * len(prices))
+        query = f"SELECT id, name, price_int FROM shafa_items WHERE price_int IN ({placeholders})"
+        rows = conn.execute(query, prices).fetchall()
+        duplicates: set[Tuple[str, int]] = set()
+        for row in rows:
+            row_key = _duplicate_key(str(row["name"] or ""), int(row["price_int"] or 0))
+            if row_key is None or row_key not in candidate_map:
+                continue
+            if str(row["id"]) not in candidate_map[row_key]:
+                duplicates.add(row_key)
+        return duplicates
     finally:
         conn.close()
 
@@ -744,6 +782,9 @@ async def run_shafa_scraper():
         _add_error(f"Playwright error: {e}")
         return "; ".join(dict.fromkeys(errors))
     bot = Bot(token=token)
+    run_seen_duplicate_keys: set[Tuple[str, int]] = set()
+    run_seen_lock = asyncio.Lock()
+
     async def _send_item_message(bot: Bot, chat_id: str, text: str, item: ShafaItem) -> bool:
         nonlocal total_sent
         try:
@@ -761,6 +802,17 @@ async def run_shafa_scraper():
             logger.error(f"Send failed: {e}")
             _add_error(f"Send failed: {e}")
         return False
+
+    async def _claim_duplicate_key_for_run(item: ShafaItem) -> bool:
+        key = _duplicate_key(item.name, item.price_int)
+        if key is None:
+            return True
+        async with run_seen_lock:
+            if key in run_seen_duplicate_keys:
+                return False
+            run_seen_duplicate_keys.add(key)
+            return True
+
     async def _process_entry(entry: Dict[str, Any]):
         nonlocal total_scraped, total_new
         url, chat_id, source_name = entry.get("url"), default_chat, entry.get("url_name") or "SHAFA"
@@ -792,12 +844,20 @@ async def run_shafa_scraper():
                 return
             total_scraped += len(items)
             prev_items = await asyncio.to_thread(_db_fetch_existing_sync, [item.id for item in items])
+            duplicate_keys_in_db = await asyncio.to_thread(_db_fetch_duplicate_keys_sync, items)
             new_count = 0
             send_tasks = []
             items_to_send = []
             updates = []
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
+                duplicate_key = _duplicate_key(it.name, it.price_int)
+                if duplicate_key is not None and duplicate_key in duplicate_keys_in_db:
+                    logger.info("Skipping SHAFA duplicate already in DB: %s | %s грн", it.name, it.price_int)
+                    continue
+                if not await _claim_duplicate_key_for_run(it):
+                    logger.info("Skipping SHAFA duplicate in current run: %s | %s грн", it.name, it.price_int)
+                    continue
                 if prev and not it.first_image_url and prev.get("first_image_url"):
                     it.first_image_url = prev.get("first_image_url")
                 if prev is None:

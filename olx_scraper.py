@@ -61,6 +61,17 @@ def _clean_token(value: Optional[str]) -> str:
     return (value or "").strip().strip("'\"")
 
 
+def _normalize_duplicate_name(name: str) -> str:
+    return " ".join((name or "").split()).casefold()
+
+
+def _duplicate_key(name: str, price_int: int) -> Optional[Tuple[str, int]]:
+    normalized_name = _normalize_duplicate_name(name)
+    if not normalized_name or price_int <= 0:
+        return None
+    return normalized_name, int(price_int)
+
+
 def _normalize_search_text(text: str) -> str:
     value = " ".join((text or "").replace("\xa0", " ").split())
     if not value:
@@ -586,6 +597,7 @@ def _db_init_sync():
         except Exception as e:
             logger.error(f"❌ Migration error: {e}")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_items_source ON olx_items(source);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_items_price_name ON olx_items(price_int, name);")
         conn.commit()
 
 async def db_init():
@@ -657,6 +669,36 @@ async def db_fetch_existing(item_ids: List[str]) -> List[Optional[Dict[str, Any]
     return await asyncio.to_thread(_db_fetch_existing_sync, item_ids)
 
 
+def _db_fetch_duplicate_keys_sync(items: List[OlxItem]) -> set[Tuple[str, int]]:
+    candidate_map: Dict[Tuple[str, int], set[str]] = {}
+    for item in items:
+        if key := _duplicate_key(item.name, item.price_int):
+            candidate_map.setdefault(key, set()).add(item.id)
+    if not candidate_map:
+        return set()
+
+    conn = _db_connect()
+    try:
+        prices = sorted({price for _, price in candidate_map})
+        placeholders = ",".join("?" * len(prices))
+        query = f"SELECT id, name, price_int FROM olx_items WHERE price_int IN ({placeholders})"
+        rows = conn.execute(query, prices).fetchall()
+        duplicates: set[Tuple[str, int]] = set()
+        for row in rows:
+            row_key = _duplicate_key(str(row["name"] or ""), int(row["price_int"] or 0))
+            if row_key is None or row_key not in candidate_map:
+                continue
+            if str(row["id"]) not in candidate_map[row_key]:
+                duplicates.add(row_key)
+        return duplicates
+    finally:
+        conn.close()
+
+
+async def db_fetch_duplicate_keys(items: List[OlxItem]) -> set[Tuple[str, int]]:
+    return await asyncio.to_thread(_db_fetch_duplicate_keys_sync, items)
+
+
 def _db_get_source_stats_sync(url: str) -> Dict[str, int]:
     with _db_connect() as conn:
         cur = conn.execute("SELECT no_items_streak, cycle_count FROM olx_sources WHERE url = ?", (url,))
@@ -709,6 +751,8 @@ async def run_olx_scraper():
     bot = Bot(token=token)
     db_conn = None
     db_lock = asyncio.Lock()
+    run_seen_duplicate_keys: set[Tuple[str, int]] = set()
+    run_seen_lock = asyncio.Lock()
 
     # Statistics tracking
     total_scraped = 0
@@ -749,6 +793,16 @@ async def run_olx_scraper():
                 ),
             )
             await db_conn.commit()
+
+    async def _claim_duplicate_key_for_run(item: OlxItem) -> bool:
+        key = _duplicate_key(item.name, item.price_int)
+        if key is None:
+            return True
+        async with run_seen_lock:
+            if key in run_seen_duplicate_keys:
+                return False
+            run_seen_duplicate_keys.add(key)
+            return True
 
     async def _send_item_message(bot: Bot, chat_id: str, text: str, item: OlxItem, source_name: str):
         """Send message for a single item."""
@@ -812,10 +866,18 @@ async def run_olx_scraper():
 
             total_scraped += len(items)
             prev_items = await db_fetch_existing([item.id for item in items])
+            duplicate_keys_in_db = await db_fetch_duplicate_keys(items)
 
             send_tasks = []
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
+                duplicate_key = _duplicate_key(it.name, it.price_int)
+                if duplicate_key is not None and duplicate_key in duplicate_keys_in_db:
+                    logger.info("Skipping OLX duplicate already in DB: %s | %s грн", it.name, it.price_int)
+                    continue
+                if not await _claim_duplicate_key_for_run(it):
+                    logger.info("Skipping OLX duplicate in current run: %s | %s грн", it.name, it.price_int)
+                    continue
                 if prev is None:
                     send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
                     continue
