@@ -30,6 +30,7 @@ _UPSCALE_SEMAPHORE = asyncio.Semaphore(OLX_UPSCALE_CONCURRENCY)
 _http_session: Optional[aiohttp.ClientSession] = None
 MIN_PRICE_DIFF = 50
 MIN_PRICE_DIFF_PERCENT = 20.0
+NOTIFICATION_CLAIM_STALE_MINUTES = 120
 # Precompiled patterns reduce overhead in tight parsing loops.
 PRICE_FRAGMENT_RE = re.compile(r"(\d[\d\s.,]*)")
 SRCSET_PART_RE = re.compile(r"^\s*(\S+)(?:\s+([\d.]+[wx]))?\s*$", re.IGNORECASE)
@@ -91,7 +92,7 @@ def _contains_no_listings(text: str) -> bool:
     normalized = _normalize_search_text(text)
     return any(pattern in normalized for pattern in NO_LISTINGS_PATTERNS)
 
-def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
+def async_retry(max_retries: int = 3, backoff_base: float = 1.0, *, assume_timeout_success: bool = False):
     """Decorator that retries async functions with exponential backoff."""
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(func)
@@ -103,6 +104,9 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
                     logger.warning(f"Rate limited, waiting {e.retry_after}s...")
                     await asyncio.sleep(e.retry_after)
                 except TimedOut:
+                    if assume_timeout_success:
+                        logger.warning(f"Timeout in {func.__name__}; assuming Telegram delivered to avoid duplicates")
+                        return True
                     if attempt < max_retries - 1:
                         logger.warning(f"Timeout in {func.__name__}, retrying... ({attempt + 1}/{max_retries})")
                     await asyncio.sleep(backoff_base * (attempt + 1))
@@ -303,7 +307,7 @@ async def scrape_olx_url(url: str) -> Optional[List[OlxItem]]:
     items = [item for card in cards if (item := parse_card(card))]
     return items
 
-@async_retry(max_retries=3, backoff_base=2.0)
+@async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
 async def send_message(bot: Bot, chat_id: str, text: str) -> bool:
     """Send text message via Telegram bot."""
     async with _SEND_SEMAPHORE:
@@ -513,14 +517,14 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
             r.raise_for_status()
             return await r.read()
 
-@async_retry(max_retries=3, backoff_base=2.0)
+@async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
 async def _send_photo_by_url(bot: Bot, chat_id: str, photo_url: str, caption: str) -> bool:
     """Send photo by URL."""
     async with _SEND_SEMAPHORE:
         await bot.send_photo(chat_id=chat_id, photo=photo_url, caption=caption, parse_mode=ParseMode.HTML)
     return True
 
-@async_retry(max_retries=3, backoff_base=2.0)
+@async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
 async def _send_photo_by_bytes(bot: Bot, chat_id: str, photo_bytes: bytes, caption: str) -> bool:
     """Send photo by bytes."""
     async with _SEND_SEMAPHORE:
@@ -588,6 +592,19 @@ def _db_init_sync():
                 last_checked_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS olx_notifications (
+                notification_key TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                price_int INTEGER NOT NULL,
+                source TEXT,
+                state TEXT NOT NULL,
+                claimed_at TEXT,
+                sent_at TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         try:
             cursor = conn.execute("PRAGMA table_info(olx_items)")
             cols = [col[1] for col in cursor.fetchall()]
@@ -598,6 +615,7 @@ def _db_init_sync():
             logger.error(f"❌ Migration error: {e}")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_items_source ON olx_items(source);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_items_price_name ON olx_items(price_int, name);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_notifications_price_state ON olx_notifications(price_int, state);")
         conn.commit()
 
 async def db_init():
@@ -644,6 +662,122 @@ async def db_upsert_item(item: OlxItem, source_name: str, touch_last_sent: bool)
     await asyncio.to_thread(_db_upsert_item_sync, item, source_name, touch_last_sent, None)
 
 
+def _notification_storage_key(key: Tuple[str, int]) -> str:
+    return f"{key[0]}\x1f{key[1]}"
+
+
+def _db_claim_notification_key_sync(item: OlxItem, source_name: str) -> bool:
+    key = _duplicate_key(item.name, item.price_int)
+    if key is None:
+        return True
+
+    storage_key = _notification_storage_key(key)
+    conn = _db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT state,
+                   CASE
+                       WHEN claimed_at IS NULL OR claimed_at <= datetime('now', ?)
+                       THEN 1 ELSE 0
+                   END AS is_stale
+            FROM olx_notifications
+            WHERE notification_key = ?
+            """,
+            (f"-{NOTIFICATION_CLAIM_STALE_MINUTES} minutes", storage_key),
+        ).fetchone()
+        if row is not None:
+            if row["state"] == "sent":
+                conn.commit()
+                return False
+            if row["state"] == "pending" and not bool(row["is_stale"]):
+                conn.commit()
+                return False
+        conn.execute(
+            """
+            INSERT INTO olx_notifications (
+                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'), NULL, datetime('now'))
+            ON CONFLICT(notification_key) DO UPDATE SET
+                item_id=excluded.item_id,
+                name=excluded.name,
+                price_int=excluded.price_int,
+                source=excluded.source,
+                state='pending',
+                claimed_at=datetime('now'),
+                sent_at=NULL,
+                updated_at=datetime('now')
+            """,
+            (storage_key, item.id, item.name, item.price_int, source_name),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+async def db_claim_notification_key(item: OlxItem, source_name: str) -> bool:
+    return await asyncio.to_thread(_db_claim_notification_key_sync, item, source_name)
+
+
+def _db_mark_notification_sent_sync(item: OlxItem, source_name: str) -> None:
+    key = _duplicate_key(item.name, item.price_int)
+    if key is None:
+        return
+    storage_key = _notification_storage_key(key)
+    with _db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO olx_notifications (
+                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'sent', datetime('now'), datetime('now'), datetime('now'))
+            ON CONFLICT(notification_key) DO UPDATE SET
+                item_id=excluded.item_id,
+                name=excluded.name,
+                price_int=excluded.price_int,
+                source=excluded.source,
+                state='sent',
+                sent_at=datetime('now'),
+                updated_at=datetime('now')
+            """,
+            (storage_key, item.id, item.name, item.price_int, source_name),
+        )
+        conn.commit()
+
+
+async def db_mark_notification_sent(item: OlxItem, source_name: str) -> None:
+    await asyncio.to_thread(_db_mark_notification_sent_sync, item, source_name)
+
+
+def _db_release_notification_claim_sync(item: OlxItem, source_name: str) -> None:
+    key = _duplicate_key(item.name, item.price_int)
+    if key is None:
+        return
+    storage_key = _notification_storage_key(key)
+    with _db_connect() as conn:
+        conn.execute(
+            """
+            UPDATE olx_notifications
+            SET item_id = ?,
+                name = ?,
+                price_int = ?,
+                source = ?,
+                state = 'failed',
+                updated_at = datetime('now')
+            WHERE notification_key = ?
+            """,
+            (item.id, item.name, item.price_int, source_name, storage_key),
+        )
+        conn.commit()
+
+
+async def db_release_notification_claim(item: OlxItem, source_name: str) -> None:
+    await asyncio.to_thread(_db_release_notification_claim_sync, item, source_name)
+
+
 def _db_fetch_existing_sync(item_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
     """Fetch existing items using a single shared connection with batch query."""
     if not item_ids:
@@ -683,12 +817,22 @@ def _db_fetch_duplicate_keys_sync(items: List[OlxItem]) -> set[Tuple[str, int]]:
         placeholders = ",".join("?" * len(prices))
         query = f"SELECT id, name, price_int FROM olx_items WHERE price_int IN ({placeholders})"
         rows = conn.execute(query, prices).fetchall()
+        notification_query = f"""
+            SELECT notification_key, name, price_int
+            FROM olx_notifications
+            WHERE price_int IN ({placeholders}) AND state IN ('pending', 'sent')
+        """
+        notification_rows = conn.execute(notification_query, prices).fetchall()
         duplicates: set[Tuple[str, int]] = set()
         for row in rows:
             row_key = _duplicate_key(str(row["name"] or ""), int(row["price_int"] or 0))
             if row_key is None or row_key not in candidate_map:
                 continue
             if str(row["id"]) not in candidate_map[row_key]:
+                duplicates.add(row_key)
+        for row in notification_rows:
+            row_key = _duplicate_key(str(row["name"] or ""), int(row["price_int"] or 0))
+            if row_key is not None and row_key in candidate_map:
                 duplicates.add(row_key)
         return duplicates
     finally:
@@ -815,14 +959,20 @@ async def run_olx_scraper():
                     logger.warning(f"No image available for item {item.id}")
                     total_without_images += 1
             sent = await send_photo_with_upscale(bot, chat_id, text, image_url)
+            if sent:
+                await db_mark_notification_sent(item, source_name)
+            else:
+                await db_release_notification_claim(item, source_name)
             await _persist_item_state(item, source_name, bool(sent))
             await asyncio.sleep(0.2)
         except RetryAfter as e:
             logger.warning(f"Rate limited for item {item.id}, waiting {e.retry_after}s")
         except TimedOut:
+            await db_mark_notification_sent(item, source_name)
             logger.warning(f"Timeout sending item {item.id}")
             _add_error("Telegram send timeout")
         except Exception as e:
+            await db_release_notification_claim(item, source_name)
             logger.error(f"Failed to send item {item.id}: {e}")
             _add_error(f"Send item error: {e}")
 
@@ -879,6 +1029,9 @@ async def run_olx_scraper():
                     logger.info("Skipping OLX duplicate in current run: %s | %s грн", it.name, it.price_int)
                     continue
                 if prev is None:
+                    if not await db_claim_notification_key(it, source_name):
+                        logger.info("Skipping OLX duplicate already claimed/sent: %s | %s грн", it.name, it.price_int)
+                        continue
                     send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
                     continue
 
@@ -899,6 +1052,9 @@ async def run_olx_scraper():
                     )
                     continue
 
+                if not await db_claim_notification_key(it, source_name):
+                    logger.info("Skipping OLX duplicate already claimed/sent: %s | %s грн", it.name, it.price_int)
+                    continue
                 send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
 
             if send_tasks:
