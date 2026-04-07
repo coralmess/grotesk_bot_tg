@@ -164,6 +164,18 @@ def get_allowed_chat_ids(default_chat_id, telegram_chat_id):
     return allowed
 
 
+def unique_bot_tokens(*tokens: str | None) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for raw in tokens:
+        token = (raw or "").strip().strip("'\"")
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        unique.append(token)
+    return unique
+
+
 def tail_log_lines(path, *, line_count, logger):
     if not path.exists():
         return []
@@ -201,6 +213,7 @@ async def command_listener(
     *,
     line_count,
     add_dynamic_url_func: Callable[[str], tuple[bool, Optional[str], Optional[str]]],
+    unsubscribe_item_func: Optional[Callable[[object], "asyncio.Future[tuple[bool, str]]"]] = None,
     logger,
 ):
     if not bot_token:
@@ -260,9 +273,14 @@ async def command_listener(
                                 f"📥 Name: {url_name}"
                             ),
                         )
+                elif command == "/unsubscribe":
+                    if unsubscribe_item_func is None:
+                        await bot.send_message(chat_id=chat_id, text="Unsubscribe is not configured.")
+                        continue
+                    _, response = await unsubscribe_item_func(message)
+                    await bot.send_message(chat_id=chat_id, text=response)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.error(f"Command listener error: {exc}")
             await asyncio.sleep(5)
-

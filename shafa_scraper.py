@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_UPSCALE_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
 from config_shafa_urls import SHAFA_URLS
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
+from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import SHAFA_ITEMS_DB_FILE
 
 try:
@@ -982,12 +983,16 @@ async def run_shafa_scraper():
             total_scraped += len(items)
             prev_items = await asyncio.to_thread(_db_fetch_existing_sync, [item.id for item in items])
             duplicate_keys_in_db = await asyncio.to_thread(_db_fetch_duplicate_keys_sync, items)
+            unsubscribed_item_ids = await fetch_unsubscribed_ids("shafa", [item.id for item in items])
             new_count = 0
             send_tasks = []
             items_to_send = []
             updates = []
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
+                if it.id in unsubscribed_item_ids:
+                    logger.info("Skipping unsubscribed SHAFA item: %s", it.id)
+                    continue
                 duplicate_key = _duplicate_key(it.name, it.price_int)
                 if duplicate_key is not None and duplicate_key in duplicate_keys_in_db:
                     logger.info("Skipping SHAFA duplicate already in DB: %s | %s грн", it.name, it.price_int)

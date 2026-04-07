@@ -26,7 +26,8 @@ from helpers.dynamic_sources import add_dynamic_url, detect_source
 from helpers import image_pipeline as image_pipeline_helpers
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers import lyst_state as lyst_state_helpers
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC
+from helpers import scraper_unsubscribes as scraper_unsubscribes_helpers
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_OLX_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -2191,7 +2192,15 @@ async def command_listener(bot_token, allowed_chat_ids, log_path):
         log_path,
         line_count=LOG_TAIL_LINES,
         add_dynamic_url_func=add_dynamic_url,
+        unsubscribe_item_func=scraper_unsubscribes_helpers.unsubscribe_from_reply_message,
         logger=logger,
+    )
+
+
+def iter_command_listener_tokens():
+    return telegram_runtime_helpers.unique_bot_tokens(
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_OLX_BOT_TOKEN,
     )
 
 async def _run_olx_and_mark():
@@ -2614,11 +2623,12 @@ async def main():
 
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
-    for coro, task_name in (
-        (message_queue.process_queue(), "tg_message_queue"),
-        (command_listener(TELEGRAM_BOT_TOKEN, get_allowed_chat_ids(), BOT_LOG_FILE), "tg_command_listener"),
-    ):
-        _start_background_task(coro, task_name)
+    _start_background_task(message_queue.process_queue(), "tg_message_queue")
+    for index, bot_token in enumerate(iter_command_listener_tokens(), start=1):
+        _start_background_task(
+            command_listener(bot_token, get_allowed_chat_ids(), BOT_LOG_FILE),
+            f"tg_command_listener_{index}",
+        )
     try:
         chat_id = int((DANYLO_DEFAULT_CHAT_ID or "").strip())
     except Exception:

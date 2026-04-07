@@ -13,6 +13,7 @@ from functools import wraps
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, OLX_TASK_CONCURRENCY, OLX_HTTP_HTML_CONCURRENCY, OLX_HTTP_IMAGE_CONCURRENCY, OLX_UPSCALE_CONCURRENCY, OLX_SEND_CONCURRENCY, OLX_HTTP_CONNECTOR_LIMIT
 from config_olx_urls import OLX_URLS
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
+from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import OLX_ITEMS_DB_FILE
 try:
     import lxml  # noqa: F401
@@ -1017,10 +1018,14 @@ async def run_olx_scraper():
             total_scraped += len(items)
             prev_items = await db_fetch_existing([item.id for item in items])
             duplicate_keys_in_db = await db_fetch_duplicate_keys(items)
+            unsubscribed_item_ids = await fetch_unsubscribed_ids("olx", [item.id for item in items])
 
             send_tasks = []
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
+                if it.id in unsubscribed_item_ids:
+                    logger.info("Skipping unsubscribed OLX item: %s", it.id)
+                    continue
                 duplicate_key = _duplicate_key(it.name, it.price_int)
                 if duplicate_key is not None and duplicate_key in duplicate_keys_in_db:
                     logger.info("Skipping OLX duplicate already in DB: %s | %s грн", it.name, it.price_int)
