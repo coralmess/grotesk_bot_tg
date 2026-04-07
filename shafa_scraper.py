@@ -47,6 +47,7 @@ _playwright_context: Optional[BrowserContext] = None
 _playwright_instance = None
 MIN_PRICE_DIFF = 50
 MIN_PRICE_DIFF_PERCENT = 25.0
+NOTIFICATION_CLAIM_STALE_MINUTES = 120
 _PARSER = "lxml" if _LXML_AVAILABLE else "html.parser"
 # Hot-path regexes are precompiled once so repeated card parsing stays cheap.
 NON_DIGIT_RE = re.compile(r"[^\d]")
@@ -84,7 +85,7 @@ def _duplicate_key(name: str, price_int: int) -> Optional[Tuple[str, int]]:
         return None
     return normalized_name, int(price_int)
 
-def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
+def async_retry(max_retries: int = 3, backoff_base: float = 1.0, *, assume_timeout_success: bool = False):
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
         @wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -95,6 +96,9 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0):
                     logger.warning(f"Telegram rate limit hit; waiting {e.retry_after}s...")
                     await asyncio.sleep(e.retry_after)
                 except TimedOut:
+                    if assume_timeout_success:
+                        logger.warning(f"Timeout in {func.__name__}; assuming Telegram delivered to avoid duplicates")
+                        return True
                     if attempt == max_retries - 1:
                         logger.warning(f"Timeout in {func.__name__} after {max_retries} attempts")
                     if attempt < max_retries - 1:
@@ -453,7 +457,7 @@ async def scrape_shafa_url(url: str) -> Optional[List[ShafaItem]]:
     items, _ = _parse_items_from_html(html)
     return items
 
-@async_retry(max_retries=3, backoff_base=2.0)
+@async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
 async def send_message(bot: Bot, chat_id: str, text: str) -> bool:
     async with _SEND_SEMAPHORE:
         await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
@@ -588,7 +592,7 @@ async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
             r.raise_for_status()
             return await r.read()
 
-@async_retry(max_retries=3, backoff_base=2.0)
+@async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
 async def _send_photo_by_bytes(bot: Bot, chat_id: str, photo_bytes: bytes, caption: str) -> bool:
     async with _SEND_SEMAPHORE:
         await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(photo_bytes), caption=caption, parse_mode=ParseMode.HTML)
@@ -649,6 +653,19 @@ def _db_init_sync():
                 last_checked_at TEXT DEFAULT (datetime('now'))
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS shafa_notifications (
+                notification_key TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                price_int INTEGER NOT NULL,
+                source TEXT,
+                state TEXT NOT NULL,
+                claimed_at TEXT,
+                sent_at TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         try:
             cols = [row[1] for row in conn.execute("PRAGMA table_info(shafa_items)").fetchall()]
             if "first_image_url" not in cols:
@@ -657,6 +674,7 @@ def _db_init_sync():
             pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shafa_items_source ON shafa_items(source);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shafa_items_price_name ON shafa_items(price_int, name);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_shafa_notifications_price_state ON shafa_notifications(price_int, state);")
         conn.commit()
 
 def _db_upsert_items_sync(items: List[Tuple[ShafaItem, bool]], source_name: str):
@@ -679,6 +697,110 @@ def _db_upsert_items_sync(items: List[Tuple[ShafaItem, bool]], source_name: str)
                  1 if touch_last_sent else 0, 1 if touch_last_sent else 0)
                 for item, touch_last_sent in items
             ])
+        conn.commit()
+
+
+def _notification_storage_key(key: Tuple[str, int]) -> str:
+    return f"{key[0]}\x1f{key[1]}"
+
+
+def _db_claim_notification_key_sync(item: ShafaItem, source_name: str) -> bool:
+    key = _duplicate_key(item.name, item.price_int)
+    if key is None:
+        return True
+
+    storage_key = _notification_storage_key(key)
+    conn = _db_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT state,
+                   CASE
+                       WHEN claimed_at IS NULL OR claimed_at <= datetime('now', ?)
+                       THEN 1 ELSE 0
+                   END AS is_stale
+            FROM shafa_notifications
+            WHERE notification_key = ?
+            """,
+            (f"-{NOTIFICATION_CLAIM_STALE_MINUTES} minutes", storage_key),
+        ).fetchone()
+        if row is not None:
+            if row["state"] == "sent":
+                conn.commit()
+                return False
+            if row["state"] == "pending" and not bool(row["is_stale"]):
+                conn.commit()
+                return False
+        conn.execute(
+            """
+            INSERT INTO shafa_notifications (
+                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'), NULL, datetime('now'))
+            ON CONFLICT(notification_key) DO UPDATE SET
+                item_id=excluded.item_id,
+                name=excluded.name,
+                price_int=excluded.price_int,
+                source=excluded.source,
+                state='pending',
+                claimed_at=datetime('now'),
+                sent_at=NULL,
+                updated_at=datetime('now')
+            """,
+            (storage_key, item.id, item.name, item.price_int, source_name),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _db_mark_notification_sent_sync(item: ShafaItem, source_name: str) -> None:
+    key = _duplicate_key(item.name, item.price_int)
+    if key is None:
+        return
+    storage_key = _notification_storage_key(key)
+    with _db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO shafa_notifications (
+                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'sent', datetime('now'), datetime('now'), datetime('now'))
+            ON CONFLICT(notification_key) DO UPDATE SET
+                item_id=excluded.item_id,
+                name=excluded.name,
+                price_int=excluded.price_int,
+                source=excluded.source,
+                state='sent',
+                sent_at=datetime('now'),
+                updated_at=datetime('now')
+            """,
+            (storage_key, item.id, item.name, item.price_int, source_name),
+        )
+        conn.commit()
+
+
+def _db_release_notification_claim_sync(item: ShafaItem, source_name: str) -> None:
+    key = _duplicate_key(item.name, item.price_int)
+    if key is None:
+        return
+    storage_key = _notification_storage_key(key)
+    with _db_connect() as conn:
+        conn.execute(
+            """
+            UPDATE shafa_notifications
+            SET item_id = ?,
+                name = ?,
+                price_int = ?,
+                source = ?,
+                state = 'failed',
+                updated_at = datetime('now')
+            WHERE notification_key = ?
+            """,
+            (item.id, item.name, item.price_int, source_name, storage_key),
+        )
         conn.commit()
 
 def _db_fetch_existing_sync(item_ids: List[str]) -> List[Optional[Dict[str, Any]]]:
@@ -712,12 +834,22 @@ def _db_fetch_duplicate_keys_sync(items: List[ShafaItem]) -> set[Tuple[str, int]
         placeholders = ",".join("?" * len(prices))
         query = f"SELECT id, name, price_int FROM shafa_items WHERE price_int IN ({placeholders})"
         rows = conn.execute(query, prices).fetchall()
+        notification_query = f"""
+            SELECT notification_key, name, price_int
+            FROM shafa_notifications
+            WHERE price_int IN ({placeholders}) AND state IN ('pending', 'sent')
+        """
+        notification_rows = conn.execute(notification_query, prices).fetchall()
         duplicates: set[Tuple[str, int]] = set()
         for row in rows:
             row_key = _duplicate_key(str(row["name"] or ""), int(row["price_int"] or 0))
             if row_key is None or row_key not in candidate_map:
                 continue
             if str(row["id"]) not in candidate_map[row_key]:
+                duplicates.add(row_key)
+        for row in notification_rows:
+            row_key = _duplicate_key(str(row["name"] or ""), int(row["price_int"] or 0))
+            if row_key is not None and row_key in candidate_map:
                 duplicates.add(row_key)
         return duplicates
     finally:
@@ -785,20 +917,25 @@ async def run_shafa_scraper():
     run_seen_duplicate_keys: set[Tuple[str, int]] = set()
     run_seen_lock = asyncio.Lock()
 
-    async def _send_item_message(bot: Bot, chat_id: str, text: str, item: ShafaItem) -> bool:
+    async def _send_item_message(bot: Bot, chat_id: str, text: str, item: ShafaItem, source_name: str) -> bool:
         nonlocal total_sent
         try:
             image_url = item.first_image_url
             sent = await send_photo_with_upscale(bot, chat_id, text, image_url)
             if sent:
+                await asyncio.to_thread(_db_mark_notification_sent_sync, item, source_name)
                 total_sent += 1
+            else:
+                await asyncio.to_thread(_db_release_notification_claim_sync, item, source_name)
             return bool(sent)
         except RetryAfter as e:
             logger.warning(f"Telegram rate limit hit; waiting {e.retry_after}s")
         except TimedOut:
+            await asyncio.to_thread(_db_mark_notification_sent_sync, item, source_name)
             logger.warning("Timeout while sending")
             _add_error("Telegram send timeout")
         except Exception as e:
+            await asyncio.to_thread(_db_release_notification_claim_sync, item, source_name)
             logger.error(f"Send failed: {e}")
             _add_error(f"Send failed: {e}")
         return False
@@ -864,9 +1001,12 @@ async def run_shafa_scraper():
                     if not _has_numeric_price(it.price_text, it.price_int):
                         logger.warning(f"Skipping new item with empty/invalid price: {it.id}")
                         continue
+                    if not await asyncio.to_thread(_db_claim_notification_key_sync, it, source_name):
+                        logger.info("Skipping SHAFA duplicate already claimed/sent: %s | %s грн", it.name, it.price_int)
+                        continue
                     new_count += 1
                     items_to_send.append(it)
-                    send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it))
+                    send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
                     continue
                 # Do not apply price updates when parser produced empty/invalid price.
                 if not _has_numeric_price(it.price_text, it.price_int):
@@ -888,8 +1028,11 @@ async def run_shafa_scraper():
                 # moves must not rewrite DB state and dilute later larger drops.
                 if price_diff < MIN_PRICE_DIFF or (percent_change is not None and percent_change < MIN_PRICE_DIFF_PERCENT):
                     continue
+                if not await asyncio.to_thread(_db_claim_notification_key_sync, it, source_name):
+                    logger.info("Skipping SHAFA duplicate already claimed/sent: %s | %s грн", it.name, it.price_int)
+                    continue
                 items_to_send.append(it)
-                send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it))
+                send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
             if send_tasks:
                 results = await asyncio.gather(*send_tasks, return_exceptions=True)
                 for it, res in zip(items_to_send, results):
