@@ -214,6 +214,9 @@ async def command_listener(
     line_count,
     add_dynamic_url_func: Callable[[str], tuple[bool, Optional[str], Optional[str]]],
     unsubscribe_item_func: Optional[Callable[[object], "asyncio.Future[tuple[bool, str]]"]] = None,
+    allow_log_commands: bool = True,
+    allow_add_commands: bool = True,
+    allow_unsubscribe_commands: bool = True,
     logger,
 ):
     if not bot_token:
@@ -242,9 +245,9 @@ async def command_listener(
                 if not raw_text:
                     continue
                 command = raw_text.split()[0].split("@")[0].lower()
-                if command in ("/log", "/logs", "/log500"):
+                if allow_log_commands and command in ("/log", "/logs", "/log500"):
                     await send_log_tail(bot, chat_id, log_path, line_count=line_count, logger=logger)
-                elif command in ("/add", "/addlink", "/addurl"):
+                elif allow_add_commands and command in ("/add", "/addlink", "/addurl"):
                     url_match = re.search(r"https?://\S+", raw_text)
                     if not url_match:
                         await bot.send_message(chat_id=chat_id, text="Send a valid URL after the command.")
@@ -273,7 +276,7 @@ async def command_listener(
                                 f"📥 Name: {url_name}"
                             ),
                         )
-                elif command == "/unsubscribe":
+                elif allow_unsubscribe_commands and command == "/unsubscribe":
                     if unsubscribe_item_func is None:
                         await bot.send_message(chat_id=chat_id, text="Unsubscribe is not configured.")
                         continue

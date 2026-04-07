@@ -9,6 +9,7 @@ RUNTIME_DB_DIR = RUNTIME_DATA_DIR / "db"
 RUNTIME_TEXT_DIR = RUNTIME_DATA_DIR / "text"
 RUNTIME_DEBUG_DIR = RUNTIME_DATA_DIR / "debug"
 RUNTIME_JSON_DIR = RUNTIME_DATA_DIR / "json"
+RUNTIME_STATUS_DIR = RUNTIME_DATA_DIR / "status"
 
 
 def ensure_runtime_dirs() -> None:
@@ -19,6 +20,7 @@ def ensure_runtime_dirs() -> None:
         RUNTIME_TEXT_DIR,
         RUNTIME_DEBUG_DIR,
         RUNTIME_JSON_DIR,
+        RUNTIME_STATUS_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -46,6 +48,9 @@ SHAFA_ITEMS_DB_FILE = runtime_file(RUNTIME_DB_DIR, "shafa_items.db")
 STATUS_MESSAGE_ID_FILE = runtime_file(RUNTIME_TEXT_DIR, "status_message_id.txt")
 
 LAST_RUNS_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "last_runs.json")
+MARKET_OLX_RUN_STATUS_FILE = runtime_file(RUNTIME_STATUS_DIR, "market_olx_run.json")
+MARKET_SHAFA_RUN_STATUS_FILE = runtime_file(RUNTIME_STATUS_DIR, "market_shafa_run.json")
+LYST_RUN_STATUS_FILE = runtime_file(RUNTIME_STATUS_DIR, "lyst_run.json")
 LYST_RESUME_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "lyst_resume.json")
 SHOE_DATA_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "shoe_data.json")
 EXCHANGE_RATES_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "exchange_rates.json")

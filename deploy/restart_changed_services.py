@@ -19,6 +19,33 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Keep rules explicit. Each service restart should be tied only to files that
 # can actually change its runtime behavior after a pull.
 SERVICE_RULES = {
+    "grotesk-market.service": (
+        "grotesk_market_service.py",
+        "grotesk-market.service",
+        "olx_scraper.py",
+        "shafa_scraper.py",
+        "helpers/dynamic_sources.py",
+        "helpers/scraper_unsubscribes.py",
+        "helpers/telegram_runtime.py",
+        "helpers/scheduler.py",
+        "helpers/runtime_paths.py",
+        "GroteskBotStatus.py",
+        "config.py",
+        "config_olx_urls.py",
+        "config_shafa_urls.py",
+    ),
+    "grotesk-lyst.service": (
+        "grotesk_lyst_service.py",
+        "grotesk-lyst.service",
+        "GroteskBotTg.py",
+        "helpers/telegram_runtime.py",
+        "helpers/scheduler.py",
+        "helpers/runtime_paths.py",
+        "helpers/lyst_",
+        "GroteskBotStatus.py",
+        "config.py",
+        "config_lyst.py",
+    ),
     "tsekbot.service": ("config.py", "tsek_bot/"),
     "usefulbot.service": ("useful_bot/", "usefulbot.service"),
 }

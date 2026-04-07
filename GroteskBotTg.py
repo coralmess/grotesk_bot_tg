@@ -11,13 +11,7 @@ from telegram.error import RetryAfter, TimedOut
 from GroteskBotStatus import (
     status_heartbeat,
     load_last_runs_from_file,
-    LAST_OLX_RUN_UTC,
-    LAST_SHAFA_RUN_UTC,
     begin_lyst_cycle,
-    mark_olx_run,
-    mark_olx_issue,
-    mark_shafa_run,
-    mark_shafa_issue,
     mark_lyst_start,
     mark_lyst_issue,
     finalize_lyst_run,
@@ -26,8 +20,7 @@ from helpers.dynamic_sources import add_dynamic_url, detect_source
 from helpers import image_pipeline as image_pipeline_helpers
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers import lyst_state as lyst_state_helpers
-from helpers import scraper_unsubscribes as scraper_unsubscribes_helpers
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_OLX_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -42,13 +35,11 @@ from helpers.lyst_debug import (
     dump_lyst_debug_event,
     write_stop_too_early_dump,
 )
-from helpers.scheduler import run_scheduler
+from helpers.scheduler import run_lyst_scheduler
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
 import aiosqlite
-from olx_scraper import run_olx_scraper
-from shafa_scraper import run_shafa_scraper
 from helpers.runtime_paths import (
     PYTHON_LOG_FILE,
     SHOES_DB_FILE as RUNTIME_SHOES_DB_FILE,
@@ -2192,28 +2183,11 @@ async def command_listener(bot_token, allowed_chat_ids, log_path):
         log_path,
         line_count=LOG_TAIL_LINES,
         add_dynamic_url_func=add_dynamic_url,
-        unsubscribe_item_func=scraper_unsubscribes_helpers.unsubscribe_from_reply_message,
+        allow_log_commands=True,
+        allow_add_commands=True,
+        allow_unsubscribe_commands=False,
         logger=logger,
     )
-
-
-def iter_command_listener_tokens():
-    return telegram_runtime_helpers.unique_bot_tokens(
-        TELEGRAM_BOT_TOKEN,
-        TELEGRAM_OLX_BOT_TOKEN,
-    )
-
-async def _run_olx_and_mark():
-    err = await run_olx_scraper()
-    if err:
-        mark_olx_issue(err)
-    mark_olx_run(err if err else None)
-
-async def _run_shafa_and_mark():
-    err = await run_shafa_scraper()
-    if err:
-        mark_shafa_issue(err)
-    mark_shafa_run(err if err else None)
 
 # Processing functions
 def _merge_base_url_into_shoes(result, base_url, country):
@@ -2605,8 +2579,6 @@ async def maintenance_loop(interval_s: int):
         # Serialize shoes.db maintenance with async writes to avoid lock contention.
         async with DB_SEMAPHORE:
             await asyncio.to_thread(_db_maintenance_sync, [SHOES_DB_FILE])
-        # OLX/SHAFA use separate DB files; maintenance can run independently.
-        await asyncio.to_thread(_db_maintenance_sync, [OLX_DB_FILE, SHAFA_DB_FILE])
         await asyncio.sleep(interval_s)
 
 # Main application
@@ -2624,11 +2596,10 @@ async def main():
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
     _start_background_task(message_queue.process_queue(), "tg_message_queue")
-    for index, bot_token in enumerate(iter_command_listener_tokens(), start=1):
-        _start_background_task(
-            command_listener(bot_token, get_allowed_chat_ids(), BOT_LOG_FILE),
-            f"tg_command_listener_{index}",
-        )
+    _start_background_task(
+        command_listener(TELEGRAM_BOT_TOKEN, get_allowed_chat_ids(), BOT_LOG_FILE),
+        "tg_command_listener",
+    )
     try:
         chat_id = int((DANYLO_DEFAULT_CHAT_ID or "").strip())
     except Exception:
@@ -2708,21 +2679,14 @@ async def main():
             if not finalize_hang:
                 finalize_lyst_run()
 
-        await run_scheduler(
-            run_olx=_run_olx_and_mark,
-            run_shafa=_run_shafa_and_mark,
-            # Keep a single canonical Lyst pipeline to avoid drift between duplicate implementations.
+        await run_lyst_scheduler(
             run_lyst=lambda: run_lyst_cycle_impl(message_queue),
             is_running_lyst=lambda: IS_RUNNING_LYST,
             get_lyst_progress_ts=lambda: LYST_LAST_PROGRESS_TS,
             check_interval_sec=CHECK_INTERVAL_SEC,
             check_jitter_sec=CHECK_JITTER_SEC,
             logger=logger,
-            last_olx_run_exists=LAST_OLX_RUN_UTC is not None,
-            last_shafa_run_exists=LAST_SHAFA_RUN_UTC is not None,
             on_lyst_stall=_on_lyst_stall,
-            olx_timeout_sec=OLX_TIMEOUT_SEC,
-            shafa_timeout_sec=SHAFA_TIMEOUT_SEC,
             lyst_stall_timeout_sec=LYST_STALL_TIMEOUT_SEC,
         )
     finally:
