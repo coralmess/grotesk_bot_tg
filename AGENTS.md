@@ -30,5 +30,6 @@
 - For normal project work, update code locally first and test locally before any remote deployment.
 - Do not use git branches in this project unless the user explicitly asks for them.
 - After local changes and tests are done, ask the user whether they want the change committed, merged, and deployed to the instance.
+- If the user approves the production path, perform it in this order: commit locally, merge into the production-bound state, then pull it on instance and deploy it on  instance. Do not skip the merge step in wording or execution.
 - Only skip the local-first flow when the user explicitly asks for an instance hotfix or when local execution is impossible.
 - When work reveals a stable operational fact, workflow rule, infrastructure constraint, or recurring failure mode that future agents would benefit from, consider asking the user whether it should be added to `AGENTS.md`.
