@@ -1,4 +1,5 @@
 ﻿import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -52,6 +53,7 @@ class ExchangeRateHelper:
         self._state = self._load_state()
         self._lock = asyncio.Lock()
         self._monitor_task: Optional[asyncio.Task] = None
+        self._http_session: Optional[aiohttp.ClientSession] = None
 
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CommandHandler("exchange_status", self.status_command))
@@ -74,12 +76,14 @@ class ExchangeRateHelper:
 
     async def on_shutdown(self, application: Application) -> None:
         if not self._monitor_task:
+            await self._close_http_session()
             return
         self._monitor_task.cancel()
         try:
             await self._monitor_task
         except asyncio.CancelledError:
             pass
+        await self._close_http_session()
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._run_check(context.application, reason="status")
@@ -235,11 +239,10 @@ class ExchangeRateHelper:
             return True
 
     async def _fetch_snapshot(self) -> RateSnapshot:
-        timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
-        async with aiohttp.ClientSession(timeout=timeout, headers=HTTP_HEADERS) as session:
-            async with session.get(MONOBANK_RATES_URL) as response:
-                response.raise_for_status()
-                html = await response.text()
+        session = await self._get_http_session()
+        async with session.get(MONOBANK_RATES_URL) as response:
+            response.raise_for_status()
+            html = await response.text()
         parsed = self._parse_rates_from_html(html)
         now_kyiv = datetime.now(KYIV_TZ)
         return RateSnapshot(
@@ -351,6 +354,24 @@ class ExchangeRateHelper:
         next_run = min(candidates)
         seconds = max(1.0, (next_run - now).total_seconds())
         return seconds, next_run, "hourly-window"
+
+    async def _get_http_session(self) -> aiohttp.ClientSession:
+        if self._http_session is None or self._http_session.closed:
+            timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
+            connector = aiohttp.TCPConnector(limit=4, ttl_dns_cache=300)
+            self._http_session = aiohttp.ClientSession(
+                timeout=timeout,
+                headers=HTTP_HEADERS,
+                connector=connector,
+            )
+        return self._http_session
+
+    async def _close_http_session(self) -> None:
+        if self._http_session is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._http_session.close()
+        self._http_session = None
 
     def _load_state(self) -> Dict[str, Any]:
         if not STATE_FILE.exists():
