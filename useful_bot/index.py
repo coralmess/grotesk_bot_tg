@@ -15,6 +15,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from useful_bot.exchange_rate_helper import ExchangeRateHelper
 from useful_bot.ibkr_portfolio_helper import IBKRPortfolioHelper
+from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.service_health import build_service_health
 
 
@@ -117,7 +118,8 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    configure_third_party_loggers()
+    install_secret_redaction(logging.getLogger())
     app = build_application()
     app.run_polling(close_loop=False, drop_pending_updates=True)
 

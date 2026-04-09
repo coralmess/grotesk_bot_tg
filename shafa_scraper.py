@@ -965,7 +965,7 @@ async def run_shafa_scraper():
         level = min(streak // 365, 23)
         divisor = level + 1
         if cycle_count % divisor != 0:
-            logger.info(f"Skipping (cycle {cycle_count}/{divisor}, streak {streak})")
+            logger.debug(f"Skipping (cycle {cycle_count}/{divisor}, streak {streak})")
             await asyncio.to_thread(_db_update_source_stats_sync, url, streak, cycle_count)
             return
         try:
@@ -992,14 +992,14 @@ async def run_shafa_scraper():
             for idx, it in enumerate(items):
                 prev = prev_items[idx]
                 if it.id in unsubscribed_item_ids:
-                    logger.info("Skipping unsubscribed SHAFA item: %s", it.id)
+                    logger.debug("Skipping unsubscribed SHAFA item: %s", it.id)
                     continue
                 duplicate_key = _duplicate_key(it.name, it.price_int)
                 if duplicate_key is not None and duplicate_key in duplicate_keys_in_db:
-                    logger.info("Skipping SHAFA duplicate already in DB: %s | %s грн", it.name, it.price_int)
+                    logger.debug("Skipping SHAFA duplicate already in DB: %s | %s грн", it.name, it.price_int)
                     continue
                 if not await _claim_duplicate_key_for_run(it):
-                    logger.info("Skipping SHAFA duplicate in current run: %s | %s грн", it.name, it.price_int)
+                    logger.debug("Skipping SHAFA duplicate in current run: %s | %s грн", it.name, it.price_int)
                     continue
                 if prev and not it.first_image_url and prev.get("first_image_url"):
                     it.first_image_url = prev.get("first_image_url")
@@ -1008,7 +1008,7 @@ async def run_shafa_scraper():
                         logger.warning(f"Skipping new item with empty/invalid price: {it.id}")
                         continue
                     if not await asyncio.to_thread(_db_claim_notification_key_sync, it, source_name):
-                        logger.info("Skipping SHAFA duplicate already claimed/sent: %s | %s грн", it.name, it.price_int)
+                        logger.debug("Skipping SHAFA duplicate already claimed/sent: %s | %s грн", it.name, it.price_int)
                         continue
                     new_count += 1
                     items_to_send.append(it)
@@ -1035,7 +1035,7 @@ async def run_shafa_scraper():
                 if price_diff < MIN_PRICE_DIFF or (percent_change is not None and percent_change < MIN_PRICE_DIFF_PERCENT):
                     continue
                 if not await asyncio.to_thread(_db_claim_notification_key_sync, it, source_name):
-                    logger.info("Skipping SHAFA duplicate already claimed/sent: %s | %s грн", it.name, it.price_int)
+                    logger.debug("Skipping SHAFA duplicate already claimed/sent: %s | %s грн", it.name, it.price_int)
                     continue
                 items_to_send.append(it)
                 send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))

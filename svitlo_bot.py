@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
+from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.runtime_paths import SVITLO_SUBSCRIBERS_JSON_FILE, SVITLO_STATE_JSON_FILE
 from helpers.service_health import build_service_health
 
@@ -423,7 +424,8 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    configure_third_party_loggers()
+    install_secret_redaction(logging.getLogger())
     app = build_application()
     app.run_polling(close_loop=False, drop_pending_updates=True)
 

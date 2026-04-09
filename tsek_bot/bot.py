@@ -24,6 +24,7 @@ from telegram.ext import (
     filters,
 )
 from config import TELEGRAM_TSEK_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID
+from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.service_health import build_service_health
 from tsek_bot.constants import (
     MINUTES_PER_DAY,
@@ -48,7 +49,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger("tsek_schedule_bot")
-logging.getLogger("httpx").setLevel(logging.WARNING)
+configure_third_party_loggers()
+install_secret_redaction(logging.getLogger())
 SERVICE_HEALTH = build_service_health("tsekbot")
 
 GROUP_RE = re.compile(r"Черга\s+([1-6]\.[12])", re.IGNORECASE)

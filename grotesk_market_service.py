@@ -22,6 +22,7 @@ from config import (
 )
 from helpers.dynamic_sources import add_dynamic_url
 from helpers import scraper_unsubscribes as scraper_unsubscribes_helpers
+from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.service_health import build_service_health
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers.scheduler import run_market_scheduler
@@ -33,6 +34,8 @@ from shafa_scraper import run_shafa_scraper
 logger = logging.getLogger("grotesk_market_service")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
+configure_third_party_loggers()
+install_secret_redaction(logging.getLogger())
 
 SERVICE_HEALTH = build_service_health("grotesk-market")
 

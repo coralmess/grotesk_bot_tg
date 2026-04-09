@@ -36,6 +36,7 @@ from helpers.lyst_debug import (
     dump_lyst_debug_event,
     write_stop_too_early_dump,
 )
+from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.scheduler import run_lyst_scheduler
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
@@ -248,6 +249,8 @@ logger.addHandler(console_handler)
 file_handler = logging.FileHandler(BOT_LOG_FILE, encoding="utf-8")
 file_handler.setFormatter(ColoredFormatter('%(asctime)s', datefmt='%d.%m %H:%M:%S'))
 logger.addHandler(file_handler)
+configure_third_party_loggers()
+install_secret_redaction(logger)
 
 class SpecialLogger:
     @staticmethod
