@@ -5,7 +5,6 @@ import logging
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from statistics import mean
 from typing import Any, Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -18,6 +17,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from helpers.runtime_paths import RUNTIME_JSON_DIR, ensure_runtime_dirs
 from helpers.process_pool import run_cpu_bound
 from useful_bot.exchange_rate_image import render_exchange_rate_card
+from useful_bot.exchange_rate_presenter import build_exchange_rate_render_kwargs
 
 MONOBANK_RATES_URL = "https://minfin.com.ua/ua/company/monobank/currency/"
 STATE_FILE = RUNTIME_JSON_DIR / "useful_monobank_rates_state.json"
@@ -146,60 +146,15 @@ class ExchangeRateHelper:
             if not isinstance(history, list):
                 history = []
 
-            usd_spread = snapshot.usd_sell - snapshot.usd_buy
-            eur_sell_minus_usd_buy = snapshot.eur_sell - snapshot.usd_buy
-
-            # Include today's values in statistics so the marker always fits
-            history_plus_today = history + [
-                {
-                    "usd_spread": usd_spread,
-                    "eur_sell_minus_usd_buy": eur_sell_minus_usd_buy,
-                    "usd_buy": snapshot.usd_buy,
-                    "eur_buy": snapshot.eur_buy,
-                },
-            ]
-            usd_average = self._mean_from_history(history_plus_today, "usd_spread")
-            cross_average = self._mean_from_history(history_plus_today, "eur_sell_minus_usd_buy")
-            usd_spread_min = self._min_from_history(history_plus_today, "usd_spread")
-            usd_spread_max = self._max_from_history(history_plus_today, "usd_spread")
-            cross_min = self._min_from_history(history_plus_today, "eur_sell_minus_usd_buy")
-            cross_max = self._max_from_history(history_plus_today, "eur_sell_minus_usd_buy")
-
-            # Last ~30 days stats for buy prices
-            recent_30 = history_plus_today[-30:]
-            usd_buy_avg = self._mean_from_history(recent_30, "usd_buy")
-            usd_buy_min = self._min_from_history(recent_30, "usd_buy")
-            usd_buy_max = self._max_from_history(recent_30, "usd_buy")
-            eur_buy_avg = self._mean_from_history(recent_30, "eur_buy")
-            eur_buy_min = self._min_from_history(recent_30, "eur_buy")
-            eur_buy_max = self._max_from_history(recent_30, "eur_buy")
+            render_kwargs, history_plus_today = build_exchange_rate_render_kwargs(
+                snapshot,
+                last_snapshot,
+                history,
+            )
 
             image_buf = await run_cpu_bound(
                 render_exchange_rate_card,
-                usd_buy=snapshot.usd_buy,
-                usd_sell=snapshot.usd_sell,
-                eur_buy=snapshot.eur_buy,
-                eur_sell=snapshot.eur_sell,
-                prev_usd_buy=last_snapshot.usd_buy if last_snapshot else None,
-                prev_usd_sell=last_snapshot.usd_sell if last_snapshot else None,
-                prev_eur_buy=last_snapshot.eur_buy if last_snapshot else None,
-                prev_eur_sell=last_snapshot.eur_sell if last_snapshot else None,
-                usd_spread=usd_spread,
-                eur_sell_minus_usd_buy=eur_sell_minus_usd_buy,
-                usd_spread_avg=usd_average,
-                cross_avg=cross_average,
-                usd_spread_min=usd_spread_min,
-                usd_spread_max=usd_spread_max,
-                cross_min=cross_min,
-                cross_max=cross_max,
-                usd_spread_current=usd_spread,
-                cross_current=eur_sell_minus_usd_buy,
-                usd_buy_avg=usd_buy_avg,
-                usd_buy_min=usd_buy_min,
-                usd_buy_max=usd_buy_max,
-                eur_buy_avg=eur_buy_avg,
-                eur_buy_min=eur_buy_min,
-                eur_buy_max=eur_buy_max,
+                **render_kwargs,
             )
             sent = False
             for attempt in (1, 2):
@@ -312,36 +267,6 @@ class ExchangeRateHelper:
             round(snapshot.eur_buy, 2),
             round(snapshot.eur_sell, 2),
         )
-
-    @staticmethod
-    def _mean_from_history(history: list[dict[str, Any]], key: str) -> Optional[float]:
-        values = []
-        for item in history:
-            try:
-                values.append(float(item[key]))
-            except (KeyError, TypeError, ValueError):
-                continue
-        return mean(values) if values else None
-
-    @staticmethod
-    def _min_from_history(history: list[dict[str, Any]], key: str) -> Optional[float]:
-        values = []
-        for item in history:
-            try:
-                values.append(float(item[key]))
-            except (KeyError, TypeError, ValueError):
-                continue
-        return min(values) if values else None
-
-    @staticmethod
-    def _max_from_history(history: list[dict[str, Any]], key: str) -> Optional[float]:
-        values = []
-        for item in history:
-            try:
-                values.append(float(item[key]))
-            except (KeyError, TypeError, ValueError):
-                continue
-        return max(values) if values else None
 
     def _seconds_until_next_run(self, now: datetime) -> Tuple[float, datetime, str]:
         candidates = []
