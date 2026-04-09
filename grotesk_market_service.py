@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sqlite3
+import time
 
 from GroteskBotStatus import (
     load_last_runs_from_file,
@@ -21,6 +22,7 @@ from config import (
 )
 from helpers.dynamic_sources import add_dynamic_url
 from helpers import scraper_unsubscribes as scraper_unsubscribes_helpers
+from helpers.service_health import build_service_health
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers.scheduler import run_market_scheduler
 from helpers.runtime_paths import OLX_ITEMS_DB_FILE, SHAFA_ITEMS_DB_FILE
@@ -31,6 +33,8 @@ from shafa_scraper import run_shafa_scraper
 logger = logging.getLogger("grotesk_market_service")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
+
+SERVICE_HEALTH = build_service_health("grotesk-market")
 
 DB_MAINTENANCE_PRAGMAS = (
     "PRAGMA journal_mode=WAL;",
@@ -104,16 +108,24 @@ async def command_listener(bot_token, allowed_chat_ids):
 
 
 async def _run_olx_and_mark():
+    started = time.perf_counter()
     err = await run_olx_scraper()
     if err:
+        SERVICE_HEALTH.record_failure("olx_run", err, duration_seconds=time.perf_counter() - started)
         mark_olx_issue(err)
+    else:
+        SERVICE_HEALTH.record_success("olx_run", duration_seconds=time.perf_counter() - started)
     mark_olx_run(err if err else None)
 
 
 async def _run_shafa_and_mark():
+    started = time.perf_counter()
     err = await run_shafa_scraper()
     if err:
+        SERVICE_HEALTH.record_failure("shafa_run", err, duration_seconds=time.perf_counter() - started)
         mark_shafa_issue(err)
+    else:
+        SERVICE_HEALTH.record_success("shafa_run", duration_seconds=time.perf_counter() - started)
     mark_shafa_run(err if err else None)
 
 
@@ -127,12 +139,15 @@ async def _shutdown_background_tasks(tasks):
 async def main():
     load_last_runs_from_file()
     background_tasks = []
+    SERVICE_HEALTH.start()
+    SERVICE_HEALTH.mark_ready("market service starting")
 
     def _start_background_task(coro, task_name):
         task = asyncio.create_task(coro, name=task_name)
         background_tasks.append(task)
         return task
 
+    _start_background_task(SERVICE_HEALTH.heartbeat_loop(note="market service running"), "market_health_heartbeat")
     _start_background_task(
         command_listener(TELEGRAM_OLX_BOT_TOKEN, get_allowed_chat_ids()),
         "market_command_listener",
@@ -150,6 +165,7 @@ async def main():
             last_shafa_run_exists=statuses["shafa"]["last_run_end_utc"] is not None,
         )
     finally:
+        SERVICE_HEALTH.mark_stopping("market service stopping")
         await _shutdown_background_tasks(background_tasks)
 
 

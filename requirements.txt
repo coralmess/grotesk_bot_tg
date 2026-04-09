@@ -13,3 +13,4 @@ ibapi>=9.81.1.post1,<10.0
 yfinance>=0.2.54,<1.0
 opencv-contrib-python>=4.8
 numpy>=1.24
+prometheus-client>=0.20,<1.0

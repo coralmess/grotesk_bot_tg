@@ -224,21 +224,28 @@ class IBKRPortfolioHelper:
                 await asyncio.sleep(30)
 
     async def _run_check(self, application: Application, reason: str, force: bool) -> bool:
+        service_health = application.bot_data.get("service_health")
         async with self._lock:
             now_ny = self._now_provider(NEW_YORK_TZ)
             if not force and not should_run_daily_snapshot(now_ny, self._last_trade_date()):
+                if service_health is not None:
+                    service_health.record_success("ibkr_portfolio_check", note=f"{reason}:not_due")
                 return False
 
             try:
                 settings = self._settings_factory()
             except Exception:
                 logging.exception("IBKR helper is not configured correctly")
+                if service_health is not None:
+                    service_health.record_failure("ibkr_portfolio_check", "settings_invalid")
                 return False
 
             try:
                 snapshot = await self._fetch_snapshot_with_retries(settings=settings, now_ny=now_ny)
             except Exception:
                 logging.exception("Could not fetch IBKR portfolio snapshot")
+                if service_health is not None:
+                    service_health.record_failure("ibkr_portfolio_check", "snapshot_fetch_failed")
                 return False
 
             previous_snapshot = self._last_snapshot()
@@ -255,12 +262,16 @@ class IBKRPortfolioHelper:
                     baseline_qqqm_start_close=float(baseline["qqqm_start_close"]),
                 )
             if not force and previous_snapshot and previous_snapshot.trade_date == snapshot.trade_date:
+                if service_health is not None:
+                    service_health.record_success("ibkr_portfolio_check", note=f"{reason}:already_sent")
                 return False
             if should_skip_for_missing_daily_data(snapshot):
                 logging.info(
                     "Skipping IBKR card for %s because current-session daily data is incomplete.",
                     snapshot.trade_date,
                 )
+                if service_health is not None:
+                    service_health.record_success("ibkr_portfolio_check", note=f"{reason}:daily_data_incomplete")
                 return False
 
             image_buf = await asyncio.to_thread(
@@ -282,12 +293,16 @@ class IBKRPortfolioHelper:
 
             if not sent:
                 logging.error("Could not send IBKR card to Telegram; will retry on the next run.")
+                if service_health is not None:
+                    service_health.record_failure("ibkr_portfolio_check", "telegram_send_failed")
                 return False
 
             self._state["last_snapshot"] = snapshot.to_dict()
             self._state["last_reason"] = reason
             self._state["last_sent_at"] = datetime.now(NEW_YORK_TZ).isoformat(timespec="seconds")
             self._save_state()
+            if service_health is not None:
+                service_health.record_success("ibkr_portfolio_check", note=reason)
             return True
 
     async def _fetch_snapshot_with_retries(

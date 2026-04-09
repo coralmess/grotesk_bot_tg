@@ -2582,16 +2582,22 @@ async def maintenance_loop(interval_s: int):
         await asyncio.sleep(interval_s)
 
 # Main application
-async def main():
+async def main(service_health=None):
     global LIVE_MODE
     load_last_runs_from_file()
     background_tasks = []
+    if service_health is not None:
+        service_health.start()
+        service_health.mark_ready("lyst service starting")
 
     def _start_background_task(coro, task_name):
         # Keep handles so we can cancel/await gracefully during shutdown.
         task = asyncio.create_task(coro, name=task_name)
         background_tasks.append(task)
         return task
+
+    if service_health is not None:
+        _start_background_task(service_health.heartbeat_loop(note="lyst service running"), "lyst_health_heartbeat")
 
     # Initialize and start message queue
     message_queue = TelegramMessageQueue(TELEGRAM_BOT_TOKEN)
@@ -2678,9 +2684,23 @@ async def main():
             log_lyst_run_progress_summary()
             if not finalize_hang:
                 finalize_lyst_run()
+            if service_health is not None:
+                service_health.record_failure("lyst_run", "stalled")
+
+        async def _run_lyst_and_track():
+            started = time.perf_counter()
+            try:
+                result = await run_lyst_cycle_impl(message_queue)
+            except Exception as exc:
+                if service_health is not None:
+                    service_health.record_failure("lyst_run", exc, duration_seconds=time.perf_counter() - started)
+                raise
+            if service_health is not None:
+                service_health.record_success("lyst_run", duration_seconds=time.perf_counter() - started)
+            return result
 
         await run_lyst_scheduler(
-            run_lyst=lambda: run_lyst_cycle_impl(message_queue),
+            run_lyst=_run_lyst_and_track,
             is_running_lyst=lambda: IS_RUNNING_LYST,
             get_lyst_progress_ts=lambda: LYST_LAST_PROGRESS_TS,
             check_interval_sec=CHECK_INTERVAL_SEC,
@@ -2690,6 +2710,8 @@ async def main():
             lyst_stall_timeout_sec=LYST_STALL_TIMEOUT_SEC,
         )
     finally:
+        if service_health is not None:
+            service_health.mark_stopping("lyst service stopping")
         await _shutdown_background_tasks(background_tasks)
 
 if __name__ == "__main__":

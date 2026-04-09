@@ -105,11 +105,14 @@ class ExchangeRateHelper:
                 await asyncio.sleep(30)
 
     async def _run_check(self, application: Application, reason: str) -> bool:
+        service_health = application.bot_data.get("service_health")
         async with self._lock:
             try:
                 snapshot = await self._fetch_snapshot()
             except Exception:
                 logging.exception("Could not fetch/parse exchange rates from Minfin")
+                if service_health is not None:
+                    service_health.record_failure("exchange_rate_check", "fetch_failed")
                 return False
 
             last_snapshot_data = self._state.get("last_snapshot")
@@ -129,6 +132,8 @@ class ExchangeRateHelper:
 
             changed = last_snapshot is None or self._snapshot_signature(snapshot) != self._snapshot_signature(last_snapshot)
             if not changed:
+                if service_health is not None:
+                    service_health.record_success("exchange_rate_check", note=f"{reason}:no_change")
                 return False
 
             history = self._state.get("history", [])
@@ -202,6 +207,8 @@ class ExchangeRateHelper:
 
             if not sent:
                 logging.error("Could not send exchange-rate update to Telegram; will retry on next check.")
+                if service_health is not None:
+                    service_health.record_failure("exchange_rate_check", "telegram_send_failed")
                 return False
 
             history.append(
@@ -220,6 +227,8 @@ class ExchangeRateHelper:
             self._state["history"] = history
             self._state["last_snapshot"] = asdict(snapshot)
             self._save_state()
+            if service_health is not None:
+                service_health.record_success("exchange_rate_check", note=reason)
             return True
 
     async def _fetch_snapshot(self) -> RateSnapshot:

@@ -13,6 +13,7 @@ from telegram import Update
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
 from helpers.runtime_paths import SVITLO_SUBSCRIBERS_JSON_FILE, SVITLO_STATE_JSON_FILE
+from helpers.service_health import build_service_health
 
 HOST = "grotesk.tplinkdns.com"
 PORT = 45678
@@ -42,6 +43,8 @@ class SvitloBot:
         self._state: Optional[PowerState] = self._load_state()
         self._lock = asyncio.Lock()
         self._monitor_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._service_health = build_service_health("svitlobot")
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_chat or not update.message:
@@ -71,9 +74,22 @@ class SvitloBot:
 
     async def on_startup(self, application: Application) -> None:
         logging.info("Starting monitor loop for %s:%s", HOST, PORT)
+        self._service_health.start()
+        self._service_health.mark_ready("svitlo bot starting")
+        self._heartbeat_task = asyncio.create_task(
+            self._service_health.heartbeat_loop(note="svitlo bot running"),
+            name="svitlo-health-heartbeat",
+        )
         self._monitor_task = asyncio.create_task(self._monitor_loop(application), name="svitlo-monitor-loop")
 
     async def on_shutdown(self, application: Application) -> None:
+        self._service_health.mark_stopping("svitlo bot stopping")
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
         if not self._monitor_task:
             return
         self._monitor_task.cancel()
@@ -92,6 +108,7 @@ class SvitloBot:
                     self._state = PowerState(value=new_value, updated_at=now_iso, changed_at=now_iso)
                     self._save_state()
                     logging.info("Initial power state: %s", new_value)
+                    self._service_health.record_success("power_check", note=f"initial:{new_value}")
                 elif new_value != self._state.value:
                     previous_state = self._state
                     previous = previous_state.value
@@ -113,6 +130,7 @@ class SvitloBot:
                         )
                         self._state.transition_message_ids = message_ids
                         self._save_state()
+                        self._service_health.record_success("power_state_change", note=f"{previous}->{new_value}")
                     elif previous == "OFF" and new_value == "ON":
                         outage_seconds = self._duration_seconds(previous_state.changed_at, now_iso)
                         if outage_seconds is not None and outage_seconds < IGNORE_OUTAGE_SECONDS:
@@ -130,6 +148,7 @@ class SvitloBot:
                                 changed_at=previous_state.previous_changed_at or now_iso,
                             )
                             self._save_state()
+                            self._service_health.record_success("power_state_change", note="ignored_short_outage")
                         else:
                             self._state = PowerState(value="ON", updated_at=now_iso, changed_at=now_iso)
                             self._save_state()
@@ -140,6 +159,7 @@ class SvitloBot:
                                 new_value,
                                 previous_duration,
                             )
+                            self._service_health.record_success("power_state_change", note=f"{previous}->{new_value}")
                     else:
                         self._state = PowerState(value=new_value, updated_at=now_iso, changed_at=now_iso)
                         self._save_state()
@@ -150,13 +170,16 @@ class SvitloBot:
                             new_value,
                             previous_duration,
                         )
+                        self._service_health.record_success("power_state_change", note=f"{previous}->{new_value}")
                 else:
                     self._state.updated_at = now_iso
                     self._save_state()
+                    self._service_health.record_success("power_check", note=f"unchanged:{new_value}")
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logging.exception("Unexpected monitor loop error")
+                self._service_health.record_failure("power_check", "monitor_loop_error")
 
             await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 

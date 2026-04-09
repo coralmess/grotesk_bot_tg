@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import sys
@@ -14,6 +15,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from useful_bot.exchange_rate_helper import ExchangeRateHelper
 from useful_bot.ibkr_portfolio_helper import IBKRPortfolioHelper
+from helpers.service_health import build_service_health
 
 
 class UsefulHelper(Protocol):
@@ -33,8 +35,10 @@ class UsefulHelper(Protocol):
 
 
 class UsefulBotIndex:
-    def __init__(self, helpers: list[UsefulHelper]) -> None:
+    def __init__(self, helpers: list[UsefulHelper], *, service_health) -> None:
         self._helpers = helpers
+        self._service_health = service_health
+        self._heartbeat_task = None
 
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CommandHandler("start", self.start_command))
@@ -43,10 +47,24 @@ class UsefulBotIndex:
             helper.register_handlers(application)
 
     async def on_startup(self, application: Application) -> None:
+        self._service_health.start()
+        self._service_health.mark_ready("useful bot starting")
+        application.bot_data["service_health"] = self._service_health
+        self._heartbeat_task = asyncio.create_task(
+            self._service_health.heartbeat_loop(note="useful bot running"),
+            name="usefulbot-health-heartbeat",
+        )
         for helper in self._helpers:
             await helper.on_startup(application)
 
     async def on_shutdown(self, application: Application) -> None:
+        self._service_health.mark_stopping("useful bot stopping")
+        if self._heartbeat_task is not None:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
         for helper in self._helpers:
             await helper.on_shutdown(application)
 
@@ -82,7 +100,7 @@ def build_application() -> Application:
         IBKRPortfolioHelper(chat_id=chat_id),
     ]
 
-    index = UsefulBotIndex(helpers=helpers)
+    index = UsefulBotIndex(helpers=helpers, service_health=build_service_health("usefulbot"))
     application = (
         Application.builder()
         .token(token)

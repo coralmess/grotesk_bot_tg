@@ -10,6 +10,7 @@ RUNTIME_TEXT_DIR = RUNTIME_DATA_DIR / "text"
 RUNTIME_DEBUG_DIR = RUNTIME_DATA_DIR / "debug"
 RUNTIME_JSON_DIR = RUNTIME_DATA_DIR / "json"
 RUNTIME_STATUS_DIR = RUNTIME_DATA_DIR / "status"
+RUNTIME_HEALTH_DIR = RUNTIME_DATA_DIR / "health"
 
 
 def ensure_runtime_dirs() -> None:
@@ -21,6 +22,7 @@ def ensure_runtime_dirs() -> None:
         RUNTIME_DEBUG_DIR,
         RUNTIME_JSON_DIR,
         RUNTIME_STATUS_DIR,
+        RUNTIME_HEALTH_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -59,3 +61,10 @@ SHAFA_DYNAMIC_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "shafa_dynamic_urls.jso
 SVITLO_SUBSCRIBERS_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "subscribers.json")
 SVITLO_STATE_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "svitlo_state.json")
 VIEWED_DESIGNERS_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "viewed_designers.json")
+
+
+def service_health_file(service_name: str) -> Path:
+    sanitized = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in service_name.strip().lower())
+    if not sanitized:
+        sanitized = "service"
+    return runtime_file(RUNTIME_HEALTH_DIR, f"{sanitized}.json")

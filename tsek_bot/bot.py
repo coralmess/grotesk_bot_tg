@@ -24,6 +24,7 @@ from telegram.ext import (
     filters,
 )
 from config import TELEGRAM_TSEK_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID
+from helpers.service_health import build_service_health
 from tsek_bot.constants import (
     MINUTES_PER_DAY,
     GROUPS,
@@ -48,6 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tsek_schedule_bot")
 logging.getLogger("httpx").setLevel(logging.WARNING)
+SERVICE_HEALTH = build_service_health("tsekbot")
 
 GROUP_RE = re.compile(r"Черга\s+([1-6]\.[12])", re.IGNORECASE)
 TIME_RE = re.compile(r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})")
@@ -4176,14 +4178,28 @@ def main() -> None:
     logger.info("TSEK schedule bot started.")
 
     async def runner() -> None:
+        heartbeat_task = None
         await app.initialize()
         await app.start()
         await app.updater.start_polling()
+        SERVICE_HEALTH.start()
+        SERVICE_HEALTH.mark_ready("tsek bot running")
+        heartbeat_task = asyncio.create_task(
+            SERVICE_HEALTH.heartbeat_loop(note="tsek bot running"),
+            name="tsek-health-heartbeat",
+        )
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             pass
         finally:
+            SERVICE_HEALTH.mark_stopping("tsek bot stopping")
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
             await app.updater.stop()
             await app.stop()
             await app.shutdown()
