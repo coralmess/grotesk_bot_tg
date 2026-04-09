@@ -19,6 +19,7 @@ from GroteskBotStatus import (
 from helpers.dynamic_sources import add_dynamic_url, detect_source
 from helpers import image_pipeline as image_pipeline_helpers
 from helpers import lyst_identity as lyst_identity_helpers
+from helpers import lyst_runtime as lyst_runtime_helpers
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers import lyst_state as lyst_state_helpers
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC
@@ -2118,70 +2119,31 @@ def convert_to_uah(price, country, exchange_rates, name):
         return EMPTY_CONVERSION_RESULT
 
 # Message formatting and sending
-def get_sale_emoji(sale_percentage, uah_sale):
-    if sale_percentage >= SALE_EMOJI_ROCKET_THRESHOLD: return "🚀🚀🚀"
-    if uah_sale < SALE_EMOJI_UAH_THRESHOLD: return "🐚🐚🐚"
-    return "🍄🍄🍄"
-
-def build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol, old_sale_price=None, status=None):
-    # Telegram uses HTML parsing for captions/messages below.
-    # Always escape dynamic site data to prevent malformed HTML and send failures.
-    def _esc(value):
-        return html.escape(str(value if value is not None else ""), quote=True)
-
-    name = _esc(shoe.get('name'))
-    original_price = _esc(shoe.get('original_price'))
-    sale_price = _esc(shoe.get('sale_price'))
-    lowest_price = _esc(shoe.get('lowest_price'))
-    store = _esc(shoe.get('store'))
-    country = _esc(shoe.get('country'))
-    kurs_symbol_safe = _esc(kurs_symbol)
-    old_sale_price_safe = _esc(old_sale_price)
-    shoe_link = _esc(shoe.get('shoe_link'))
-    store_line = f"🔗 Store : <a href='{shoe_link}'>{store}</a>" if shoe_link else f"🔗 Store : {store}"
-
-    if status is None:  # New item
-        sale_emoji = get_sale_emoji(sale_percentage, uah_sale)
-        return (
-            f"{sale_emoji}  New item  {sale_emoji}\n{name}\n\n"
-            f"💀 Prices : <s>{original_price}</s>  <b>{sale_price}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
-            f"🤑 Grivniki : <b>{uah_sale} UAH </b>\n"
-            f"🧊 Kurs : {kurs_symbol_safe} {kurs} \n"
-            f"{store_line}\n"
-            f"🌍 Country : {country}"
-        )
-    return (
-        f"💎💎💎 {_esc(status)} 💎💎💎 \n{name}:\n\n"
-        f"💀 Prices : <s>{original_price}</s>  <s>{old_sale_price_safe}</s>  <b>{sale_price}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i> \n"
-        f"🤑 Grivniki : {uah_sale} UAH\n"
-        f"📉 Lowest price : {lowest_price} ({shoe['lowest_price_uah']} UAH)\n"
-        f"🧊 Kurs : {kurs_symbol_safe} {kurs} \n"
-        f"{store_line}\n"
-        f"🌍 Country : {country}"
-    )
+get_sale_emoji = lyst_runtime_helpers.get_sale_emoji
+build_shoe_message = lyst_runtime_helpers.build_shoe_message
 
 async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah_price=None, sale_percentage=None, max_retries=3):
-    return await telegram_runtime_helpers.send_telegram_message(
+    return await lyst_runtime_helpers.send_telegram_message(
         bot_token,
         chat_id,
         message,
+        logger=logger,
+        process_image_func=process_image,
+        upgrade_image_url_func=_upgrade_lyst_image_url,
         image_url=image_url,
         uah_price=uah_price,
         sale_percentage=sale_percentage,
         max_retries=max_retries,
-        process_image_func=process_image,
-        upgrade_image_url_func=_upgrade_lyst_image_url,
-        logger=logger,
     )
 
 def get_allowed_chat_ids():
-    return telegram_runtime_helpers.get_allowed_chat_ids(DANYLO_DEFAULT_CHAT_ID, TELEGRAM_CHAT_ID)
+    return lyst_runtime_helpers.get_allowed_chat_ids(DANYLO_DEFAULT_CHAT_ID, TELEGRAM_CHAT_ID)
 
 def tail_log_lines(path, line_count=LOG_TAIL_LINES):
-    return telegram_runtime_helpers.tail_log_lines(path, line_count=line_count, logger=logger)
+    return lyst_runtime_helpers.tail_log_lines(path, line_count=line_count, logger=logger)
 
 async def send_log_tail(bot, chat_id, log_path, line_count=LOG_TAIL_LINES):
-    await telegram_runtime_helpers.send_log_tail(
+    await lyst_runtime_helpers.send_log_tail(
         bot,
         chat_id,
         log_path,
@@ -2190,15 +2152,12 @@ async def send_log_tail(bot, chat_id, log_path, line_count=LOG_TAIL_LINES):
     )
 
 async def command_listener(bot_token, allowed_chat_ids, log_path):
-    await telegram_runtime_helpers.command_listener(
+    await lyst_runtime_helpers.command_listener(
         bot_token,
         allowed_chat_ids,
         log_path,
         line_count=LOG_TAIL_LINES,
         add_dynamic_url_func=add_dynamic_url,
-        allow_log_commands=True,
-        allow_add_commands=True,
-        allow_unsubscribe_commands=False,
         logger=logger,
     )
 
