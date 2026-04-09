@@ -44,6 +44,7 @@ SERVICE_RULES = {
         "helpers/telegram_runtime.py",
         "helpers/scheduler.py",
         "helpers/runtime_paths.py",
+        "helpers/lyst_identity.py",
         "helpers/lyst_",
         "GroteskBotStatus.py",
         "config.py",

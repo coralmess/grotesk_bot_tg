@@ -12,6 +12,7 @@ RUNTIME_JSON_DIR = RUNTIME_DATA_DIR / "json"
 RUNTIME_STATUS_DIR = RUNTIME_DATA_DIR / "status"
 RUNTIME_HEALTH_DIR = RUNTIME_DATA_DIR / "health"
 RUNTIME_CACHE_DIR = RUNTIME_DATA_DIR / "cache"
+RUNTIME_BROWSER_DIR = RUNTIME_DATA_DIR / "browser"
 
 
 def ensure_runtime_dirs() -> None:
@@ -25,6 +26,7 @@ def ensure_runtime_dirs() -> None:
         RUNTIME_STATUS_DIR,
         RUNTIME_HEALTH_DIR,
         RUNTIME_CACHE_DIR,
+        RUNTIME_BROWSER_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 

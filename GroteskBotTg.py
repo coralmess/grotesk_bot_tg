@@ -18,6 +18,7 @@ from GroteskBotStatus import (
 )
 from helpers.dynamic_sources import add_dynamic_url, detect_source
 from helpers import image_pipeline as image_pipeline_helpers
+from helpers import lyst_identity as lyst_identity_helpers
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers import lyst_state as lyst_state_helpers
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC
@@ -75,7 +76,7 @@ BROWSER_LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
     "--disable-dev-shm-usage",
-]
+] + lyst_identity_helpers.browser_launch_args()
 
 # Initialize constants and globals
 colorama.init(autoreset=True)
@@ -369,14 +370,21 @@ async def _launch_browser(browser_type):
     )
 
 async def _create_lyst_country_context(browser, country):
+    storage_state_path = lyst_identity_helpers.country_storage_state_path(country)
+    context_kwargs = {
+        "user_agent": STEALTH_UA,
+        "locale": "en-US",
+        "timezone_id": "Europe/Kyiv",
+        "extra_http_headers": STEALTH_HEADERS,
+    }
+    if storage_state_path.exists():
+        context_kwargs["storage_state"] = str(storage_state_path)
     ctx = await browser.new_context(
-        user_agent=STEALTH_UA,
-        locale="en-US",
-        timezone_id="Europe/Kyiv",
-        extra_http_headers=STEALTH_HEADERS,
+        **context_kwargs,
     )
     await ctx.add_init_script(STEALTH_SCRIPT)
     await ctx.add_cookies([{'name': 'country', 'value': country, 'domain': '.lyst.com', 'path': '/'}])
+    await lyst_identity_helpers.persist_context_storage_state(country, ctx, logger)
     return ctx
 
 # Compiled once because link cleanup runs for many outgoing messages.
@@ -1143,6 +1151,7 @@ async def get_page_content(
                 mark_lyst_issue("Cloudflare challenge")
                 await lyst_context_pool.reset_context(country)
                 raise LystCloudflareChallenge()
+            await lyst_identity_helpers.persist_context_storage_state(country, context, logger)
             return content
         except asyncio.CancelledError:
             await _dump_lyst_debug_event_safe(
