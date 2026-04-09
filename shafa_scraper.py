@@ -16,6 +16,7 @@ from helpers.dynamic_sources import load_dynamic_urls, merge_sources
 from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import SHAFA_ITEMS_DB_FILE
+from helpers.sqlite_runtime import apply_runtime_pragmas
 
 try:
     from playwright.async_api import async_playwright, Browser, BrowserContext
@@ -620,12 +621,7 @@ DB_FILE = SHAFA_ITEMS_DB_FILE
 
 def _apply_pragmas(conn: sqlite3.Connection):
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
-        conn.execute("PRAGMA cache_size=-20000;")
-        conn.execute("PRAGMA temp_store=MEMORY;")
-        conn.execute("PRAGMA mmap_size=268435456;")
+        apply_runtime_pragmas(conn)
     except Exception:
         pass
 

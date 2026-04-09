@@ -24,6 +24,7 @@ from helpers.dynamic_sources import add_dynamic_url
 from helpers import scraper_unsubscribes as scraper_unsubscribes_helpers
 from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.service_health import build_service_health
+from helpers.sqlite_runtime import run_runtime_db_maintenance
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers.scheduler import run_market_scheduler
 from helpers.runtime_paths import OLX_ITEMS_DB_FILE, SHAFA_ITEMS_DB_FILE
@@ -38,16 +39,6 @@ configure_third_party_loggers()
 install_secret_redaction(logging.getLogger())
 
 SERVICE_HEALTH = build_service_health("grotesk-market")
-
-DB_MAINTENANCE_PRAGMAS = (
-    "PRAGMA journal_mode=WAL;",
-    "PRAGMA synchronous=NORMAL;",
-    "PRAGMA busy_timeout=5000;",
-    "PRAGMA wal_checkpoint(TRUNCATE);",
-    "PRAGMA optimize;",
-    "ANALYZE;",
-)
-
 
 def get_allowed_chat_ids():
     return telegram_runtime_helpers.get_allowed_chat_ids(DANYLO_DEFAULT_CHAT_ID, TELEGRAM_CHAT_ID)
@@ -69,22 +60,14 @@ def _run_db_retention_cleanup(conn, db_path):
 
 
 def _db_maintenance_sync(db_files=None):
-    if db_files is None:
-        db_files = [OLX_ITEMS_DB_FILE, SHAFA_ITEMS_DB_FILE]
-    for db_path in db_files:
-        if not db_path.exists():
-            continue
-        try:
-            conn = sqlite3.connect(db_path)
-            for pragma in DB_MAINTENANCE_PRAGMAS:
-                conn.execute(pragma)
-            _run_db_retention_cleanup(conn, db_path)
-            if DB_VACUUM:
-                conn.execute("VACUUM;")
-            conn.commit()
-            conn.close()
-        except Exception as exc:
-            logger.warning(f"DB maintenance failed for {db_path.name}: {exc}")
+    try:
+        run_runtime_db_maintenance(
+            db_files=db_files or [OLX_ITEMS_DB_FILE, SHAFA_ITEMS_DB_FILE],
+            vacuum=DB_VACUUM,
+            retention_callback=_run_db_retention_cleanup,
+        )
+    except Exception as exc:
+        logger.warning(f"DB maintenance failed: {exc}")
 
 
 async def maintenance_loop(interval_s: int):

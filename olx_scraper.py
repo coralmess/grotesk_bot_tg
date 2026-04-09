@@ -16,6 +16,7 @@ from helpers.dynamic_sources import load_dynamic_urls, merge_sources
 from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import OLX_ITEMS_DB_FILE
+from helpers.sqlite_runtime import RUNTIME_DB_PRAGMA_STATEMENTS, apply_runtime_pragmas
 try:
     import lxml  # noqa: F401
     _LXML_AVAILABLE = True
@@ -560,9 +561,7 @@ DB_FILE = OLX_ITEMS_DB_FILE
 def _apply_pragmas(conn: sqlite3.Connection):
     """Apply SQLite pragmas for better performance."""
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
+        apply_runtime_pragmas(conn)
     except Exception as e:
         logger.debug(f"Failed to apply pragmas: {e}")
 
@@ -915,7 +914,7 @@ async def run_olx_scraper():
 
     async def _open_writer_conn() -> aiosqlite.Connection:
         conn = await aiosqlite.connect(DB_FILE)
-        for pragma in ("PRAGMA journal_mode=WAL;", "PRAGMA synchronous=NORMAL;", "PRAGMA busy_timeout=5000;"):
+        for pragma in RUNTIME_DB_PRAGMA_STATEMENTS:
             await conn.execute(pragma)
         await conn.commit()
         return conn

@@ -51,6 +51,7 @@ from helpers.runtime_paths import (
     SHOE_DATA_JSON_FILE,
     EXCHANGE_RATES_JSON_FILE,
 )
+from helpers.sqlite_runtime import RUNTIME_DB_PRAGMA_STATEMENTS, run_runtime_db_maintenance
 try:
     import cv2
 except Exception:
@@ -513,7 +514,7 @@ def process_image(image_url, uah_price, sale_percentage):
     )
 
 # Database functions
-PRAGMA_STATEMENTS = ['PRAGMA foreign_keys = ON','PRAGMA journal_mode = WAL','PRAGMA synchronous = NORMAL','PRAGMA busy_timeout = 30000']
+PRAGMA_STATEMENTS = ['PRAGMA foreign_keys = ON', *RUNTIME_DB_PRAGMA_STATEMENTS]
 
 def connect_db():
     conn = sqlite3.connect(DB_NAME, timeout=30.0)
@@ -2543,15 +2544,6 @@ async def run_lyst_cycle_impl(message_queue):
 
 
 
-DB_MAINTENANCE_PRAGMAS = (
-    "PRAGMA journal_mode=WAL;",
-    "PRAGMA synchronous=NORMAL;",
-    "PRAGMA busy_timeout=5000;",
-    "PRAGMA wal_checkpoint(TRUNCATE);",
-    "PRAGMA optimize;",
-    "ANALYZE;",
-)
-
 def _run_db_retention_cleanup(conn, db_path):
     if db_path == OLX_DB_FILE and OLX_RETENTION_DAYS > 0:
         conn.execute(
@@ -2567,22 +2559,14 @@ def _run_db_retention_cleanup(conn, db_path):
         conn.commit()
 
 def _db_maintenance_sync(db_files=None):
-    if db_files is None:
-        db_files = [SHOES_DB_FILE, OLX_DB_FILE, SHAFA_DB_FILE]
-    for db_path in db_files:
-        if not db_path.exists():
-            continue
-        try:
-            conn = sqlite3.connect(db_path)
-            for pragma in DB_MAINTENANCE_PRAGMAS:
-                conn.execute(pragma)
-            _run_db_retention_cleanup(conn, db_path)
-            if DB_VACUUM:
-                conn.execute("VACUUM;")
-            conn.commit()
-            conn.close()
-        except Exception as exc:
-            logger.warning(f"DB maintenance failed for {db_path.name}: {exc}")
+    try:
+        run_runtime_db_maintenance(
+            db_files=db_files or [SHOES_DB_FILE, OLX_DB_FILE, SHAFA_DB_FILE],
+            vacuum=DB_VACUUM,
+            retention_callback=_run_db_retention_cleanup,
+        )
+    except Exception as exc:
+        logger.warning(f"DB maintenance failed: {exc}")
 
 async def maintenance_loop(interval_s: int):
     if interval_s <= 0:
