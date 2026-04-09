@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_UPSCALE_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
 from config_shafa_urls import SHAFA_URLS
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
+from helpers.image_pipeline import send_remote_photo_with_fallback
 from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import SHAFA_ITEMS_DB_FILE
@@ -499,79 +500,6 @@ def build_message(item: ShafaItem, prev: Optional[Dict[str, Any]], source_name: 
         f"🔗 {open_link}"
     )
 
-def _upscale_image_bytes_sync(
-    img_bytes: bytes,
-    scale: float = 2.0,
-    max_dim: int = 5000,
-    min_upscale_dim: int = 1280,
-) -> Optional[bytes]:
-    try:
-        im = Image.open(io.BytesIO(img_bytes))
-        if im.mode not in ("RGB", "L"):
-            im = im.convert("RGB")
-        w, h = im.size
-        # Upscale when the smaller side is below threshold.
-        if min(w, h) >= min_upscale_dim:
-            return None
-        def _fits_telegram(width: int, height: int) -> bool:
-            if width <= 0 or height <= 0:
-                return False
-            if width + height > 10000:
-                return False
-            ratio = max(width / float(height), height / float(width))
-            return ratio <= 20.0
-
-        def _encode_for_telegram(image: Image.Image) -> Optional[bytes]:
-            max_bytes = 10 * 1024 * 1024
-            for quality in (98, 95, 92, 88, 84, 80):
-                out = io.BytesIO()
-                image.save(out, format="JPEG", quality=quality, subsampling=0, optimize=False)
-                data = out.getvalue()
-                if len(data) <= max_bytes:
-                    return data
-            return None
-
-        for factor in (3.0, 2.5, 2.0):
-            new_w, new_h = int(w * factor), int(h * factor)
-            longer = max(new_w, new_h)
-            if longer > max_dim:
-                ratio = max_dim / float(longer)
-                new_w, new_h = int(new_w * ratio), int(new_h * ratio)
-            if not _fits_telegram(new_w, new_h):
-                continue
-
-            im_up = im.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
-            data = _encode_for_telegram(im_up)
-            if data is not None:
-                return data
-
-            # If quality alone is not enough for size limits, step dimensions down slightly.
-            trial = im_up
-            for _ in range(6):
-                dw = max(1, int(trial.width * 0.9))
-                dh = max(1, int(trial.height * 0.9))
-                if (dw, dh) == trial.size:
-                    break
-                trial = trial.resize((dw, dh), resample=Image.Resampling.LANCZOS)
-                if not _fits_telegram(dw, dh):
-                    continue
-                data = _encode_for_telegram(trial)
-                if data is not None:
-                    return data
-        return None
-    except Exception as e:
-        logger.error(f"Image upscale failed: {e}")
-        return None
-
-async def _upscale_image_bytes(
-    img_bytes: bytes,
-    scale: float = 2.0,
-    max_dim: int = 5000,
-    min_upscale_dim: int = 1280,
-) -> Optional[bytes]:
-    async with _UPSCALE_SEMAPHORE:
-        return await run_cpu_bound(_upscale_image_bytes_sync, img_bytes, scale, max_dim, min_upscale_dim)
-
 @async_retry(max_retries=3, backoff_base=1.0)
 async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
     if not _is_valid_image_url(url):
@@ -602,20 +530,18 @@ async def _send_photo_by_bytes(bot: Bot, chat_id: str, photo_bytes: bytes, capti
     return True
 
 async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
-    if not image_url or not _is_valid_image_url(image_url):
-        logger.info("Text only (no photo)")
-        result = await send_message(bot, chat_id, caption)
-        return result if result is not None else False
-    if not (raw := await _download_bytes(image_url)):
-        logger.warning("Photo not downloaded; sending text")
-        result = await send_message(bot, chat_id, caption)
-        return result if result is not None else False
-    photo_bytes = (await _upscale_image_bytes(raw)) or raw
-    if (result := await _send_photo_by_bytes(bot, chat_id, photo_bytes, caption)) is not None:
-        return result
-    logger.warning("Photo not sent; sending text")
-    result = await send_message(bot, chat_id, caption)
-    return result if result is not None else False
+    return await send_remote_photo_with_fallback(
+        bot=bot,
+        chat_id=chat_id,
+        caption=caption,
+        image_url=image_url,
+        is_valid_image_url=_is_valid_image_url,
+        download_bytes=_download_bytes,
+        send_message=send_message,
+        send_photo_by_bytes=_send_photo_by_bytes,
+        run_cpu_bound_fn=run_cpu_bound,
+        logger=logger,
+    )
 
 DB_FILE = SHAFA_ITEMS_DB_FILE
 

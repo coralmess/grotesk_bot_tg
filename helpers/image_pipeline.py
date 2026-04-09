@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import threading
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Awaitable, Callable, Iterable, Optional
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -252,3 +252,114 @@ def process_image(
     img_byte_arr.seek(0)
     return img_byte_arr
 
+
+def fits_telegram_photo(width: int, height: int) -> bool:
+    if width <= 0 or height <= 0:
+        return False
+    if width + height > 10000:
+        return False
+    ratio = max(width / float(height), height / float(width))
+    return ratio <= 20.0
+
+
+def encode_jpeg_for_telegram(image: Image.Image) -> Optional[bytes]:
+    max_bytes = 10 * 1024 * 1024
+    for quality in (98, 95, 92, 88, 84, 80):
+        out = io.BytesIO()
+        image.save(out, format="JPEG", quality=quality, subsampling=0, optimize=False)
+        data = out.getvalue()
+        if len(data) <= max_bytes:
+            return data
+    return None
+
+
+def upscale_image_bytes_for_telegram_sync(
+    img_bytes: bytes,
+    *,
+    max_dim: int = 5000,
+    min_upscale_dim: int = 1280,
+    upscale_factors: Iterable[float] = (3.0, 2.5, 2.0),
+    logger=None,
+) -> Optional[bytes]:
+    try:
+        im = Image.open(io.BytesIO(img_bytes))
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        w, h = im.size
+        if min(w, h) >= min_upscale_dim:
+            return None
+
+        for factor in upscale_factors:
+            new_w, new_h = int(w * factor), int(h * factor)
+            longer = max(new_w, new_h)
+            if longer > max_dim:
+                ratio = max_dim / float(longer)
+                new_w, new_h = int(new_w * ratio), int(new_h * ratio)
+            if not fits_telegram_photo(new_w, new_h):
+                continue
+
+            im_up = im.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
+            data = encode_jpeg_for_telegram(im_up)
+            if data is not None:
+                return data
+
+            trial = im_up
+            for _ in range(6):
+                dw = max(1, int(trial.width * 0.9))
+                dh = max(1, int(trial.height * 0.9))
+                if (dw, dh) == trial.size:
+                    break
+                trial = trial.resize((dw, dh), resample=Image.Resampling.LANCZOS)
+                if not fits_telegram_photo(dw, dh):
+                    continue
+                data = encode_jpeg_for_telegram(trial)
+                if data is not None:
+                    return data
+        return None
+    except Exception as exc:
+        if logger is not None:
+            logger.error(f"Image upscale failed: {exc}")
+        return None
+
+
+async def send_remote_photo_with_fallback(
+    *,
+    bot,
+    chat_id,
+    caption: str,
+    image_url: Optional[str],
+    is_valid_image_url: Callable[[Optional[str]], bool],
+    download_bytes: Callable[[str], Awaitable[Optional[bytes]]],
+    send_message: Callable[[object, str, str], Awaitable[bool]],
+    send_photo_by_bytes: Callable[[object, str, bytes, str], Awaitable[bool]],
+    run_cpu_bound_fn: Callable[..., Awaitable[Optional[bytes]]],
+    logger,
+    min_upscale_dim: int = 1280,
+    max_dim: int = 5000,
+) -> bool:
+    if not image_url or not is_valid_image_url(image_url):
+        result = await send_message(bot, chat_id, caption)
+        return bool(result)
+
+    raw = await download_bytes(image_url)
+    if not raw:
+        logger.warning("Photo not downloaded; sending text")
+        result = await send_message(bot, chat_id, caption)
+        return bool(result)
+
+    photo_bytes = await run_cpu_bound_fn(
+        upscale_image_bytes_for_telegram_sync,
+        raw,
+        max_dim=max_dim,
+        min_upscale_dim=min_upscale_dim,
+        logger=logger,
+    )
+    photo_bytes = photo_bytes or raw
+
+    result = await send_photo_by_bytes(bot, chat_id, photo_bytes, caption)
+    if result is not None:
+        return bool(result)
+
+    logger.warning("Photo not sent; sending text")
+    result = await send_message(bot, chat_id, caption)
+    return bool(result)
