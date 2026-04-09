@@ -70,11 +70,24 @@ def _db_maintenance_sync(db_files=None):
         logger.warning(f"DB maintenance failed: {exc}")
 
 
-async def maintenance_loop(interval_s: int):
+async def maintenance_loop(interval_s: int, *, service_health=None):
     if interval_s <= 0:
         return
     while True:
-        await asyncio.to_thread(_db_maintenance_sync, [OLX_ITEMS_DB_FILE, SHAFA_ITEMS_DB_FILE])
+        started = time.perf_counter()
+        try:
+            await asyncio.to_thread(_db_maintenance_sync, [OLX_ITEMS_DB_FILE, SHAFA_ITEMS_DB_FILE])
+        except Exception as exc:
+            if service_health is not None:
+                service_health.record_failure("db_maintenance", exc, duration_seconds=time.perf_counter() - started)
+            logger.warning("DB maintenance iteration failed: %s", exc)
+        else:
+            if service_health is not None:
+                service_health.record_success(
+                    "db_maintenance",
+                    duration_seconds=time.perf_counter() - started,
+                    note="olx_items.db,shafa_items.db",
+                )
         await asyncio.sleep(interval_s)
 
 
@@ -139,7 +152,10 @@ async def main():
         "market_command_listener",
     )
     if MAINTENANCE_INTERVAL_SEC > 0:
-        _start_background_task(maintenance_loop(MAINTENANCE_INTERVAL_SEC), "market_db_maintenance")
+        _start_background_task(
+            maintenance_loop(MAINTENANCE_INTERVAL_SEC, service_health=SERVICE_HEALTH),
+            "market_db_maintenance",
+        )
 
     try:
         statuses = read_all_service_statuses()

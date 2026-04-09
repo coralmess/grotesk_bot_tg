@@ -2568,13 +2568,26 @@ def _db_maintenance_sync(db_files=None):
     except Exception as exc:
         logger.warning(f"DB maintenance failed: {exc}")
 
-async def maintenance_loop(interval_s: int):
+async def maintenance_loop(interval_s: int, *, service_health=None):
     if interval_s <= 0:
         return
     while True:
-        # Serialize shoes.db maintenance with async writes to avoid lock contention.
-        async with DB_SEMAPHORE:
-            await asyncio.to_thread(_db_maintenance_sync, [SHOES_DB_FILE])
+        started = time.perf_counter()
+        try:
+            # Serialize shoes.db maintenance with async writes to avoid lock contention.
+            async with DB_SEMAPHORE:
+                await asyncio.to_thread(_db_maintenance_sync, [SHOES_DB_FILE])
+        except Exception as exc:
+            if service_health is not None:
+                service_health.record_failure("db_maintenance", exc, duration_seconds=time.perf_counter() - started)
+            logger.warning(f"DB maintenance iteration failed: {exc}")
+        else:
+            if service_health is not None:
+                service_health.record_success(
+                    "db_maintenance",
+                    duration_seconds=time.perf_counter() - started,
+                    note=SHOES_DB_FILE.name,
+                )
         await asyncio.sleep(interval_s)
 
 # Main application
@@ -2618,7 +2631,10 @@ async def main(service_health=None):
             "status_heartbeat",
         )
     if MAINTENANCE_INTERVAL_SEC > 0:
-        _start_background_task(maintenance_loop(MAINTENANCE_INTERVAL_SEC), "db_maintenance")
+        _start_background_task(
+            maintenance_loop(MAINTENANCE_INTERVAL_SEC, service_health=service_health),
+            "db_maintenance",
+        )
     terminal_width = shutil.get_terminal_size().columns
     bot_version = f"Grotesk bot v.{BOT_VERSION}"
     print(
