@@ -15,6 +15,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from useful_bot.exchange_rate_helper import ExchangeRateHelper
 from useful_bot.ibkr_portfolio_helper import IBKRPortfolioHelper
+from helpers.health_summary import write_health_summary_files
 from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.service_health import build_service_health
 
@@ -40,6 +41,7 @@ class UsefulBotIndex:
         self._helpers = helpers
         self._service_health = service_health
         self._heartbeat_task = None
+        self._summary_task = None
 
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CommandHandler("start", self.start_command))
@@ -55,15 +57,21 @@ class UsefulBotIndex:
             self._service_health.heartbeat_loop(note="useful bot running"),
             name="usefulbot-health-heartbeat",
         )
+        self._summary_task = asyncio.create_task(
+            self._summary_loop(),
+            name="usefulbot-health-summary",
+        )
         for helper in self._helpers:
             await helper.on_startup(application)
 
     async def on_shutdown(self, application: Application) -> None:
         self._service_health.mark_stopping("useful bot stopping")
-        if self._heartbeat_task is not None:
-            self._heartbeat_task.cancel()
+        for task in (self._heartbeat_task, self._summary_task):
+            if task is None:
+                continue
+            task.cancel()
             try:
-                await self._heartbeat_task
+                await task
             except asyncio.CancelledError:
                 pass
         for helper in self._helpers:
@@ -78,6 +86,20 @@ class UsefulBotIndex:
             lines.append("")
             lines.extend(helper.start_lines())
         await update.message.reply_text("\n".join(lines))
+
+    async def _summary_loop(self) -> None:
+        while True:
+            try:
+                payload = await asyncio.to_thread(write_health_summary_files)
+                service_count = len(payload.get("services") or {})
+                self._service_health.record_success("health_summary", note=f"services={service_count}")
+                await asyncio.sleep(15 * 60)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._service_health.record_failure("health_summary", exc)
+                logging.exception("Health summary update failed")
+                await asyncio.sleep(60)
 
 
 def build_application() -> Application:
