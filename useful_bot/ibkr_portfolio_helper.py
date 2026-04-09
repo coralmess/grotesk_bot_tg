@@ -19,6 +19,7 @@ from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from helpers.runtime_paths import RUNTIME_JSON_DIR, ensure_runtime_dirs
+from helpers.process_pool import run_cpu_bound
 from useful_bot.ibkr_portfolio_core import (
     NEW_YORK_TZ,
     PortfolioSnapshot,
@@ -275,7 +276,7 @@ class IBKRPortfolioHelper:
                     service_health.record_success("ibkr_portfolio_check", note=f"{reason}:daily_data_incomplete")
                 return False
 
-            image_buf = await asyncio.to_thread(
+            image_buf = await run_cpu_bound(
                 render_ibkr_portfolio_card,
                 snapshot=snapshot,
                 previous_snapshot=previous_snapshot,

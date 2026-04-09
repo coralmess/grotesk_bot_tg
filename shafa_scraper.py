@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_UPSCALE_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
 from config_shafa_urls import SHAFA_URLS
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
+from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import SHAFA_ITEMS_DB_FILE
 
@@ -568,7 +569,7 @@ async def _upscale_image_bytes(
     min_upscale_dim: int = 1280,
 ) -> Optional[bytes]:
     async with _UPSCALE_SEMAPHORE:
-        return await asyncio.to_thread(_upscale_image_bytes_sync, img_bytes, scale, max_dim, min_upscale_dim)
+        return await run_cpu_bound(_upscale_image_bytes_sync, img_bytes, scale, max_dim, min_upscale_dim)
 
 @async_retry(max_retries=3, backoff_base=1.0)
 async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:

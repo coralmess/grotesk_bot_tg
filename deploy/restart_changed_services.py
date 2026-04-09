@@ -25,6 +25,7 @@ SERVICE_RULES = {
         "olx_scraper.py",
         "shafa_scraper.py",
         "helpers/dynamic_sources.py",
+        "helpers/process_pool.py",
         "helpers/scraper_unsubscribes.py",
         "helpers/service_health.py",
         "helpers/telegram_runtime.py",
@@ -63,6 +64,7 @@ SERVICE_RULES = {
     "usefulbot.service": (
         "useful_bot/",
         "usefulbot.service",
+        "helpers/process_pool.py",
         "helpers/runtime_paths.py",
         "helpers/service_health.py",
         "config.py",

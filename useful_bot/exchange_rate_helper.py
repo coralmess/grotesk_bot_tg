@@ -15,6 +15,7 @@ from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from helpers.runtime_paths import RUNTIME_JSON_DIR, ensure_runtime_dirs
+from helpers.process_pool import run_cpu_bound
 from useful_bot.exchange_rate_image import render_exchange_rate_card
 
 MONOBANK_RATES_URL = "https://minfin.com.ua/ua/company/monobank/currency/"
@@ -168,7 +169,8 @@ class ExchangeRateHelper:
             eur_buy_min = self._min_from_history(recent_30, "eur_buy")
             eur_buy_max = self._max_from_history(recent_30, "eur_buy")
 
-            image_buf = render_exchange_rate_card(
+            image_buf = await run_cpu_bound(
+                render_exchange_rate_card,
                 usd_buy=snapshot.usd_buy,
                 usd_sell=snapshot.usd_sell,
                 eur_buy=snapshot.eur_buy,

@@ -13,6 +13,7 @@ from functools import wraps
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, OLX_TASK_CONCURRENCY, OLX_HTTP_HTML_CONCURRENCY, OLX_HTTP_IMAGE_CONCURRENCY, OLX_UPSCALE_CONCURRENCY, OLX_SEND_CONCURRENCY, OLX_HTTP_CONNECTOR_LIMIT
 from config_olx_urls import OLX_URLS
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
+from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import OLX_ITEMS_DB_FILE
 try:
@@ -489,7 +490,7 @@ async def _upscale_image_bytes(
 ) -> Optional[bytes]:
     """Async wrapper for image upscaling."""
     async with _UPSCALE_SEMAPHORE:
-        return await asyncio.to_thread(_upscale_image_bytes_sync, img_bytes, scale, max_dim, min_upscale_dim)
+        return await run_cpu_bound(_upscale_image_bytes_sync, img_bytes, scale, max_dim, min_upscale_dim)
 
 
 @async_retry(max_retries=3, backoff_base=1.0)
