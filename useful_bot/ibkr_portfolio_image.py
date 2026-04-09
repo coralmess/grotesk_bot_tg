@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 import io
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -18,6 +18,7 @@ from useful_bot.market_data_cache import cached_history
 from helpers.runtime_paths import PROJECT_ROOT
 from useful_bot.ibkr_portfolio_core import (
     PortfolioSnapshot,
+    PositionSnapshot,
     RankedPosition,
     coerce_optional_float,
     compute_balance_delta,
@@ -57,6 +58,14 @@ SFPRO_HEAVY = FONTS_DIR / "SFPro-Heavy.ttf"
 @dataclass(frozen=True)
 class QQQMBenchmarkQuote:
     current_price: float
+    prior_close: float
+    daily_return_pct: float
+
+
+@dataclass(frozen=True)
+class QQQMTradeDateReturn:
+    trade_date: str
+    current_close: float
     prior_close: float
     daily_return_pct: float
 
@@ -1110,7 +1119,7 @@ def _portfolio_daily_pnl(snapshot: PortfolioSnapshot) -> Optional[float]:
 
 
 def _qqqm_hypothetical_pnl(snapshot: PortfolioSnapshot) -> Optional[float]:
-    benchmark = _fetch_qqqm_benchmark_quote()
+    benchmark = _fetch_qqqm_trade_date_return(snapshot.trade_date)
     if benchmark is None:
         return None
     invested_value = _portfolio_prior_close_invested_value(snapshot)
@@ -1122,15 +1131,58 @@ def _qqqm_hypothetical_pnl(snapshot: PortfolioSnapshot) -> Optional[float]:
 def _portfolio_prior_close_invested_value(snapshot: PortfolioSnapshot) -> Optional[float]:
     if snapshot.positions and not snapshot.daily_data_complete:
         return None
+    same_day_deltas = _same_day_equity_trade_deltas(snapshot)
     total = 0.0
     has_data = False
     for position in snapshot.positions:
-        prior_close_value = position.prior_close_value
+        position_at_prior_close = _position_at_prior_close(position, same_day_deltas)
+        if position_at_prior_close is None:
+            continue
+        prior_close_value = position_at_prior_close.prior_close_value
         if prior_close_value is None:
             continue
         total += prior_close_value
         has_data = True
     return total if has_data else None
+
+
+def _same_day_equity_trade_deltas(snapshot: PortfolioSnapshot) -> dict[tuple[str, int], float]:
+    deltas: dict[tuple[str, int], float] = {}
+    trade_date = snapshot.trade_date
+    for trade in snapshot.trades:
+        if trade.trade_date != trade_date:
+            continue
+        if trade.sec_type.upper() not in {"STK", "ETF"}:
+            continue
+        direction = trade.buy_sell.upper()
+        if direction not in {"BUY", "SELL"}:
+            continue
+        quantity = abs(trade.quantity)
+        if quantity <= 0:
+            continue
+        signed_quantity = quantity if direction == "BUY" else -quantity
+        key = (trade.symbol, trade.con_id)
+        deltas[key] = deltas.get(key, 0.0) + signed_quantity
+    return deltas
+
+
+def _position_at_prior_close(
+    position: PositionSnapshot,
+    same_day_deltas: dict[tuple[str, int], float],
+) -> Optional[PositionSnapshot]:
+    key = (position.symbol, position.con_id)
+    prior_close_quantity = position.quantity - same_day_deltas.get(key, 0.0)
+    if abs(prior_close_quantity) < 1e-9:
+        return None
+    if abs(prior_close_quantity - position.quantity) < 1e-9:
+        return position
+    if position.prior_close_price is None:
+        return None
+    return replace(
+        position,
+        quantity=prior_close_quantity,
+        market_value=position.prior_close_price * prior_close_quantity,
+    )
 
 
 def initialize_qqqm_benchmark_baseline(snapshot: PortfolioSnapshot) -> Optional[dict[str, float | str]]:
@@ -1212,6 +1264,33 @@ def _is_external_benchmark_cash_flow(cash_event: dict[str, object]) -> bool:
         "disbursement",
     )
     return any(marker in description for marker in external_flow_markers)
+
+
+def _fetch_qqqm_trade_date_return(trade_date: str) -> Optional[QQQMTradeDateReturn]:
+    if not trade_date:
+        return None
+    close_history = _fetch_qqqm_close_history(trade_date, trade_date)
+    if close_history is None:
+        return None
+    closes = [
+        (history_date, close_by_date_value)
+        for history_date, close_by_date_value in sorted(close_history.close_by_date.items())
+        if history_date <= trade_date and close_by_date_value > 0
+    ]
+    if len(closes) < 2:
+        return None
+    prior_trade_date, prior_close = closes[-2]
+    current_trade_date, current_close = closes[-1]
+    if current_trade_date != trade_date:
+        return None
+    if prior_close <= 0 or current_close <= 0:
+        return None
+    return QQQMTradeDateReturn(
+        trade_date=trade_date,
+        current_close=current_close,
+        prior_close=prior_close,
+        daily_return_pct=((current_close - prior_close) / prior_close) * 100.0,
+    )
 
 
 def _fetch_qqqm_benchmark_quote() -> Optional[QQQMBenchmarkQuote]:
