@@ -27,6 +27,13 @@ from helpers.runtime_paths import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
+
+RENDER_SCALE = 2
+
+
+def _px(value: int) -> int:
+    return int(round(value * RENDER_SCALE))
+
 # ── paths ─────────────────────────────────────────────────────────────────
 FONTS_DIR = PROJECT_ROOT / "fonts"
 BG_IMAGE_PATH = (
@@ -34,20 +41,20 @@ BG_IMAGE_PATH = (
 )
 
 # ── canvas ────────────────────────────────────────────────────────────────
-CANVAS_W = 1200
-CANVAS_H = 936
+CANVAS_W = _px(1200)
+CANVAS_H = _px(936)
 
 # ── layout ────────────────────────────────────────────────────────────────
-MARGIN = 28
-GAP = 18
-CORNER_RADIUS = 24
-DATE_PANEL_H = 56  # height of the date glass panel
+MARGIN = _px(28)
+GAP = _px(18)
+CORNER_RADIUS = _px(24)
+DATE_PANEL_H = _px(56)  # height of the date glass panel
 
 # ── glass effect ──────────────────────────────────────────────────────────
-BLUR_RADIUS = 25
+BLUR_RADIUS = _px(25)
 GLASS_ALPHA = 22  # white overlay opacity  (0 = clear, 255 = opaque)
 BORDER_ALPHA = 100
-BORDER_WIDTH = 2
+BORDER_WIDTH = _px(2)
 
 # ── colours ───────────────────────────────────────────────────────────────
 WHITE = (255, 255, 255)
@@ -111,7 +118,7 @@ def render_exchange_rate_card(
 
     panel_w = (CANVAS_W - 2 * MARGIN - GAP) // 2
     panel_top = MARGIN + DATE_PANEL_H + GAP
-    top_h = 470
+    top_h = _px(470)
     usd_rect = (MARGIN, panel_top, MARGIN + panel_w, panel_top + top_h)
     eur_rect = (
         MARGIN + panel_w + GAP,
@@ -143,9 +150,9 @@ def render_exchange_rate_card(
     # vertical separator inside the bottom panel
     sep_x = (bot_rect[0] + bot_rect[2]) // 2
     dd.line(
-        [(sep_x, bot_rect[1] + 24), (sep_x, bot_rect[3] - 24)],
+        [(sep_x, bot_rect[1] + _px(24)), (sep_x, bot_rect[3] - _px(24))],
         fill=(*WHITE, 50),
-        width=1,
+        width=_px(1),
     )
     canvas = Image.alpha_composite(canvas, deco)
 
@@ -221,16 +228,16 @@ def render_exchange_rate_card(
 
 def _load_fonts() -> dict:
     return {
-        "title": load_font(52, fonts_dir=FONTS_DIR, prefer_heavy=True),
-        "value": load_font(46, fonts_dir=FONTS_DIR, prefer_heavy=False),
-        "label": load_font(30, fonts_dir=FONTS_DIR, prefer_heavy=False),
-        "delta": load_font(28, fonts_dir=FONTS_DIR, prefer_heavy=False),
-        "mtitle": load_font(38, fonts_dir=FONTS_DIR, prefer_heavy=True),
-        "mval": load_font(44, fonts_dir=FONTS_DIR, prefer_heavy=False),
-        "mdetail": load_font(28, fonts_dir=FONTS_DIR, prefer_heavy=False),
-        "date": load_font(28, fonts_dir=FONTS_DIR, prefer_heavy=False),
-        "stat": load_font(26, fonts_dir=FONTS_DIR, prefer_heavy=False),
-        "stat_label": load_font(19, fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "title": load_font(_px(52), fonts_dir=FONTS_DIR, prefer_heavy=True),
+        "value": load_font(_px(46), fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "label": load_font(_px(30), fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "delta": load_font(_px(28), fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "mtitle": load_font(_px(38), fonts_dir=FONTS_DIR, prefer_heavy=True),
+        "mval": load_font(_px(44), fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "mdetail": load_font(_px(28), fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "date": load_font(_px(28), fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "stat": load_font(_px(26), fonts_dir=FONTS_DIR, prefer_heavy=False),
+        "stat_label": load_font(_px(19), fonts_dir=FONTS_DIR, prefer_heavy=False),
     }
 
 
@@ -328,8 +335,8 @@ def _draw_delta(
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
 
-    tri_size = max(12, int(th * 0.70))
-    gap = 8
+    tri_size = max(_px(12), int(th * 0.70))
+    gap = _px(8)
     total_w = tri_size + gap + tw
     sx = cx - total_w // 2
 
@@ -366,16 +373,16 @@ def _draw_currency_panel(
 
     # Spacing: small=8px, medium=18px, big=32px
     # All positions computed cumulatively from top
-    S, M, B = 8, 18, 32
+    S, M, B = _px(8), _px(18), _px(32)
 
-    y_title = y1 + 14 + B                          # top padding big + title top
-    y_buy_lbl = y_title + 42 + B                    # after title (~42px) + big
-    y_buy_val = y_buy_lbl + 24 + M                  # after label (~24px) + medium
-    y_buy_delta = y_buy_val + 38 + S + 11           # after value (~38px) + small + half-delta
-    y_buy_stats = y_buy_delta + 11 + M + 22         # after delta half + medium + half-stats
-    y_sell_lbl = y_buy_stats + 23 + B               # after stats half + big
-    y_sell_val = y_sell_lbl + 24 + M                # after label + medium
-    y_sell_delta = y_sell_val + 38 + S + 11         # after value + small + half-delta
+    y_title = y1 + _px(14) + B
+    y_buy_lbl = y_title + _px(42) + B
+    y_buy_val = y_buy_lbl + _px(24) + M
+    y_buy_delta = y_buy_val + _px(38) + S + _px(11)
+    y_buy_stats = y_buy_delta + _px(11) + M + _px(22)
+    y_sell_lbl = y_buy_stats + _px(23) + B
+    y_sell_val = y_sell_lbl + _px(24) + M
+    y_sell_delta = y_sell_val + _px(38) + S + _px(11)
 
     # currency title
     draw.text(
@@ -477,7 +484,7 @@ def _draw_stats_row(
         draw.text((cx, y), "no data", font=font, fill=TEXT_SECONDARY, anchor="mm")
         return
 
-    spacing = 130
+    spacing = _px(130)
     total_w = spacing * (len(items) - 1) if len(items) > 1 else 0
     start_x = cx - total_w // 2
 
@@ -493,7 +500,7 @@ def _draw_stats_row(
         bbox = draw.textbbox((px, y), text, font=font, anchor="mm")
         bottom_y = max(bottom_y, bbox[3])
 
-    line_y = bottom_y + 11
+    line_y = bottom_y + _px(11)
 
     # ── 2. Single connecting line (min → max) ────────────────────────
     if len(positions) >= 2:
@@ -504,7 +511,7 @@ def _draw_stats_row(
         )
 
     # ── 3. Dot at each position + label underneath ───────────────────
-    dot_r = 3
+    dot_r = _px(3)
     for i, (label, _) in enumerate(items):
         px = positions[i]
         dot_fill = TEXT_SECONDARY if label == "avg" else STAT_MUTED
@@ -514,7 +521,7 @@ def _draw_stats_row(
         )
         lbl_color = TEXT_SECONDARY if label == "avg" else STAT_MUTED
         draw.text(
-            (px, line_y + 10),
+            (px, line_y + _px(10)),
             label,
             font=label_font,
             fill=lbl_color,
@@ -536,7 +543,7 @@ def _draw_stats_row(
             positions=positions,
         )
 
-        tick_half = 8  # half-height of the vertical tick
+        tick_half = _px(8)
         draw.line(
             [(mark_x, line_y - tick_half), (mark_x, line_y + tick_half)],
             fill=TODAY_MARKER_COLOR,
@@ -612,13 +619,13 @@ def _draw_metrics_panel(
     rcx = x1 + 3 * pw // 4
 
     # Spacing: small=8px, medium=18px, big=32px (same system as currency panels)
-    S, M, B = 8, 18, 32
+    S, M, B = _px(8), _px(18), _px(32)
 
-    row_title = y1 + 14 + B                        # top padding + big space
-    row_sub = row_title + 32 + S                    # after title (~32px) + small
-    row_value = row_sub + 22 + M                    # after subtitle (~22px) + medium
-    row_delta = row_value + 36 + S + 11             # after value (~36px) + small + half-delta
-    row_stats = row_delta + 11 + M + 22             # after delta half + medium + half-stats
+    row_title = y1 + _px(14) + B
+    row_sub = row_title + _px(32) + S
+    row_value = row_sub + _px(22) + M
+    row_delta = row_value + _px(36) + S + _px(11)
+    row_stats = row_delta + _px(11) + M + _px(22)
 
     # ── Left: USD Spread ──
     draw.text(
