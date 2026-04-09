@@ -46,8 +46,22 @@ SERVICE_RULES = {
         "config.py",
         "config_lyst.py",
     ),
-    "tsekbot.service": ("config.py", "tsek_bot/"),
-    "usefulbot.service": ("useful_bot/", "usefulbot.service"),
+    "svitlobot.service": (
+        "svitlo_bot.py",
+        "svitlobot.service",
+        "helpers/runtime_paths.py",
+        "config.py",
+    ),
+    "tsekbot.service": (
+        "tsek_bot/",
+        "config.py",
+    ),
+    "usefulbot.service": (
+        "useful_bot/",
+        "usefulbot.service",
+        "helpers/runtime_paths.py",
+        "config.py",
+    ),
 }
 
 
