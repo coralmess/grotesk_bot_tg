@@ -17,6 +17,7 @@ from useful_bot.exchange_rate_helper import ExchangeRateHelper
 from useful_bot.ibkr_portfolio_helper import IBKRPortfolioHelper
 from helpers.health_summary import write_health_summary_files
 from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
+from helpers.runtime_housekeeping import run_runtime_housekeeping
 from helpers.service_health import build_service_health
 
 
@@ -42,6 +43,7 @@ class UsefulBotIndex:
         self._service_health = service_health
         self._heartbeat_task = None
         self._summary_task = None
+        self._housekeeping_task = None
 
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CommandHandler("start", self.start_command))
@@ -61,12 +63,16 @@ class UsefulBotIndex:
             self._summary_loop(),
             name="usefulbot-health-summary",
         )
+        self._housekeeping_task = asyncio.create_task(
+            self._housekeeping_loop(),
+            name="usefulbot-housekeeping",
+        )
         for helper in self._helpers:
             await helper.on_startup(application)
 
     async def on_shutdown(self, application: Application) -> None:
         self._service_health.mark_stopping("useful bot stopping")
-        for task in (self._heartbeat_task, self._summary_task):
+        for task in (self._heartbeat_task, self._summary_task, self._housekeeping_task):
             if task is None:
                 continue
             task.cancel()
@@ -100,6 +106,25 @@ class UsefulBotIndex:
                 self._service_health.record_failure("health_summary", exc)
                 logging.exception("Health summary update failed")
                 await asyncio.sleep(60)
+
+    async def _housekeeping_loop(self) -> None:
+        while True:
+            try:
+                stats = await asyncio.to_thread(run_runtime_housekeeping)
+                self._service_health.record_success(
+                    "runtime_housekeeping",
+                    note=(
+                        f"compressed={stats['compressed']},tmp={stats['deleted_tmp']},"
+                        f"cache={stats['deleted_cache']},archives={stats['deleted_old_archives']}"
+                    ),
+                )
+                await asyncio.sleep(6 * 60 * 60)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._service_health.record_failure("runtime_housekeeping", exc)
+                logging.exception("Runtime housekeeping failed")
+                await asyncio.sleep(300)
 
 
 def build_application() -> Application:
