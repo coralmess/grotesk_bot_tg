@@ -33,6 +33,7 @@ from useful_bot.ibkr_portfolio_image import (
     initialize_qqqm_benchmark_baseline,
     render_ibkr_portfolio_card,
 )
+from useful_bot.market_data_cache import cached_history
 try:
     import yfinance as yf
 except Exception:  # pragma: no cover - exercised when dependency is absent
@@ -748,7 +749,20 @@ def _fetch_live_equity_quotes(symbols: list[str]) -> dict[str, tuple[float, floa
     for symbol in sorted({item.strip().upper() for item in symbols if item.strip()}):
         try:
             ticker = yf.Ticker(symbol)
-            daily_history = ticker.history(period="5d", interval="1d", auto_adjust=False, prepost=False)
+            daily_history = cached_history(
+                symbol,
+                ttl_seconds=6 * 60 * 60,
+                period="5d",
+                interval="1d",
+                auto_adjust=False,
+                prepost=False,
+                fetch_history=lambda ticker=ticker: ticker.history(
+                    period="5d",
+                    interval="1d",
+                    auto_adjust=False,
+                    prepost=False,
+                ),
+            )
             if daily_history is None or getattr(daily_history, "empty", True) or "Close" not in getattr(daily_history, "columns", []):
                 continue
             daily_closes = [float(value) for value in daily_history["Close"].tolist() if float(value) > 0]
@@ -757,7 +771,20 @@ def _fetch_live_equity_quotes(symbols: list[str]) -> dict[str, tuple[float, floa
             prior_close = daily_closes[-2]
             current_price: Optional[float] = None
 
-            intraday_history = ticker.history(period="1d", interval="1m", auto_adjust=False, prepost=False)
+            intraday_history = cached_history(
+                symbol,
+                ttl_seconds=5 * 60,
+                period="1d",
+                interval="1m",
+                auto_adjust=False,
+                prepost=False,
+                fetch_history=lambda ticker=ticker: ticker.history(
+                    period="1d",
+                    interval="1m",
+                    auto_adjust=False,
+                    prepost=False,
+                ),
+            )
             if intraday_history is not None and not getattr(intraday_history, "empty", True) and "Close" in getattr(intraday_history, "columns", []):
                 intraday_closes = [float(value) for value in intraday_history["Close"].tolist() if float(value) > 0]
                 if intraday_closes:

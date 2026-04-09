@@ -13,6 +13,8 @@ try:
 except Exception:  # pragma: no cover - exercised when dependency is absent
     yf = None
 
+from useful_bot.market_data_cache import cached_history
+
 from helpers.runtime_paths import PROJECT_ROOT
 from useful_bot.ibkr_portfolio_core import (
     PortfolioSnapshot,
@@ -1216,7 +1218,15 @@ def _fetch_qqqm_benchmark_quote() -> Optional[QQQMBenchmarkQuote]:
     if yf is None:
         return None
     try:
-        history = yf.Ticker("QQQM").history(period="5d", interval="1d", auto_adjust=False)
+        ticker = yf.Ticker("QQQM")
+        history = cached_history(
+            "QQQM",
+            ttl_seconds=6 * 60 * 60,
+            period="5d",
+            interval="1d",
+            auto_adjust=False,
+            fetch_history=lambda: ticker.history(period="5d", interval="1d", auto_adjust=False),
+        )
     except Exception:
         return None
     if history is None or getattr(history, "empty", True):
@@ -1251,11 +1261,20 @@ def _fetch_qqqm_close_history(start_date: str, end_date: str) -> Optional[QQQMCl
         return None
 
     try:
-        history = yf.Ticker("QQQM").history(
+        ticker = yf.Ticker("QQQM")
+        history = cached_history(
+            "QQQM",
+            ttl_seconds=6 * 60 * 60,
             start=start.isoformat(),
             end=end.isoformat(),
             interval="1d",
             auto_adjust=False,
+            fetch_history=lambda: ticker.history(
+                start=start.isoformat(),
+                end=end.isoformat(),
+                interval="1d",
+                auto_adjust=False,
+            ),
         )
     except Exception:
         return None
