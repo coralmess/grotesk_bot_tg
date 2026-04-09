@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pickle
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 
@@ -23,4 +24,8 @@ def get_process_pool() -> ProcessPoolExecutor:
 async def run_cpu_bound(func, /, *args, **kwargs):
     loop = asyncio.get_running_loop()
     call = partial(func, *args, **kwargs)
+    try:
+        pickle.dumps(call)
+    except Exception:
+        return await asyncio.to_thread(call)
     return await loop.run_in_executor(get_process_pool(), call)

@@ -106,7 +106,8 @@ class ExchangeRateHelper:
                 await asyncio.sleep(30)
 
     async def _run_check(self, application: Application, reason: str) -> bool:
-        service_health = application.bot_data.get("service_health")
+        bot_data = getattr(application, "bot_data", {}) or {}
+        service_health = bot_data.get("service_health")
         async with self._lock:
             try:
                 snapshot = await self._fetch_snapshot()

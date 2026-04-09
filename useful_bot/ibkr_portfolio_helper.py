@@ -226,7 +226,8 @@ class IBKRPortfolioHelper:
                 await asyncio.sleep(30)
 
     async def _run_check(self, application: Application, reason: str, force: bool) -> bool:
-        service_health = application.bot_data.get("service_health")
+        bot_data = getattr(application, "bot_data", {}) or {}
+        service_health = bot_data.get("service_health")
         async with self._lock:
             now_ny = self._now_provider(NEW_YORK_TZ)
             if not force and not should_run_daily_snapshot(now_ny, self._last_trade_date()):

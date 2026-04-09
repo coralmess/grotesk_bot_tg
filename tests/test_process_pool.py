@@ -16,6 +16,10 @@ class ProcessPoolTests(unittest.TestCase):
         result = asyncio.run(run_cpu_bound(_multiply, 6, 7))
         self.assertEqual(result, 42)
 
+    def test_run_cpu_bound_falls_back_for_unpicklable_callables(self) -> None:
+        result = asyncio.run(run_cpu_bound(lambda value: value + 1, 41))
+        self.assertEqual(result, 42)
+
 
 if __name__ == "__main__":
     unittest.main()
