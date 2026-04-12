@@ -1,26 +1,47 @@
 ﻿from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
-from telegram.constants import ParseMode
-from PIL import Image
-import io, asyncio, re, sqlite3, aiohttp, random, logging
+import asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
-from functools import wraps, lru_cache
+from functools import lru_cache
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_UPSCALE_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
 from config_shafa_urls import SHAFA_URLS
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
-from helpers.image_pipeline import send_remote_photo_with_fallback
+from helpers.marketplace_core import (
+    MarketplaceItem,
+    SourceStats,
+    duplicate_key,
+    finished_source_decision,
+    make_source_decision,
+    notification_storage_key,
+)
+from helpers.marketplace_pipeline import (
+    ItemDecision,
+    ItemUpdate,
+    MarketplaceRepository,
+    RunDuplicateTracker,
+    process_marketplace_items,
+)
+from helpers.marketplace_playwright import PlaywrightRuntimeManager
+from helpers.marketplace_sender import (
+    RetryableHttpStatus,
+    async_retry,
+    build_image_downloader,
+    build_media_sender,
+    build_message_sender,
+    build_photo_sender,
+)
 from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import SHAFA_ITEMS_DB_FILE
 from helpers.sqlite_runtime import apply_runtime_pragmas
 
 try:
-    from playwright.async_api import async_playwright, Browser, BrowserContext
+    from playwright.async_api import async_playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
@@ -46,9 +67,7 @@ _SEND_SEMAPHORE = asyncio.Semaphore(SHAFA_SEND_CONCURRENCY)
 _UPSCALE_SEMAPHORE = asyncio.Semaphore(SHAFA_UPSCALE_CONCURRENCY)
 _PLAYWRIGHT_SEMAPHORE = asyncio.Semaphore(SHAFA_PLAYWRIGHT_CONCURRENCY)  # Limit concurrent browser instances
 _http_session: Optional[aiohttp.ClientSession] = None
-_playwright_browser: Optional[Browser] = None
-_playwright_context: Optional[BrowserContext] = None
-_playwright_instance = None
+_playwright_runtime: Optional[PlaywrightRuntimeManager] = None
 MIN_PRICE_DIFF = 50
 MIN_PRICE_DIFF_PERCENT = 25.0
 NOTIFICATION_CLAIM_STALE_MINUTES = 120
@@ -61,13 +80,6 @@ PRICE_NOISE_RE = re.compile(r"(грн|uah|₴|\d+\s*%?)", re.IGNORECASE)
 ITEM_ID_RE = re.compile(r"(\d+)")
 ITEM_SLUG_RE = re.compile(r"^\d{6,}(?:-[a-z0-9-]+)?$", re.IGNORECASE)
 INVALID_SHAFA_PATH_PARTS = ("/my/", "/msg/", "/member/", "/api/", "/social/", "/login")
-
-class RetryableHttpStatus(Exception):
-    def __init__(self, status: int, wait_s: float = 0.0, context: str = ""):
-        self.status = status
-        self.wait_s = max(0.0, float(wait_s or 0.0))
-        self.context = context or "http"
-        super().__init__(f"{self.context} status={self.status}")
 
 if not _LXML_AVAILABLE:
     logger.warning("lxml not found; using html.parser")
@@ -84,50 +96,10 @@ def _normalize_duplicate_name(name: str) -> str:
 
 
 def _duplicate_key(name: str, price_int: int) -> Optional[Tuple[str, int]]:
-    normalized_name = _normalize_duplicate_name(name)
-    if not normalized_name or price_int <= 0:
-        return None
-    return normalized_name, int(price_int)
-
-def async_retry(max_retries: int = 3, backoff_base: float = 1.0, *, assume_timeout_success: bool = False):
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except RetryAfter as e:
-                    logger.warning(f"Telegram rate limit hit; waiting {e.retry_after}s...")
-                    await asyncio.sleep(e.retry_after)
-                except TimedOut:
-                    if assume_timeout_success:
-                        logger.warning(f"Timeout in {func.__name__}; assuming Telegram delivered to avoid duplicates")
-                        return True
-                    if attempt == max_retries - 1:
-                        logger.warning(f"Timeout in {func.__name__} after {max_retries} attempts")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(backoff_base * (attempt + 1))
-                except RetryableHttpStatus as e:
-                    if attempt < max_retries - 1:
-                        wait_s = e.wait_s if e.wait_s > 0 else (backoff_base * (attempt + 1))
-                        logger.warning(f"Retryable HTTP {e.status} in {func.__name__}; waiting {wait_s:.1f}s")
-                        await asyncio.sleep(wait_s)
-                    else:
-                        logger.warning(f"{func.__name__} exhausted retries for HTTP {e.status}")
-                except Exception as e:
-                    if "Wrong type of the page content" in str(e):
-                        logger.warning(f"{func.__name__} got non-image content, falling back to bytes")
-                        return None
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(backoff_base * (attempt + 1) + random.random())
-                    else:
-                        logger.error(f"{func.__name__} failed after {max_retries} attempts: {e}")
-            return None
-        return wrapper
-    return decorator
+    return duplicate_key(name, price_int)
 
 @dataclass
-class ShafaItem:
+class ShafaItem(MarketplaceItem):
     id: str
     name: str
     link: str
@@ -420,16 +392,13 @@ async def fetch_html_with_playwright(url: str) -> Optional[str]:
     if not PLAYWRIGHT_AVAILABLE:
         logger.error("Playwright is unavailable")
         return None
-    global _playwright_browser
+    global _playwright_runtime
     async with _PLAYWRIGHT_SEMAPHORE:
         try:
-            if _playwright_browser is None:
+            if _playwright_runtime is None:
                 logger.error("Playwright is not initialized")
                 return None
-            if _playwright_context is not None:
-                page = await _playwright_context.new_page()
-            else:
-                page = await _playwright_browser.new_page(user_agent=USER_AGENT)
+            page = await _playwright_runtime.new_page()
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 try:
@@ -443,6 +412,8 @@ async def fetch_html_with_playwright(url: str) -> Optional[str]:
                 await page.close()
         except Exception as e:
             logger.error(f"Failed to load page: {e}")
+            if _playwright_runtime is not None:
+                await _playwright_runtime.reset(str(e))
             return None
 
 def _parse_items_from_html(html: str) -> Tuple[List[ShafaItem], bool]:
@@ -461,11 +432,7 @@ async def scrape_shafa_url(url: str) -> Optional[List[ShafaItem]]:
     items, _ = _parse_items_from_html(html)
     return items
 
-@async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
-async def send_message(bot: Bot, chat_id: str, text: str) -> bool:
-    async with _SEND_SEMAPHORE:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
-    return True
+send_message = build_message_sender(send_semaphore=_SEND_SEMAPHORE)
 
 def build_message(item: ShafaItem, prev: Optional[Dict[str, Any]], source_name: str) -> str:
     safe = {key: escape(val or "", quote=True) for key, val in {
@@ -500,48 +467,22 @@ def build_message(item: ShafaItem, prev: Optional[Dict[str, Any]], source_name: 
         f"🔗 {open_link}"
     )
 
-@async_retry(max_retries=3, backoff_base=1.0)
-async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
-    if not _is_valid_image_url(url):
-        return None
-    headers = {
-        "User-Agent": RUN_USER_AGENT,
-        "Accept-Language": RUN_ACCEPT_LANGUAGE,
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-    }
-    async with _HTTP_SEMAPHORE:
-        session = _get_http_session()
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
-            if r.status == 429:
-                retry_after = r.headers.get("Retry-After")
-                wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 15
-                raise RetryableHttpStatus(429, wait_s=wait_s, context="image download")
-            if r.status == 403:
-                # Keep 403 conservative: avoid long retry loops and fall back to text-only send.
-                logger.warning("Forbidden (403). Falling back to text-only send.")
-                return None
-            r.raise_for_status()
-            return await r.read()
-
-@async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
-async def _send_photo_by_bytes(bot: Bot, chat_id: str, photo_bytes: bytes, caption: str) -> bool:
-    async with _SEND_SEMAPHORE:
-        await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(photo_bytes), caption=caption, parse_mode=ParseMode.HTML)
-    return True
-
-async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
-    return await send_remote_photo_with_fallback(
-        bot=bot,
-        chat_id=chat_id,
-        caption=caption,
-        image_url=image_url,
-        is_valid_image_url=_is_valid_image_url,
-        download_bytes=_download_bytes,
-        send_message=send_message,
-        send_photo_by_bytes=_send_photo_by_bytes,
-        run_cpu_bound_fn=run_cpu_bound,
-        logger=logger,
-    )
+_download_bytes = build_image_downloader(
+    http_semaphore=_HTTP_SEMAPHORE,
+    get_http_session=_get_http_session,
+    user_agent=RUN_USER_AGENT,
+    accept_language=RUN_ACCEPT_LANGUAGE,
+    logger=logger,
+)
+_send_photo_by_bytes = build_photo_sender(send_semaphore=_SEND_SEMAPHORE)
+send_photo_with_upscale = build_media_sender(
+    is_valid_image_url=_is_valid_image_url,
+    download_bytes=_download_bytes,
+    send_message=send_message,
+    send_photo_by_bytes=_send_photo_by_bytes,
+    run_cpu_bound_fn=run_cpu_bound,
+    logger=logger,
+)
 
 DB_FILE = SHAFA_ITEMS_DB_FILE
 
@@ -799,233 +740,229 @@ def _db_update_source_stats_sync(url: str, streak: int, cycle_count: int):
         """, (url, streak, cycle_count))
         conn.commit()
 
+
+async def db_get_source_stats(url: str) -> Dict[str, int]:
+    return await asyncio.to_thread(_db_get_source_stats_sync, url)
+
+
+async def db_update_source_stats(url: str, streak: int, cycle_count: int) -> None:
+    await asyncio.to_thread(_db_update_source_stats_sync, url, streak, cycle_count)
+
+
+class ShafaRepository(MarketplaceRepository[ShafaItem]):
+    async def fetch_existing(self, item_ids: list[str]) -> list[Optional[Dict[str, Any]]]:
+        return await asyncio.to_thread(_db_fetch_existing_sync, item_ids)
+
+    async def fetch_duplicate_keys(self, items: list[ShafaItem]) -> set[Tuple[str, int]]:
+        return await asyncio.to_thread(_db_fetch_duplicate_keys_sync, items)
+
+    async def claim_notification_key(self, item: ShafaItem, source_name: str) -> bool:
+        return await asyncio.to_thread(_db_claim_notification_key_sync, item, source_name)
+
+    async def mark_notification_sent(self, item: ShafaItem, source_name: str) -> None:
+        await asyncio.to_thread(_db_mark_notification_sent_sync, item, source_name)
+
+    async def release_notification_claim(self, item: ShafaItem, source_name: str) -> None:
+        await asyncio.to_thread(_db_release_notification_claim_sync, item, source_name)
+
+    async def persist_items(self, updates: list[ItemUpdate[ShafaItem]], source_name: str) -> None:
+        if not updates:
+            return
+        await asyncio.to_thread(
+            _db_upsert_items_sync,
+            [(update.item, update.touch_last_sent) for update in updates],
+            source_name,
+        )
+
+    async def get_source_stats(self, url: str) -> SourceStats:
+        stats = await db_get_source_stats(url)
+        return SourceStats(streak=stats["streak"], cycle_count=stats["cycle_count"])
+
+    async def update_source_stats(self, url: str, streak: int, cycle_count: int) -> None:
+        await db_update_source_stats(url, streak, cycle_count)
+
+
+def _hydrate_shafa_item(item: ShafaItem, previous: Optional[Dict[str, Any]]) -> None:
+    if previous and not item.first_image_url and previous.get("first_image_url"):
+        item.first_image_url = previous.get("first_image_url")
+
+
+def _decide_shafa_item(item: ShafaItem, previous: Optional[Dict[str, Any]]) -> ItemDecision:
+    if previous is None:
+        if not _has_numeric_price(item.price_text, item.price_int):
+            return ItemDecision()
+        return ItemDecision(send_notification=True, is_new_item=True)
+
+    if not _has_numeric_price(item.price_text, item.price_int):
+        return ItemDecision()
+
+    previous_price = previous.get("price_int") or 0
+    if previous_price <= 0 and item.price_int > 0:
+        return ItemDecision(persist_without_send=True)
+    if previous_price > 0 and item.price_int > previous_price:
+        return ItemDecision(persist_without_send=True)
+
+    price_diff = abs(item.price_int - previous_price)
+    percent_change = (price_diff / previous_price * 100.0) if previous_price > 0 else None
+    if price_diff < MIN_PRICE_DIFF or (percent_change is not None and percent_change < MIN_PRICE_DIFF_PERCENT):
+        return ItemDecision()
+    return ItemDecision(send_notification=True)
+
 async def run_shafa_scraper():
     total_scraped = 0
     total_sent = 0
     total_new = 0
-    errors = []
-    def _add_error(msg: str):
+    errors: list[str] = []
+
+    def _add_error(msg: str) -> None:
         if msg:
             errors.append(str(msg)[:200])
+
     logger.info("SHAFA.UA start")
     if not PLAYWRIGHT_AVAILABLE:
         logger.error("Playwright is not installed. Run: pip install playwright && playwright install chromium")
         _add_error("Playwright not installed")
         return "; ".join(dict.fromkeys(errors))
+
     token = (TELEGRAM_OLX_BOT_TOKEN or "").strip().strip("'\"")
     default_chat = (DANYLO_DEFAULT_CHAT_ID or "").strip().strip("'\"")
     if not token:
         logger.error("Telegram token not set")
         _add_error("Telegram token not set")
         return "; ".join(dict.fromkeys(errors))
-    bot: Optional[Bot] = None
-    summary = ""
+
     try:
         await asyncio.to_thread(_db_init_sync)
         logger.info("Database ready")
-    except Exception as e:
-        logger.error(f"Database init failed: {e}")
-        _add_error(f"DB init failed: {e}")
+    except Exception as exc:
+        logger.error("Database init failed: %s", exc)
+        _add_error(f"DB init failed: {exc}")
         return "; ".join(dict.fromkeys(errors))
-    global _playwright_browser, _playwright_instance, _playwright_context, _http_session
-    try:
-        _playwright_instance = await async_playwright().start()
-        _playwright_browser = await _playwright_instance.chromium.launch(headless=True)
-        _playwright_context = await _playwright_browser.new_context(user_agent=USER_AGENT)
-        logger.info("Playwright started")
-    except Exception as e:
-        logger.error(f"Playwright error: {e}")
-        _add_error(f"Playwright error: {e}")
-        return "; ".join(dict.fromkeys(errors))
-    bot = Bot(token=token)
-    run_seen_duplicate_keys: set[Tuple[str, int]] = set()
-    run_seen_lock = asyncio.Lock()
 
-    async def _send_item_message(bot: Bot, chat_id: str, text: str, item: ShafaItem, source_name: str) -> bool:
-        nonlocal total_sent
+    global _playwright_runtime, _http_session
+    try:
+        _playwright_runtime = PlaywrightRuntimeManager(
+            async_playwright_factory=async_playwright,
+            user_agent=USER_AGENT,
+            logger=logger,
+            chromium_launch_kwargs={"headless": True},
+        )
+        await _playwright_runtime.ensure_started()
+    except Exception as exc:
+        logger.error("Playwright error: %s", exc)
+        _add_error(f"Playwright error: {exc}")
+        return "; ".join(dict.fromkeys(errors))
+
+    bot = Bot(token=token)
+    repository = ShafaRepository()
+    duplicate_tracker = RunDuplicateTracker[ShafaItem]()
+
+    async def _send_item(item: ShafaItem, text: str, source_name: str) -> bool:
         try:
-            image_url = item.first_image_url
-            sent = await send_photo_with_upscale(bot, chat_id, text, image_url)
-            if sent:
-                await asyncio.to_thread(_db_mark_notification_sent_sync, item, source_name)
-                total_sent += 1
-            else:
-                await asyncio.to_thread(_db_release_notification_claim_sync, item, source_name)
+            sent = await send_photo_with_upscale(bot, default_chat, text, item.first_image_url)
             return bool(sent)
-        except RetryAfter as e:
-            logger.warning(f"Telegram rate limit hit; waiting {e.retry_after}s")
+        except RetryAfter as exc:
+            logger.warning("Telegram rate limit hit; waiting %ss", exc.retry_after)
         except TimedOut:
-            await asyncio.to_thread(_db_mark_notification_sent_sync, item, source_name)
             logger.warning("Timeout while sending")
             _add_error("Telegram send timeout")
-        except Exception as e:
-            await asyncio.to_thread(_db_release_notification_claim_sync, item, source_name)
-            logger.error(f"Send failed: {e}")
-            _add_error(f"Send failed: {e}")
+            return True
+        except Exception as exc:
+            logger.error("Send failed: %s", exc)
+            _add_error(f"Send failed: {exc}")
         return False
 
-    async def _claim_duplicate_key_for_run(item: ShafaItem) -> bool:
-        key = _duplicate_key(item.name, item.price_int)
-        if key is None:
-            return True
-        async with run_seen_lock:
-            if key in run_seen_duplicate_keys:
-                return False
-            run_seen_duplicate_keys.add(key)
-            return True
-
-    async def _process_entry(entry: Dict[str, Any]):
-        nonlocal total_scraped, total_new
-        url, chat_id, source_name = entry.get("url"), default_chat, entry.get("url_name") or "SHAFA"
-        if not url or not chat_id:
+    async def _process_entry(entry: Dict[str, Any]) -> None:
+        nonlocal total_scraped, total_new, total_sent
+        url = entry.get("url")
+        source_name = entry.get("url_name") or "SHAFA"
+        if not url or not default_chat:
             return
         if SHAFA_REQUEST_JITTER_SEC > 0:
             await asyncio.sleep(random.uniform(0, SHAFA_REQUEST_JITTER_SEC))
-        stats = await asyncio.to_thread(_db_get_source_stats_sync, url)
-        streak = stats["streak"]
-        cycle_count = stats["cycle_count"] + 1
-        level = min(streak // 365, 23)
-        divisor = level + 1
-        if cycle_count % divisor != 0:
-            logger.debug(f"Skipping (cycle {cycle_count}/{divisor}, streak {streak})")
-            await asyncio.to_thread(_db_update_source_stats_sync, url, streak, cycle_count)
+
+        source_stats = await repository.get_source_stats(url)
+        source_decision = make_source_decision(source_stats)
+        if not source_decision.should_process:
+            logger.debug(
+                "Skipping (cycle %s/%s, streak %s)",
+                source_decision.next_cycle_count,
+                source_decision.divisor,
+                source_stats.streak,
+            )
+            await repository.update_source_stats(url, source_decision.next_streak, source_decision.next_cycle_count)
             return
+
         try:
             items = await scrape_shafa_url(url)
             if items is None:
                 return
-            if items:
-                new_streak = 0
-                new_cycle = 0
-            else:
-                new_streak = streak + 1
-                new_cycle = 0
-            await asyncio.to_thread(_db_update_source_stats_sync, url, new_streak, new_cycle)
+            next_streak, next_cycle = finished_source_decision(source_stats.streak, len(items))
+            await repository.update_source_stats(url, next_streak, next_cycle)
             if not items:
                 return
+
             total_scraped += len(items)
-            prev_items = await asyncio.to_thread(_db_fetch_existing_sync, [item.id for item in items])
-            duplicate_keys_in_db = await asyncio.to_thread(_db_fetch_duplicate_keys_sync, items)
-            unsubscribed_item_ids = await fetch_unsubscribed_ids("shafa", [item.id for item in items])
-            new_count = 0
-            send_tasks = []
-            items_to_send = []
-            updates = []
-            for idx, it in enumerate(items):
-                prev = prev_items[idx]
-                if it.id in unsubscribed_item_ids:
-                    logger.debug("Skipping unsubscribed SHAFA item: %s", it.id)
-                    continue
-                duplicate_key = _duplicate_key(it.name, it.price_int)
-                if duplicate_key is not None and duplicate_key in duplicate_keys_in_db:
-                    logger.debug("Skipping SHAFA duplicate already in DB: %s | %s грн", it.name, it.price_int)
-                    continue
-                if not await _claim_duplicate_key_for_run(it):
-                    logger.debug("Skipping SHAFA duplicate in current run: %s | %s грн", it.name, it.price_int)
-                    continue
-                if prev and not it.first_image_url and prev.get("first_image_url"):
-                    it.first_image_url = prev.get("first_image_url")
-                if prev is None:
-                    if not _has_numeric_price(it.price_text, it.price_int):
-                        logger.warning(f"Skipping new item with empty/invalid price: {it.id}")
-                        continue
-                    if not await asyncio.to_thread(_db_claim_notification_key_sync, it, source_name):
-                        logger.debug("Skipping SHAFA duplicate already claimed/sent: %s | %s грн", it.name, it.price_int)
-                        continue
-                    new_count += 1
-                    items_to_send.append(it)
-                    send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
-                    continue
-                # Do not apply price updates when parser produced empty/invalid price.
-                if not _has_numeric_price(it.price_text, it.price_int):
-                    logger.warning(f"Skipping update with empty/invalid price for item {it.id}")
-                    continue
-                previous_price = prev.get("price_int") or 0
-                if previous_price <= 0 and it.price_int > 0:
-                    # Heal DB after previous bad/empty price without sending noisy updates.
-                    updates.append((it, False))
-                    continue
-                if previous_price > 0 and it.price_int > previous_price:
-                    # Price increased: update DB but do not notify.
-                    updates.append((it, False))
-                    continue
-                price_diff = abs(it.price_int - previous_price)
-                percent_change = (price_diff / previous_price * 100.0) if previous_price > 0 else None
-                # Intentionally keep the stored baseline unchanged for minor deltas.
-                # Alerts are anchored to the last significant price, so sub-threshold
-                # moves must not rewrite DB state and dilute later larger drops.
-                if price_diff < MIN_PRICE_DIFF or (percent_change is not None and percent_change < MIN_PRICE_DIFF_PERCENT):
-                    continue
-                if not await asyncio.to_thread(_db_claim_notification_key_sync, it, source_name):
-                    logger.debug("Skipping SHAFA duplicate already claimed/sent: %s | %s грн", it.name, it.price_int)
-                    continue
-                items_to_send.append(it)
-                send_tasks.append(_send_item_message(bot, chat_id, build_message(it, prev, source_name), it, source_name))
-            if send_tasks:
-                results = await asyncio.gather(*send_tasks, return_exceptions=True)
-                for it, res in zip(items_to_send, results):
-                    sent = False if isinstance(res, Exception) else bool(res)
-                    updates.append((it, sent))
-            if updates:
-                await asyncio.to_thread(_db_upsert_items_sync, updates, source_name)
-            total_new += new_count
-        except aiohttp.ClientError as e:
-            logger.error(f"Network error: {e}")
+            pipeline_stats = await process_marketplace_items(
+                source_kind="shafa",
+                source_name=source_name,
+                items=items,
+                repository=repository,
+                duplicate_tracker=duplicate_tracker,
+                decide_item=_decide_shafa_item,
+                build_message=build_message,
+                send_item=_send_item,
+                hydrate_from_previous=_hydrate_shafa_item,
+                logger=logger,
+            )
+            total_new += pipeline_stats.total_new
+            total_sent += pipeline_stats.total_sent
+        except aiohttp.ClientError as exc:
+            logger.error("Network error: %s", exc)
             _add_error("Network error")
-        except Exception as e:
-            logger.error(f"Processing error: {e}")
-            _add_error(f"Processing error: {e}")
+        except Exception as exc:
+            logger.error("Processing error: %s", exc)
+            _add_error(f"Processing error: {exc}")
+
     try:
         sem = asyncio.Semaphore(SHAFA_TASK_CONCURRENCY)
-        async def _guarded_process(entry: Dict[str, Any]):
+
+        async def _guarded_process(entry: Dict[str, Any]) -> None:
             async with sem:
                 await _process_entry(entry)
+
         sources = merge_sources(SHAFA_URLS or [], load_dynamic_urls("shafa"))
         if tasks := [_guarded_process(entry) for entry in sources]:
-            logger.info(f"Sources: {len(tasks)}")
+            logger.info("Sources: %s", len(tasks))
             await asyncio.gather(*tasks, return_exceptions=True)
         else:
             logger.warning("No URLs configured")
         logger.info("Completed")
-        logger.info(f"New: {total_new} | Sent: {total_sent}")
+        logger.info("New: %s | Sent: %s", total_new, total_sent)
         if total_scraped > 0:
-            logger.info(f"Success rate: {(total_sent/total_scraped*100):.1f}%")
+            logger.info("Success rate: %.1f%%", (total_sent / total_scraped * 100))
     finally:
-        if _playwright_context:
+        if _playwright_runtime is not None:
             try:
-                await _playwright_context.close()
-                _playwright_context = None
+                await _playwright_runtime.close()
             except Exception:
                 pass
-        if _playwright_browser:
-            try:
-                await _playwright_browser.close()
-                _playwright_browser = None
-            except Exception:
-                pass
-        if _playwright_instance:
-            try:
-                await _playwright_instance.stop()
-                _playwright_instance = None
-            except Exception:
-                pass
+            _playwright_runtime = None
         if _http_session and not _http_session.closed:
             try:
                 await _http_session.close()
                 _http_session = None
             except Exception:
                 pass
-        if bot is not None:
-            try:
-                await bot.shutdown()
-            except Exception:
-                pass
-            try:
-                await bot.close()
-            except Exception:
-                pass
+        try:
+            await bot.shutdown()
+        except Exception:
+            pass
+        try:
+            await bot.close()
+        except Exception:
+            pass
         logger.info("Resources cleaned up")
-        # Give time for async cleanup to complete
         await asyncio.sleep(0.5)
     if errors:
         uniq = []
@@ -1035,8 +972,9 @@ async def run_shafa_scraper():
             if len(uniq) >= 3:
                 break
         summary = "; ".join(uniq)
-        logger.warning(f"SHAFA run errors: {summary}")
-    return summary
+        logger.warning("SHAFA run errors: %s", summary)
+        return summary
+    return ""
 
 if __name__ == "__main__":
     asyncio.run(run_shafa_scraper())

@@ -1,19 +1,38 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
-from telegram.constants import ParseMode
-from PIL import Image
-import io, asyncio, re, sqlite3, aiohttp, random, logging
+import asyncio, re, sqlite3, aiohttp, random, logging
 import aiosqlite
 from html import escape
-from functools import wraps
 from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, OLX_TASK_CONCURRENCY, OLX_HTTP_HTML_CONCURRENCY, OLX_HTTP_IMAGE_CONCURRENCY, OLX_UPSCALE_CONCURRENCY, OLX_SEND_CONCURRENCY, OLX_HTTP_CONNECTOR_LIMIT
 from config_olx_urls import OLX_URLS
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
-from helpers.image_pipeline import send_remote_photo_with_fallback
+from helpers.marketplace_core import (
+    MarketplaceItem,
+    SourceStats,
+    duplicate_key,
+    finished_source_decision,
+    make_source_decision,
+    notification_storage_key,
+)
+from helpers.marketplace_pipeline import (
+    ItemDecision,
+    ItemUpdate,
+    MarketplaceRepository,
+    RunDuplicateTracker,
+    process_marketplace_items,
+)
+from helpers.marketplace_sender import (
+    RetryableHttpStatus,
+    async_retry,
+    build_image_downloader,
+    build_media_sender,
+    build_message_sender,
+    build_photo_sender,
+)
 from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import OLX_ITEMS_DB_FILE
@@ -48,14 +67,6 @@ NO_LISTINGS_PATTERNS = (
 _PARSER = "lxml" if _LXML_AVAILABLE else "html.parser"
 NO_LISTINGS_TEXT = NO_LISTINGS_UA_TEXT
 
-class RetryableHttpStatus(Exception):
-    def __init__(self, status: int, wait_s: float = 0.0, context: str = ""):
-        self.status = status
-        self.wait_s = max(0.0, float(wait_s or 0.0))
-        self.context = context or "http"
-        super().__init__(f"{self.context} status={self.status}")
-
-
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
     if (_http_session is None) or _http_session.closed:
@@ -71,10 +82,7 @@ def _normalize_duplicate_name(name: str) -> str:
 
 
 def _duplicate_key(name: str, price_int: int) -> Optional[Tuple[str, int]]:
-    normalized_name = _normalize_duplicate_name(name)
-    if not normalized_name or price_int <= 0:
-        return None
-    return normalized_name, int(price_int)
+    return duplicate_key(name, price_int)
 
 
 def _normalize_search_text(text: str) -> str:
@@ -96,43 +104,8 @@ def _contains_no_listings(text: str) -> bool:
     normalized = _normalize_search_text(text)
     return any(pattern in normalized for pattern in NO_LISTINGS_PATTERNS)
 
-def async_retry(max_retries: int = 3, backoff_base: float = 1.0, *, assume_timeout_success: bool = False):
-    """Decorator that retries async functions with exponential backoff."""
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
-        @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except RetryAfter as e:
-                    logger.warning(f"Rate limited, waiting {e.retry_after}s...")
-                    await asyncio.sleep(e.retry_after)
-                except TimedOut:
-                    if assume_timeout_success:
-                        logger.warning(f"Timeout in {func.__name__}; assuming Telegram delivered to avoid duplicates")
-                        return True
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Timeout in {func.__name__}, retrying... ({attempt + 1}/{max_retries})")
-                    await asyncio.sleep(backoff_base * (attempt + 1))
-                except RetryableHttpStatus as e:
-                    if attempt < max_retries - 1:
-                        wait_s = e.wait_s if e.wait_s > 0 else (backoff_base * (attempt + 1))
-                        logger.warning(f"Retryable HTTP {e.status} in {func.__name__}, waiting {wait_s:.1f}s")
-                        await asyncio.sleep(wait_s)
-                    else:
-                        logger.warning(f"{func.__name__} exhausted retries for HTTP {e.status}")
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(backoff_base * (attempt + 1) + random.random())
-                    else:
-                        logger.error(f"{func.__name__} failed after {max_retries} retries: {e}")
-            return None
-        return wrapper
-    return decorator
-
-
 @dataclass
-class OlxItem:
+class OlxItem(MarketplaceItem):
     id: str
     name: str
     link: str
@@ -311,12 +284,7 @@ async def scrape_olx_url(url: str) -> Optional[List[OlxItem]]:
     items = [item for card in cards if (item := parse_card(card))]
     return items
 
-@async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
-async def send_message(bot: Bot, chat_id: str, text: str) -> bool:
-    """Send text message via Telegram bot."""
-    async with _SEND_SEMAPHORE:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=False)
-    return True
+send_message = build_message_sender(send_semaphore=_SEND_SEMAPHORE)
 
 def _escape_html_dict(data: Dict[str, Optional[str]]) -> Dict[str, str]:
     """Helper to escape all HTML values in dict."""
@@ -419,61 +387,22 @@ async def fetch_first_image_best(item_url: str) -> Optional[str]:
         return None
 
 
-@async_retry(max_retries=3, backoff_base=1.0)
-async def _download_bytes(url: str, timeout_s: int = 30) -> Optional[bytes]:
-    """Download bytes from URL with retry logic."""
-    if not _is_valid_image_url(url):
-        logger.debug(f"Skipping invalid/placeholder image URL: {url}")
-        return None
-
-    headers = {
-        "User-Agent": RUN_USER_AGENT,
-        "Accept-Language": RUN_ACCEPT_LANGUAGE,
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-    }
-    async with _HTTP_IMAGE_SEMAPHORE:
-        session = _get_http_session()
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_s)) as r:
-            if r.status == 429:
-                retry_after = r.headers.get("Retry-After")
-                wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 15
-                raise RetryableHttpStatus(429, wait_s=wait_s, context="image download")
-            if r.status == 403:
-                # Keep 403 conservative: avoid long retry loops and fall back to text-only send.
-                logger.warning("Image forbidden (403). Falling back to text-only send.")
-                return None
-            r.raise_for_status()
-            return await r.read()
-
-@async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
-async def _send_photo_by_url(bot: Bot, chat_id: str, photo_url: str, caption: str) -> bool:
-    """Send photo by URL."""
-    async with _SEND_SEMAPHORE:
-        await bot.send_photo(chat_id=chat_id, photo=photo_url, caption=caption, parse_mode=ParseMode.HTML)
-    return True
-
-@async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
-async def _send_photo_by_bytes(bot: Bot, chat_id: str, photo_bytes: bytes, caption: str) -> bool:
-    """Send photo by bytes."""
-    async with _SEND_SEMAPHORE:
-        await bot.send_photo(chat_id=chat_id, photo=io.BytesIO(photo_bytes), caption=caption, parse_mode=ParseMode.HTML)
-    return True
-
-
-async def send_photo_with_upscale(bot: Bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
-    """Send photo with shared fetch/upscale/fallback pipeline."""
-    return await send_remote_photo_with_fallback(
-        bot=bot,
-        chat_id=chat_id,
-        caption=caption,
-        image_url=image_url,
-        is_valid_image_url=_is_valid_image_url,
-        download_bytes=_download_bytes,
-        send_message=send_message,
-        send_photo_by_bytes=_send_photo_by_bytes,
-        run_cpu_bound_fn=run_cpu_bound,
-        logger=logger,
-    )
+_download_bytes = build_image_downloader(
+    http_semaphore=_HTTP_IMAGE_SEMAPHORE,
+    get_http_session=_get_http_session,
+    user_agent=RUN_USER_AGENT,
+    accept_language=RUN_ACCEPT_LANGUAGE,
+    logger=logger,
+)
+_send_photo_by_bytes = build_photo_sender(send_semaphore=_SEND_SEMAPHORE)
+send_photo_with_upscale = build_media_sender(
+    is_valid_image_url=_is_valid_image_url,
+    download_bytes=_download_bytes,
+    send_message=send_message,
+    send_photo_by_bytes=_send_photo_by_bytes,
+    run_cpu_bound_fn=run_cpu_bound,
+    logger=logger,
+)
 
 DB_FILE = OLX_ITEMS_DB_FILE
 
@@ -583,7 +512,7 @@ async def db_upsert_item(item: OlxItem, source_name: str, touch_last_sent: bool)
 
 
 def _notification_storage_key(key: Tuple[str, int]) -> str:
-    return f"{key[0]}\x1f{key[1]}"
+    return notification_storage_key(key)
 
 
 def _db_claim_notification_key_sync(item: OlxItem, source_name: str) -> bool:
@@ -790,7 +719,47 @@ async def db_update_source_stats(url: str, streak: int, cycle_count: int):
     await asyncio.to_thread(_db_update_source_stats_sync, url, streak, cycle_count)
 
 
-async def run_olx_scraper():
+class OlxRepository(MarketplaceRepository[OlxItem]):
+    async def fetch_existing(self, item_ids: list[str]) -> list[Optional[Dict[str, Any]]]:
+        return await db_fetch_existing(item_ids)
+
+    async def fetch_duplicate_keys(self, items: list[OlxItem]) -> set[Tuple[str, int]]:
+        return await db_fetch_duplicate_keys(items)
+
+    async def claim_notification_key(self, item: OlxItem, source_name: str) -> bool:
+        return await db_claim_notification_key(item, source_name)
+
+    async def mark_notification_sent(self, item: OlxItem, source_name: str) -> None:
+        await db_mark_notification_sent(item, source_name)
+
+    async def release_notification_claim(self, item: OlxItem, source_name: str) -> None:
+        await db_release_notification_claim(item, source_name)
+
+    async def persist_items(self, updates: list[ItemUpdate[OlxItem]], source_name: str) -> None:
+        for update in updates:
+            await db_upsert_item(update.item, source_name, update.touch_last_sent)
+
+    async def get_source_stats(self, url: str) -> SourceStats:
+        stats = await db_get_source_stats(url)
+        return SourceStats(streak=stats["streak"], cycle_count=stats["cycle_count"])
+
+    async def update_source_stats(self, url: str, streak: int, cycle_count: int) -> None:
+        await db_update_source_stats(url, streak, cycle_count)
+
+
+def _decide_olx_item(item: OlxItem, previous: Optional[Dict[str, Any]]) -> ItemDecision:
+    if previous is None:
+        return ItemDecision(send_notification=True, is_new_item=True)
+
+    previous_price = previous.get("price_int") or 0
+    price_diff = abs(item.price_int - previous_price)
+    percent_change = (price_diff / previous_price * 100.0) if previous_price > 0 else None
+    if price_diff < MIN_PRICE_DIFF or (percent_change is not None and percent_change < MIN_PRICE_DIFF_PERCENT):
+        return ItemDecision()
+    return ItemDecision(send_notification=True)
+
+
+async def _legacy_run_olx_scraper():
     """Main scraper function."""
     logger.info("OLX Scraper started")
     errors = []
@@ -1029,6 +998,162 @@ async def run_olx_scraper():
                 await db_conn.close()
             except Exception:
                 pass
+        global _http_session
+        if _http_session is not None and not _http_session.closed:
+            try:
+                await _http_session.close()
+            except Exception:
+                pass
+            _http_session = None
+        try:
+            await bot.shutdown()
+        except Exception:
+            pass
+        try:
+            await bot.close()
+        except Exception:
+            pass
+
+
+async def run_olx_scraper():
+    logger.info("OLX Scraper started")
+    errors: list[str] = []
+
+    def _add_error(msg: str) -> None:
+        if msg:
+            errors.append(str(msg)[:200])
+
+    token = _clean_token(TELEGRAM_OLX_BOT_TOKEN)
+    default_chat = _clean_token(DANYLO_DEFAULT_CHAT_ID)
+    if not token:
+        logger.warning("No Telegram bot token configured")
+        _add_error("No Telegram bot token configured")
+        return "; ".join(dict.fromkeys(errors))
+
+    try:
+        await db_init()
+    except Exception as exc:
+        logger.error("Database initialization failed: %s", exc)
+        _add_error(f"DB init failed: {exc}")
+        return "; ".join(dict.fromkeys(errors))
+
+    bot = Bot(token=token)
+    repository = OlxRepository()
+    duplicate_tracker = RunDuplicateTracker[OlxItem]()
+    total_scraped = 0
+    total_without_images = 0
+
+    async def _send_item(item: OlxItem, text: str, source_name: str) -> bool:
+        nonlocal total_without_images
+        try:
+            image_url = item.first_image_url
+            if not image_url:
+                image_url = await fetch_first_image_best(item.link)
+                if image_url:
+                    item.first_image_url = image_url
+            if not image_url:
+                logger.warning("No image available for item %s", item.id)
+                total_without_images += 1
+            sent = await send_photo_with_upscale(bot, default_chat, text, image_url)
+            await asyncio.sleep(0.2)
+            return bool(sent)
+        except RetryAfter as exc:
+            logger.warning("Rate limited for item %s, waiting %ss", item.id, exc.retry_after)
+            _add_error("Telegram rate limited")
+        except TimedOut:
+            logger.warning("Timeout sending item %s", item.id)
+            _add_error("Telegram send timeout")
+            return True
+        except Exception as exc:
+            logger.error("Failed to send item %s: %s", item.id, exc)
+            _add_error(f"Send item error: {exc}")
+        return False
+
+    async def _process_entry(entry: Dict[str, Any]) -> None:
+        nonlocal total_scraped
+        url = entry.get("url")
+        source_name = entry.get("url_name") or "OLX"
+        if not url or not default_chat:
+            return
+        if OLX_REQUEST_JITTER_SEC > 0:
+            await asyncio.sleep(random.uniform(0, OLX_REQUEST_JITTER_SEC))
+
+        source_stats = await repository.get_source_stats(url)
+        source_decision = make_source_decision(source_stats)
+        if not source_decision.should_process:
+            logger.debug(
+                "Skipping %s (Streak: %s, Level: %s, Cycle: %s/%s)",
+                source_name,
+                source_stats.streak,
+                source_decision.level,
+                source_decision.next_cycle_count,
+                source_decision.divisor,
+            )
+            await repository.update_source_stats(url, source_decision.next_streak, source_decision.next_cycle_count)
+            return
+
+        try:
+            items = await scrape_olx_url(url)
+            if items is None:
+                return
+
+            next_streak, next_cycle = finished_source_decision(source_stats.streak, len(items))
+            await repository.update_source_stats(url, next_streak, next_cycle)
+            if not items:
+                return
+
+            total_scraped += len(items)
+            await process_marketplace_items(
+                source_kind="olx",
+                source_name=source_name,
+                items=items,
+                repository=repository,
+                duplicate_tracker=duplicate_tracker,
+                decide_item=_decide_olx_item,
+                build_message=build_message,
+                send_item=_send_item,
+                logger=logger,
+            )
+        except aiohttp.ClientError as exc:
+            logger.error("Network error processing %s: %s", source_name, exc)
+            _add_error(f"{source_name}: network error")
+        except Exception as exc:
+            logger.error("Failed to process %s: %s", source_name, exc)
+            _add_error(f"{source_name}: {exc}")
+
+    try:
+        sem = asyncio.Semaphore(OLX_TASK_CONCURRENCY)
+
+        async def _guarded_process(entry: Dict[str, Any]) -> None:
+            async with sem:
+                await _process_entry(entry)
+
+        sources = merge_sources(OLX_URLS or [], load_dynamic_urls("olx"))
+        if tasks := [_guarded_process(entry) for entry in sources]:
+            logger.info("Processing %s OLX source(s)...", len(tasks))
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            logger.warning("No OLX URLs configured")
+
+        logger.info("OLX scraper completed successfully")
+        logger.info(
+            "TOTAL SCRAPED: %s items | WITHOUT IMAGES: %s items (%.1f%%)",
+            total_scraped,
+            total_without_images,
+            (total_without_images / total_scraped * 100) if total_scraped > 0 else 0.0,
+        )
+        if errors:
+            uniq: list[str] = []
+            for item in errors:
+                if item not in uniq:
+                    uniq.append(item)
+                if len(uniq) >= 3:
+                    break
+            summary = "; ".join(uniq)
+            logger.warning("OLX run errors: %s", summary)
+            return summary
+        return ""
+    finally:
         global _http_session
         if _http_session is not None and not _http_session.closed:
             try:
