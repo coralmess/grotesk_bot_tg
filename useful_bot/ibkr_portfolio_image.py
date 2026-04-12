@@ -5,7 +5,7 @@ import io
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from playwright.sync_api import sync_playwright
 try:
@@ -21,7 +21,6 @@ from useful_bot.ibkr_portfolio_core import (
     PositionSnapshot,
     RankedPosition,
     coerce_optional_float,
-    compute_balance_delta,
     top_daily_movers,
     top_lifetime_gainers,
 )
@@ -75,12 +74,20 @@ class QQQMCloseHistory:
     latest_close: float
     close_by_date: dict[str, float]
 
+
+BenchmarkMode = Literal["trade_date_close", "live_session"]
+
 def render_ibkr_portfolio_card(
     *,
     snapshot: PortfolioSnapshot,
     previous_snapshot: Optional[PortfolioSnapshot] = None,
+    benchmark_mode: BenchmarkMode = "trade_date_close",
 ) -> io.BytesIO:
-    html_doc = _build_portfolio_html(snapshot=snapshot, previous_snapshot=previous_snapshot)
+    html_doc = _build_portfolio_html(
+        snapshot=snapshot,
+        previous_snapshot=previous_snapshot,
+        benchmark_mode=benchmark_mode,
+    )
     return _render_html_to_png(html_doc)
 
 
@@ -102,15 +109,17 @@ def _build_portfolio_html(
     *,
     snapshot: PortfolioSnapshot,
     previous_snapshot: Optional[PortfolioSnapshot],
+    benchmark_mode: BenchmarkMode = "trade_date_close",
     hero_variant: str = "half_ring",
 ) -> str:
-    delta = compute_balance_delta(snapshot, previous_snapshot)
-    delta_text, delta_class = _format_delta(delta)
     gainers_html = _build_gainer_rows(snapshot, top_lifetime_gainers(snapshot.positions))
     movers_html = _build_rank_rows(top_daily_movers(snapshot.positions) if snapshot.daily_data_complete else [])
     font_face_css = _font_face_css()
     today_change = _format_optional_currency(_portfolio_daily_pnl(snapshot), missing_text="No daily data")
-    qqqm_change = _format_optional_currency(_qqqm_hypothetical_pnl(snapshot), missing_text="No proxy")
+    qqqm_change = _format_optional_currency(
+        _qqqm_hypothetical_pnl(snapshot, benchmark_mode=benchmark_mode),
+        missing_text="No proxy",
+    )
     qqqm_total_diff = _format_optional_currency(snapshot.qqqm_total_diff, missing_text="No proxy")
     portfolio_performance = _format_optional_percent(_portfolio_performance_pct(snapshot), missing_text="No data")
     hero_unrealized = _format_optional_currency(snapshot.total_unrealized_pnl, missing_text="No data")
@@ -396,33 +405,6 @@ def _build_portfolio_html(
       background: rgba(255, 182, 46, 0.12);
       color: #ffc761;
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.05);
-    }}
-
-    .hero-foot-note {{
-      font-family: "Nunito Sans", "Segoe UI", sans-serif;
-      font-size: 15px;
-      font-weight: 800;
-      letter-spacing: -0.02em;
-      display: inline-flex;
-      align-items: center;
-      min-height: 36px;
-      padding: 0 14px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.07);
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
-    }}
-
-    .hero-foot-note.positive {{
-      color: var(--green);
-    }}
-
-    .hero-foot-note.negative {{
-      color: var(--red);
-    }}
-
-    .hero-foot-note.neutral {{
-      color: #93a0b5;
     }}
 
     .metrics-cluster {{
@@ -887,7 +869,6 @@ def _build_portfolio_html(
           </div>
           <div class="hero-foot">
             <div class="hero-foot-chip">{_e(holdings_text)}</div>
-            <div class="hero-foot-note {delta_class}">{_e(delta_text)}</div>
           </div>
         </div>
       </section>
@@ -1118,14 +1099,35 @@ def _portfolio_daily_pnl(snapshot: PortfolioSnapshot) -> Optional[float]:
     return total if has_data else None
 
 
-def _qqqm_hypothetical_pnl(snapshot: PortfolioSnapshot) -> Optional[float]:
-    benchmark = _fetch_qqqm_trade_date_return(snapshot.trade_date)
+def _qqqm_hypothetical_pnl(
+    snapshot: PortfolioSnapshot,
+    *,
+    benchmark_mode: BenchmarkMode = "trade_date_close",
+) -> Optional[float]:
+    benchmark = _fetch_qqqm_return_for_mode(snapshot, benchmark_mode=benchmark_mode)
     if benchmark is None:
         return None
     invested_value = _portfolio_prior_close_invested_value(snapshot)
     if invested_value is None or invested_value <= 0:
         return None
     return invested_value * benchmark.daily_return_pct / 100.0
+
+
+def _fetch_qqqm_return_for_mode(
+    snapshot: PortfolioSnapshot,
+    *,
+    benchmark_mode: BenchmarkMode,
+) -> Optional[QQQMTradeDateReturn]:
+    if benchmark_mode == "live_session":
+        live_quote = _fetch_qqqm_benchmark_quote()
+        if live_quote is not None:
+            return QQQMTradeDateReturn(
+                trade_date=snapshot.trade_date,
+                current_close=live_quote.current_price,
+                prior_close=live_quote.prior_close,
+                daily_return_pct=live_quote.daily_return_pct,
+            )
+    return _fetch_qqqm_trade_date_return(snapshot.trade_date)
 
 
 def _portfolio_prior_close_invested_value(snapshot: PortfolioSnapshot) -> Optional[float]:
@@ -1208,6 +1210,7 @@ def compute_qqqm_total_diff(
     baseline_trade_date: str,
     baseline_net_liquidation: float,
     baseline_qqqm_start_close: float,
+    benchmark_mode: BenchmarkMode = "trade_date_close",
 ) -> Optional[float]:
     if baseline_net_liquidation <= 0 or baseline_qqqm_start_close <= 0:
         return None
@@ -1218,7 +1221,11 @@ def compute_qqqm_total_diff(
     if benchmark_history is None:
         return None
 
-    current_close = _last_close_on_or_before(benchmark_history.close_by_date, snapshot.trade_date)
+    current_close = _resolve_qqqm_valuation_price(
+        snapshot,
+        benchmark_history=benchmark_history,
+        benchmark_mode=benchmark_mode,
+    )
     if current_close is None or current_close <= 0:
         return None
 
@@ -1241,6 +1248,19 @@ def compute_qqqm_total_diff(
 
     synthetic_value = synthetic_cash + (synthetic_shares * current_close)
     return snapshot.net_liquidation - synthetic_value
+
+
+def _resolve_qqqm_valuation_price(
+    snapshot: PortfolioSnapshot,
+    *,
+    benchmark_history: QQQMCloseHistory,
+    benchmark_mode: BenchmarkMode,
+) -> Optional[float]:
+    if benchmark_mode == "live_session":
+        live_quote = _fetch_qqqm_benchmark_quote()
+        if live_quote is not None and live_quote.current_price > 0:
+            return live_quote.current_price
+    return _last_close_on_or_before(benchmark_history.close_by_date, snapshot.trade_date)
 
 
 def _is_external_benchmark_cash_flow(cash_event: dict[str, object]) -> bool:
@@ -1298,29 +1318,53 @@ def _fetch_qqqm_benchmark_quote() -> Optional[QQQMBenchmarkQuote]:
         return None
     try:
         ticker = yf.Ticker("QQQM")
-        history = cached_history(
+        daily_history = cached_history(
             "QQQM",
             ttl_seconds=6 * 60 * 60,
             period="5d",
             interval="1d",
             auto_adjust=False,
-            fetch_history=lambda: ticker.history(period="5d", interval="1d", auto_adjust=False),
+            prepost=False,
+            fetch_history=lambda: ticker.history(period="5d", interval="1d", auto_adjust=False, prepost=False),
         )
     except Exception:
         return None
-    if history is None or getattr(history, "empty", True):
+    if daily_history is None or getattr(daily_history, "empty", True):
         return None
-    columns = getattr(history, "columns", [])
+    columns = getattr(daily_history, "columns", [])
     if "Close" not in columns:
         return None
     try:
-        closes = [float(value) for value in history["Close"].tolist() if float(value) > 0]
+        daily_closes = [float(value) for value in daily_history["Close"].tolist() if float(value) > 0]
     except Exception:
         return None
-    if len(closes) < 2:
+    if len(daily_closes) < 2:
         return None
-    prior_close = closes[-2]
-    current_price = closes[-1]
+    prior_close = daily_closes[-2]
+    current_price: Optional[float] = None
+    try:
+        intraday_history = cached_history(
+            "QQQM",
+            ttl_seconds=5 * 60,
+            period="1d",
+            interval="1m",
+            auto_adjust=False,
+            prepost=False,
+            fetch_history=lambda: ticker.history(period="1d", interval="1m", auto_adjust=False, prepost=False),
+        )
+    except Exception:
+        intraday_history = None
+    if intraday_history is not None and not getattr(intraday_history, "empty", True):
+        intraday_columns = getattr(intraday_history, "columns", [])
+        if "Close" in intraday_columns:
+            try:
+                intraday_closes = [float(value) for value in intraday_history["Close"].tolist() if float(value) > 0]
+            except Exception:
+                intraday_closes = []
+            if intraday_closes:
+                current_price = intraday_closes[-1]
+    if current_price is None:
+        current_price = daily_closes[-1]
     if prior_close <= 0 or current_price <= 0:
         return None
     return QQQMBenchmarkQuote(
@@ -1468,13 +1512,6 @@ def _font_face_css() -> str:
             """
         )
     return "\n".join(css_parts)
-
-
-def _format_delta(delta: Optional[float]) -> tuple[str, str]:
-    if delta is None:
-        return "No prior snapshot", "neutral"
-    prefix = "+" if delta >= 0 else "-"
-    return prefix + _format_currency(abs(delta), show_sign=False), "positive" if delta >= 0 else "negative"
 
 
 def _format_currency(value: float, *, show_sign: bool) -> str:

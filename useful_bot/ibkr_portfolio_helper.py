@@ -30,6 +30,7 @@ from useful_bot.ibkr_portfolio_core import (
     should_skip_for_missing_daily_data,
 )
 from useful_bot.ibkr_portfolio_image import (
+    BenchmarkMode,
     compute_qqqm_total_diff,
     initialize_qqqm_benchmark_baseline,
     render_ibkr_portfolio_card,
@@ -162,12 +163,13 @@ class IBKRPortfolioHelper:
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CommandHandler("ibkr_status", self.status_command))
         application.add_handler(CommandHandler("ibkr_checknow", self.checknow_command))
+        application.add_handler(CommandHandler("ibkr_current", self.current_command))
 
     def start_lines(self) -> list[str]:
         return [
             "IBKR daily portfolio helper",
             "Schedule: every US trading day at 16:30 America/New_York",
-            "Commands: /ibkr_status, /ibkr_checknow",
+            "Commands: /ibkr_status, /ibkr_checknow, /ibkr_current",
         ]
 
     async def on_startup(self, application: Application) -> None:
@@ -208,6 +210,15 @@ class IBKRPortfolioHelper:
     async def checknow_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._run_check(context.application, reason="manual", force=True)
 
+    async def current_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self._run_check(
+            context.application,
+            reason="current",
+            force=True,
+            benchmark_mode="live_session",
+            persist_snapshot=False,
+        )
+
     async def _monitor_loop(self, application: Application) -> None:
         while True:
             try:
@@ -225,7 +236,15 @@ class IBKRPortfolioHelper:
                 logging.exception("IBKR portfolio monitor iteration failed")
                 await asyncio.sleep(30)
 
-    async def _run_check(self, application: Application, reason: str, force: bool) -> bool:
+    async def _run_check(
+        self,
+        application: Application,
+        reason: str,
+        force: bool,
+        *,
+        benchmark_mode: BenchmarkMode = "trade_date_close",
+        persist_snapshot: bool = True,
+    ) -> bool:
         bot_data = getattr(application, "bot_data", {}) or {}
         service_health = bot_data.get("service_health")
         async with self._lock:
@@ -263,8 +282,9 @@ class IBKRPortfolioHelper:
                     baseline_trade_date=str(baseline["trade_date"]),
                     baseline_net_liquidation=float(baseline["net_liquidation"]),
                     baseline_qqqm_start_close=float(baseline["qqqm_start_close"]),
+                    benchmark_mode=benchmark_mode,
                 )
-            if not force and previous_snapshot and previous_snapshot.trade_date == snapshot.trade_date:
+            if persist_snapshot and not force and previous_snapshot and previous_snapshot.trade_date == snapshot.trade_date:
                 if service_health is not None:
                     service_health.record_success("ibkr_portfolio_check", note=f"{reason}:already_sent")
                 return False
@@ -281,6 +301,7 @@ class IBKRPortfolioHelper:
                 render_ibkr_portfolio_card,
                 snapshot=snapshot,
                 previous_snapshot=previous_snapshot,
+                benchmark_mode=benchmark_mode,
             )
             sent = False
             for attempt in (1, 2):
@@ -300,10 +321,11 @@ class IBKRPortfolioHelper:
                     service_health.record_failure("ibkr_portfolio_check", "telegram_send_failed")
                 return False
 
-            self._state["last_snapshot"] = snapshot.to_dict()
-            self._state["last_reason"] = reason
-            self._state["last_sent_at"] = datetime.now(NEW_YORK_TZ).isoformat(timespec="seconds")
-            self._save_state()
+            if persist_snapshot:
+                self._state["last_snapshot"] = snapshot.to_dict()
+                self._state["last_reason"] = reason
+                self._state["last_sent_at"] = datetime.now(NEW_YORK_TZ).isoformat(timespec="seconds")
+                self._save_state()
             if service_health is not None:
                 service_health.record_success("ibkr_portfolio_check", note=reason)
             return True

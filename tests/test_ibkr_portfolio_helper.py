@@ -22,6 +22,7 @@ from useful_bot.ibkr_portfolio_helper import (
     _parse_flex_statement_xml,
 )
 from useful_bot.ibkr_portfolio_image import (
+    QQQMBenchmarkQuote,
     QQQMCloseHistory,
     QQQMTradeDateReturn,
     RENDER_STYLE_VERSION,
@@ -205,6 +206,7 @@ def make_full_negative_positions():
 def make_snapshot(
     *,
     trade_date: str = "2026-03-23",
+    fetched_at: datetime | None = None,
     nav_starting_value: float | None = None,
     net_liquidation: float = 100000.0,
     cash_value: float = 25000.0,
@@ -243,7 +245,7 @@ def make_snapshot(
             },
         ]
     return build_portfolio_snapshot(
-        fetched_at=datetime(2026, 3, 23, 16, 30, tzinfo=NEW_YORK_TZ),
+        fetched_at=fetched_at or datetime(2026, 3, 23, 16, 30, tzinfo=NEW_YORK_TZ),
         trade_date=trade_date,
         account_id="U1234567",
         nav_starting_value=nav_starting_value,
@@ -859,6 +861,87 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
         self.assertIn("$-4,200", negative_html)
         self.assertEqual(missing_html.count("No proxy"), 2)
 
+    def test_build_portfolio_html_omits_hero_balance_delta_chip(self) -> None:
+        snapshot = make_snapshot(net_liquidation=105000.0)
+        previous_snapshot = make_snapshot(net_liquidation=100000.0)
+
+        with patch(
+            "useful_bot.ibkr_portfolio_image._fetch_qqqm_trade_date_return",
+            return_value=QQQMTradeDateReturn(
+                trade_date="2026-03-23",
+                current_close=210.0,
+                prior_close=200.0,
+                daily_return_pct=5.0,
+            ),
+        ):
+            html = _build_portfolio_html(snapshot=snapshot, previous_snapshot=previous_snapshot)
+
+        self.assertIn("2 holdings", html)
+        self.assertNotIn('<div class="hero-foot-note', html)
+
+    def test_qqqm_hypothetical_pnl_uses_live_session_quote_for_current_mode(self) -> None:
+        snapshot = make_snapshot(
+            trade_date="2026-03-23",
+            fetched_at=datetime(2026, 3, 23, 12, 15, tzinfo=NEW_YORK_TZ),
+            raw_positions=[
+                {
+                    "symbol": "AAPL",
+                    "con_id": 101,
+                    "sec_type": "STK",
+                    "quantity": 10,
+                    "market_price": 210.0,
+                    "market_value": 2100.0,
+                    "average_cost": 150.0,
+                    "unrealized_pnl": 600.0,
+                    "daily_pnl": 100.0,
+                    "prior_close_price": 200.0,
+                }
+            ],
+        )
+
+        with patch(
+            "useful_bot.ibkr_portfolio_image._fetch_qqqm_benchmark_quote",
+            return_value=QQQMBenchmarkQuote(
+                current_price=105.0,
+                prior_close=100.0,
+                daily_return_pct=5.0,
+            ),
+        ):
+            qqqm_pnl = _qqqm_hypothetical_pnl(snapshot, benchmark_mode="live_session")
+
+        self.assertAlmostEqual(qqqm_pnl or 0.0, 100.0)
+
+    def test_compute_qqqm_total_difference_uses_live_session_price_for_current_mode(self) -> None:
+        snapshot = make_snapshot(
+            trade_date="2026-03-23",
+            fetched_at=datetime(2026, 3, 23, 12, 15, tzinfo=NEW_YORK_TZ),
+            net_liquidation=111000.0,
+        )
+
+        with patch(
+            "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
+            return_value=QQQMCloseHistory(
+                latest_close=105.0,
+                close_by_date={"2026-03-20": 100.0, "2026-03-23": 105.0},
+            ),
+        ), patch(
+            "useful_bot.ibkr_portfolio_image._fetch_qqqm_benchmark_quote",
+            return_value=QQQMBenchmarkQuote(
+                current_price=110.0,
+                prior_close=105.0,
+                daily_return_pct=4.7619047619,
+            ),
+        ):
+            qqqm_total_difference = compute_qqqm_total_diff(
+                snapshot,
+                baseline_trade_date="2026-03-20",
+                baseline_net_liquidation=100000.0,
+                baseline_qqqm_start_close=100.0,
+                benchmark_mode="live_session",
+            )
+
+        self.assertAlmostEqual(qqqm_total_difference or 0.0, 1000.0)
+
 
 class IBKRPortfolioHelperTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_check_sends_after_close_and_persists_state(self) -> None:
@@ -915,6 +998,37 @@ class IBKRPortfolioHelperTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sent)
         self.assertTrue(thread_handoff["called"])
         self.assertEqual(len(app.bot.sent_photos), 1)
+
+    async def test_current_command_does_not_persist_last_snapshot_state(self) -> None:
+        app = FakeApplication()
+        snapshot = make_snapshot(
+            trade_date="2026-03-23",
+            fetched_at=datetime(2026, 3, 23, 12, 15, tzinfo=NEW_YORK_TZ),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            helper = IBKRPortfolioHelper(
+                chat_id=328968480,
+                snapshot_fetcher=lambda settings, now_ny: snapshot,
+                settings_factory=make_settings,
+                now_provider=lambda tz: datetime(2026, 3, 23, 12, 15, tzinfo=tz),
+                state_file=Path(temp_dir) / "ibkr_state.json",
+            )
+            with patch(
+                "useful_bot.ibkr_portfolio_helper.render_ibkr_portfolio_card",
+                return_value=io.BytesIO(b"fake-image"),
+            ):
+                sent = await helper._run_check(
+                    app,
+                    reason="current",
+                    force=True,
+                    benchmark_mode="live_session",
+                    persist_snapshot=False,
+                )
+
+        self.assertTrue(sent)
+        self.assertEqual(len(app.bot.sent_photos), 1)
+        self.assertIsNone(helper._last_snapshot())
 
     async def test_run_check_initializes_qqqm_benchmark_baseline(self) -> None:
         app = FakeApplication()
