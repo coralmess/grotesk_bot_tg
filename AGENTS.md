@@ -28,6 +28,7 @@
 - Resolve relative paths inside a project-local skill from that skill's folder first.
 - Prefer bundled scripts from the skill over retyping SSH/SCP/systemctl commands by hand when they cover the task.
 - For normal project work, update code locally first and test locally before any remote deployment.
+- For every code change, add concise code comments that explain why the change was made and why it is needed, not just what the code is doing.
 - Do not use git branches in this project unless the user explicitly asks for them.
 - After local changes and tests are done, ask the user whether they want the change committed, merged, and deployed to the instance.
 - If the user approves the production path, perform it in this order: commit locally, merge into the production-bound state, then pull it on instance and deploy it on  instance. Do not skip the merge step in wording or execution.
