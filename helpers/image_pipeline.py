@@ -254,6 +254,8 @@ def process_image(
 
 
 def fits_telegram_photo(width: int, height: int) -> bool:
+    # Telegram rejects extreme aspect ratios and oversized dimensions even when the raw
+    # file is otherwise valid, so check geometry before spending CPU on re-encoding.
     if width <= 0 or height <= 0:
         return False
     if width + height > 10000:
@@ -264,6 +266,8 @@ def fits_telegram_photo(width: int, height: int) -> bool:
 
 def encode_jpeg_for_telegram(image: Image.Image) -> Optional[bytes]:
     max_bytes = 10 * 1024 * 1024
+    # Step quality down gradually so we keep as much detail as possible while still
+    # satisfying Telegram's photo upload size limit.
     for quality in (98, 95, 92, 88, 84, 80):
         out = io.BytesIO()
         image.save(out, format="JPEG", quality=quality, subsampling=0, optimize=False)
@@ -289,6 +293,8 @@ def upscale_image_bytes_for_telegram_sync(
         if min(w, h) >= min_upscale_dim:
             return None
 
+        # Try the largest upscale factors first; for marketplace photos the best result is
+        # usually "largest image that still fits Telegram", not a one-size-fits-all factor.
         for factor in upscale_factors:
             new_w, new_h = int(w * factor), int(h * factor)
             longer = max(new_w, new_h)
@@ -337,6 +343,9 @@ async def send_remote_photo_with_fallback(
     min_upscale_dim: int = 1280,
     max_dim: int = 5000,
 ) -> bool:
+    # OLX and SHAFA ended up with almost identical send flows: download remote image,
+    # optionally upscale it for Telegram, then fall back to plain text on failure.
+    # Keeping that orchestration here avoids the two scrapers drifting again.
     if not image_url or not is_valid_image_url(image_url):
         result = await send_message(bot, chat_id, caption)
         return bool(result)

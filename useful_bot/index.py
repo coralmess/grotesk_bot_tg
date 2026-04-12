@@ -96,6 +96,8 @@ class UsefulBotIndex:
     async def _summary_loop(self) -> None:
         while True:
             try:
+                # The useful bot is always on, so let it publish a shared summary for the
+                # whole project instead of adding another dedicated maintenance service.
                 payload = await asyncio.to_thread(write_health_summary_files)
                 service_count = len(payload.get("services") or {})
                 self._service_health.record_success("health_summary", note=f"services={service_count}")
@@ -110,6 +112,8 @@ class UsefulBotIndex:
     async def _housekeeping_loop(self) -> None:
         while True:
             try:
+                # Run low-priority pruning/compression here for the same reason as the health
+                # summary: usefulbot is lightweight and stable enough to own background chores.
                 stats = await asyncio.to_thread(run_runtime_housekeeping)
                 self._service_health.record_success(
                     "runtime_housekeeping",

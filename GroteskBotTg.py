@@ -128,6 +128,9 @@ LYST_RESUME_LOCK = asyncio.Lock()
 LYST_ABORT_EVENT = asyncio.Event()
 LYST_RUN_FAILED = False
 LYST_RUN_PROGRESS = {}
+# These two globals distinguish a real empty run from a stale resume pass that only
+# lands on terminal 410 pages. That case should clear resume state and rerun once
+# from page 1, not mark the catalog empty or deactivate old items.
 LYST_CYCLE_STARTED_IN_RESUME = False
 LYST_RESUME_ENTRY_OUTCOMES = {}
 LYST_HTTP_ONLY_ENABLED = LYST_HTTP_ONLY

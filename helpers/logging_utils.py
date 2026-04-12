@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import re
 
+# Telegram request libraries tend to log full bot API URLs on failures/retries.
+# Redact them centrally so operational logs stay useful without leaking secrets.
 _TELEGRAM_API_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)([^/\s]+)")
 _TELEGRAM_TOKEN_RE = re.compile(r"\b(\d{6,}):([A-Za-z0-9_-]{20,})\b")
 
@@ -29,6 +31,8 @@ class SecretRedactingFilter(logging.Filter):
 
 def configure_third_party_loggers() -> None:
     """Keep noisy request libraries quiet unless they emit actual warnings/errors."""
+    # The project already logs its own scrape/run summaries. Keeping chatty HTTP
+    # libraries at WARNING avoids burying actionable scraper failures in transport noise.
     for logger_name in (
         "httpx",
         "httpcore",

@@ -45,6 +45,8 @@ def run_runtime_housekeeping() -> dict[str, int]:
     }
 
     # Compress older logs and debug text-ish artifacts rather than deleting them immediately.
+    # The bots intentionally keep HTML/debug dumps when scrapers misbehave. Compressing first
+    # preserves forensics while preventing runtime_data from growing forever on the instance.
     for root in (RUNTIME_LOGS_DIR, RUNTIME_DEBUG_DIR):
         for path in list(_iter_files(root) or []):
             if path.suffix.lower() not in {".log", ".txt", ".html", ".json"}:
@@ -63,6 +65,8 @@ def run_runtime_housekeeping() -> dict[str, int]:
                 pass
 
     for path in list(_iter_files(RUNTIME_CACHE_DIR) or []):
+        # Cache contents are disposable; dropping old files is cheaper than letting stale
+        # runtime cache consume the Always Free storage budget.
         if _older_than(path, 7 * 24 * 3600, now_ts=now_ts):
             try:
                 path.unlink()

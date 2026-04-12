@@ -284,6 +284,9 @@ class ExchangeRateHelper:
         if self._http_session is None or self._http_session.closed:
             timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_SECONDS)
             connector = aiohttp.TCPConnector(limit=4, ttl_dns_cache=300)
+            # This helper checks Minfin on a schedule. Reusing one session avoids paying
+            # DNS/TLS setup cost every hour and keeps logs quieter than creating a fresh
+            # short-lived client for every single scrape.
             self._http_session = aiohttp.ClientSession(
                 timeout=timeout,
                 headers=HTTP_HEADERS,

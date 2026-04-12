@@ -57,6 +57,8 @@ def build_exchange_rate_render_kwargs(snapshot, last_snapshot, history: list[dic
     ]
 
     recent_30 = history_plus_today[-30:]
+    # Package all renderer inputs in one pure-data structure. The helper stays responsible
+    # for fetching/persistence, while presentation math stays testable without Telegram.
     kwargs = {
         "usd_buy": snapshot.usd_buy,
         "usd_sell": snapshot.usd_sell,

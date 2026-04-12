@@ -46,6 +46,9 @@ def run_runtime_db_maintenance(
             continue
         conn = sqlite3.connect(db_path)
         try:
+            # These DBs are long-lived write-heavy runtime stores. Periodic checkpoint /
+            # optimize / analyze keeps WAL growth and query plans under control without
+            # changing scraper behavior.
             for stmt in RUNTIME_DB_MAINTENANCE_STATEMENTS:
                 conn.execute(stmt)
             if retention_callback is not None:

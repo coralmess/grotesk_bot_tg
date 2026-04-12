@@ -45,6 +45,8 @@ def build_health_summary_payload() -> dict[str, Any]:
     for service_name in KNOWN_SERVICES:
         services[service_name] = _read_json(service_health_file(service_name)) or {}
 
+    # Aggregate the health snapshots and last-run status files into one compact payload.
+    # This gives one place to inspect service state without tailing multiple logs/JSONs.
     payload = {
         "generated_at_utc": _iso_now(),
         "services": services,
@@ -89,6 +91,8 @@ def render_health_summary_text(payload: dict[str, Any]) -> str:
 
 def write_health_summary_files() -> dict[str, Any]:
     payload = build_health_summary_payload()
+    # Keep both machine-readable and grep-friendly outputs so the instance can use the
+    # same source for bots, shell checks, or future lightweight dashboards.
     SUMMARY_JSON_FILE.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
