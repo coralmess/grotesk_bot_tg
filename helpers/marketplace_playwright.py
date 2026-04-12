@@ -23,6 +23,8 @@ class PlaywrightRuntimeManager:
                 self._playwright = await self._async_playwright_factory().start()
             if self._browser is None:
                 self._browser = await self._playwright.chromium.launch(**self._chromium_launch_kwargs)
+            # SHAFA used to cold-start Playwright every run. Reusing a warm context reduces
+            # startup overhead and keeps the shared market service less bursty.
             self._context = await self._browser.new_context(user_agent=self._user_agent)
             self._logger.info("Playwright runtime ready")
 
@@ -33,6 +35,8 @@ class PlaywrightRuntimeManager:
     async def reset(self, reason: str = "") -> None:
         if reason:
             self._logger.warning("Resetting Playwright runtime: %s", reason)
+        # A hard reset is safer than trying to recover a poisoned browser/context after
+        # navigation failures because the market service is long-lived.
         await self.close()
 
     async def close(self) -> None:

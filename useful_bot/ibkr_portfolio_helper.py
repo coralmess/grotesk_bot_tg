@@ -211,6 +211,8 @@ class IBKRPortfolioHelper:
         await self._run_check(context.application, reason="manual", force=True)
 
     async def current_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        # /ibkr_current is meant to answer "what is happening right now" without mutating
+        # the saved end-of-day baseline that scheduled reports and status rely on.
         await self._run_check(
             context.application,
             reason="current",
@@ -284,6 +286,8 @@ class IBKRPortfolioHelper:
                     baseline_qqqm_start_close=float(baseline["qqqm_start_close"]),
                     benchmark_mode=benchmark_mode,
                 )
+            # Only the scheduled/daily paths should suppress same-trade-date resends. The
+            # current-session command is intentionally allowed to render again on demand.
             if persist_snapshot and not force and previous_snapshot and previous_snapshot.trade_date == snapshot.trade_date:
                 if service_health is not None:
                     service_health.record_success("ibkr_portfolio_check", note=f"{reason}:already_sent")
@@ -322,6 +326,8 @@ class IBKRPortfolioHelper:
                 return False
 
             if persist_snapshot:
+                # Keep the persisted snapshot reserved for the canonical daily card so
+                # ad-hoc current-session requests do not skew later comparisons.
                 self._state["last_snapshot"] = snapshot.to_dict()
                 self._state["last_reason"] = reason
                 self._state["last_sent_at"] = datetime.now(NEW_YORK_TZ).isoformat(timespec="seconds")

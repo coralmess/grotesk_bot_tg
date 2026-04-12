@@ -100,6 +100,8 @@ def _duplicate_key(name: str, price_int: int) -> Optional[Tuple[str, int]]:
 
 @dataclass
 class ShafaItem(MarketplaceItem):
+    # SHAFA keeps parser-specific metadata here while duplicate suppression, unsubscribe
+    # handling, and send ordering are shared with OLX through the marketplace core.
     id: str
     name: str
     link: str
@@ -398,6 +400,8 @@ async def fetch_html_with_playwright(url: str) -> Optional[str]:
             if _playwright_runtime is None:
                 logger.error("Playwright is not initialized")
                 return None
+            # Reusing the managed runtime avoids booting a fresh browser every cycle, which
+            # used to make SHAFA runs slower and more bursty inside the shared market service.
             page = await _playwright_runtime.new_page()
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -475,6 +479,7 @@ _download_bytes = build_image_downloader(
     logger=logger,
 )
 _send_photo_by_bytes = build_photo_sender(send_semaphore=_SEND_SEMAPHORE)
+# Use the shared sender so SHAFA and OLX keep identical image fallback and timeout rules.
 send_photo_with_upscale = build_media_sender(
     is_valid_image_url=_is_valid_image_url,
     download_bytes=_download_bytes,
@@ -750,6 +755,8 @@ async def db_update_source_stats(url: str, streak: int, cycle_count: int) -> Non
 
 
 class ShafaRepository(MarketplaceRepository[ShafaItem]):
+    # SHAFA still uses its own DB, but the shared repository interface forces it to honor
+    # the same persistence and notification semantics as the OLX adapter.
     async def fetch_existing(self, item_ids: list[str]) -> list[Optional[Dict[str, Any]]]:
         return await asyncio.to_thread(_db_fetch_existing_sync, item_ids)
 
@@ -841,6 +848,8 @@ async def run_shafa_scraper():
 
     global _playwright_runtime, _http_session
     try:
+        # Warm the runtime once per service lifetime so individual SHAFA runs can reuse it
+        # and only fall back to a reset when the browser becomes unhealthy.
         _playwright_runtime = PlaywrightRuntimeManager(
             async_playwright_factory=async_playwright,
             user_agent=USER_AGENT,

@@ -112,6 +112,8 @@ def _build_portfolio_html(
     benchmark_mode: BenchmarkMode = "trade_date_close",
     hero_variant: str = "half_ring",
 ) -> str:
+    # The current-session card and the scheduled close card share one renderer; the
+    # benchmark mode keeps the QQQM tiles internally consistent for each use case.
     gainers_html = _build_gainer_rows(snapshot, top_lifetime_gainers(snapshot.positions))
     movers_html = _build_rank_rows(top_daily_movers(snapshot.positions) if snapshot.daily_data_complete else [])
     font_face_css = _font_face_css()
@@ -1119,6 +1121,8 @@ def _fetch_qqqm_return_for_mode(
     benchmark_mode: BenchmarkMode,
 ) -> Optional[QQQMTradeDateReturn]:
     if benchmark_mode == "live_session":
+        # /ibkr_current should compare the portfolio against the live intraday QQQM move,
+        # not against yesterday's close-based return.
         live_quote = _fetch_qqqm_benchmark_quote()
         if live_quote is not None:
             return QQQMTradeDateReturn(
@@ -1151,6 +1155,8 @@ def _portfolio_prior_close_invested_value(snapshot: PortfolioSnapshot) -> Option
 def _same_day_equity_trade_deltas(snapshot: PortfolioSnapshot) -> dict[tuple[str, int], float]:
     deltas: dict[tuple[str, int], float] = {}
     trade_date = snapshot.trade_date
+    # Same-day buys/sells should not be treated as if they existed at the prior close,
+    # otherwise the benchmark overstates invested capital on current-session cards.
     for trade in snapshot.trades:
         if trade.trade_date != trade_date:
             continue
@@ -1257,6 +1263,8 @@ def _resolve_qqqm_valuation_price(
     benchmark_mode: BenchmarkMode,
 ) -> Optional[float]:
     if benchmark_mode == "live_session":
+        # The on-demand current card should value synthetic QQQM at the live session
+        # price; using the last close made QQQM Total Diff lag behind the rest of the card.
         live_quote = _fetch_qqqm_benchmark_quote()
         if live_quote is not None and live_quote.current_price > 0:
             return live_quote.current_price
@@ -1343,6 +1351,9 @@ def _fetch_qqqm_benchmark_quote() -> Optional[QQQMBenchmarkQuote]:
     prior_close = daily_closes[-2]
     current_price: Optional[float] = None
     try:
+        # Pull a short-lived intraday quote for /ibkr_current while keeping the daily cache
+        # for the prior close. This avoids hammering yfinance and still gives live_session
+        # mode the price it needs.
         intraday_history = cached_history(
             "QQQM",
             ttl_seconds=5 * 60,

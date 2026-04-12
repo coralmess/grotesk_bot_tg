@@ -31,6 +31,8 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0, *, assume_timeo
                 except RetryAfter as exc:
                     await asyncio.sleep(exc.retry_after)
                 except TimedOut:
+                    # Telegram sometimes delivers the message but times out before the bot
+                    # gets the response. Treating those cases as success avoids duplicates.
                     if assume_timeout_success:
                         return True
                     if attempt < max_retries - 1:
@@ -122,6 +124,8 @@ def build_media_sender(
     logger,
 ):
     async def send_photo_with_upscale(bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
+        # The image pipeline stays centralized so marketplace send behavior stays identical
+        # across OLX and SHAFA even when transport or image fallback rules evolve.
         return await send_remote_photo_with_fallback(
             bot=bot,
             chat_id=chat_id,

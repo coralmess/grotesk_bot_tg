@@ -61,6 +61,8 @@ class RunDuplicateTracker(Generic[ItemT]):
         self._lock = asyncio.Lock()
 
     async def claim(self, item: ItemT) -> bool:
+        # In-run duplicate suppression must happen before any send attempt so overlapping
+        # source pages inside the same cycle cannot produce double notifications.
         key = duplicate_key(item.name, item.price_int)
         if key is None:
             return True
@@ -84,6 +86,8 @@ async def process_marketplace_items(
     hydrate_from_previous: Optional[Callable[[ItemT, Optional[Dict[str, Any]]], None]] = None,
     logger=None,
 ) -> PipelineStats:
+    # This shared pipeline was introduced to make OLX and SHAFA follow the exact same
+    # unsubscribe, duplicate, claim, send, and persistence order after item parsing.
     stats = PipelineStats()
     if not items:
         return stats
@@ -165,6 +169,8 @@ async def process_marketplace_items(
             await repository.release_notification_claim(item, source_name)
             raise
         finally:
+            # Persisting in finally keeps item state aligned even when Telegram delivery is
+            # ambiguous or fails after the notification key was already claimed.
             await repository.persist_items([ItemUpdate(item=item, touch_last_sent=sent)], source_name)
         return sent
 

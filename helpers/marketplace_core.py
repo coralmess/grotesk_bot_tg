@@ -6,6 +6,8 @@ from typing import Optional, Tuple
 
 @dataclass
 class MarketplaceItem:
+    # Shared item shape keeps OLX and SHAFA adapters thin so dedupe/send/persist logic
+    # can live in one place instead of drifting across two scraper implementations.
     id: str
     name: str
     link: str
@@ -30,6 +32,8 @@ class SourceDecision:
 
 
 def normalize_duplicate_name(name: str) -> str:
+    # Duplicate detection is based on the human-facing title we send to Telegram, so
+    # whitespace/case normalization has to be shared across both marketplace scrapers.
     return " ".join((name or "").split()).casefold()
 
 
@@ -46,6 +50,8 @@ def notification_storage_key(key: Tuple[str, int]) -> str:
 
 def make_source_decision(stats: SourceStats) -> SourceDecision:
     cycle_count = stats.cycle_count + 1
+    # This lightweight throttle was extracted into the shared core so OLX and SHAFA
+    # cool down stale sources with the same policy instead of diverging over time.
     level = min(stats.streak // 365, 23)
     divisor = level + 1
     should_process = (cycle_count % divisor) == 0

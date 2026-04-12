@@ -106,6 +106,8 @@ def _contains_no_listings(text: str) -> bool:
 
 @dataclass
 class OlxItem(MarketplaceItem):
+    # OLX keeps only source-specific fields here; shared notification/dedupe behavior now
+    # lives in the marketplace core so the two scrapers cannot drift again.
     id: str
     name: str
     link: str
@@ -284,6 +286,7 @@ async def scrape_olx_url(url: str) -> Optional[List[OlxItem]]:
     items = [item for card in cards if (item := parse_card(card))]
     return items
 
+# Route OLX sends through the shared sender so timeout handling stays identical to SHAFA.
 send_message = build_message_sender(send_semaphore=_SEND_SEMAPHORE)
 
 def _escape_html_dict(data: Dict[str, Optional[str]]) -> Dict[str, str]:
@@ -395,6 +398,7 @@ _download_bytes = build_image_downloader(
     logger=logger,
 )
 _send_photo_by_bytes = build_photo_sender(send_semaphore=_SEND_SEMAPHORE)
+# Keep image fallback policy centralized so transport fixes apply to both marketplace feeds.
 send_photo_with_upscale = build_media_sender(
     is_valid_image_url=_is_valid_image_url,
     download_bytes=_download_bytes,
@@ -720,6 +724,8 @@ async def db_update_source_stats(url: str, streak: int, cycle_count: int):
 
 
 class OlxRepository(MarketplaceRepository[OlxItem]):
+    # The repository contract keeps OLX storage separate while letting the shared pipeline
+    # drive persistence and idempotency in the same order as SHAFA.
     async def fetch_existing(self, item_ids: list[str]) -> list[Optional[Dict[str, Any]]]:
         return await db_fetch_existing(item_ids)
 
@@ -1038,6 +1044,8 @@ async def run_olx_scraper():
         return "; ".join(dict.fromkeys(errors))
 
     bot = Bot(token=token)
+    # The adapter still owns OLX fetch/parse quirks, but post-parse decisions now flow
+    # through the shared marketplace pipeline for parity with SHAFA.
     repository = OlxRepository()
     duplicate_tracker = RunDuplicateTracker[OlxItem]()
     total_scraped = 0
