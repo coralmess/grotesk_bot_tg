@@ -160,6 +160,7 @@ class ExchangeGatewayTests(unittest.TestCase):
             "BTC/USDT": {"quote": "USDT", "base": "BTC", "spot": True, "active": True},
             "ETH/USDT": {"quote": "USDT", "base": "ETH", "spot": True, "active": True},
             "USDC/USDT": {"quote": "USDT", "base": "USDC", "spot": True, "active": True},
+            "USD1/USDT": {"quote": "USDT", "base": "USD1", "spot": True, "active": True},
             "ETHUP/USDT": {"quote": "USDT", "base": "ETHUP", "spot": True, "active": True},
             "BNB/BTC": {"quote": "BTC", "base": "BNB", "spot": True, "active": True},
         }
@@ -167,6 +168,7 @@ class ExchangeGatewayTests(unittest.TestCase):
             "BTC/USDT": {"quoteVolume": 1000.0},
             "ETH/USDT": {"quoteVolume": 2000.0},
             "USDC/USDT": {"quoteVolume": 5000.0},
+            "USD1/USDT": {"quoteVolume": 6000.0},
             "ETHUP/USDT": {"quoteVolume": 7000.0},
             "BNB/BTC": {"quoteVolume": 9999.0},
         }
