@@ -14,3 +14,6 @@ yfinance>=0.2.54,<1.0
 opencv-contrib-python>=4.8
 numpy>=1.24
 prometheus-client>=0.20,<1.0
+ccxt>=4.4.0,<5.0
+pandas-ta>=0.3.14b0
+schedule>=1.2.0,<2.0
