@@ -8,6 +8,7 @@ import time
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import pandas as pd
@@ -15,7 +16,11 @@ import requests
 from dotenv import load_dotenv
 
 from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
-from helpers.runtime_paths import CRYPTO_PAPER_TRADES_DB_FILE, ensure_runtime_dirs
+from helpers.runtime_paths import (
+    CRYPTO_PAPER_BALANCES_MESSAGE_ID_FILE,
+    CRYPTO_PAPER_TRADES_DB_FILE,
+    ensure_runtime_dirs,
+)
 from helpers.sqlite_runtime import apply_runtime_pragmas
 
 try:
@@ -47,11 +52,28 @@ SL_MULTIPLIER = 0.95
 TAKE_PROFIT_USD = POSITION_SIZE_USD * (TP_MULTIPLIER - 1.0)
 STOP_LOSS_USD = POSITION_SIZE_USD * (1.0 - SL_MULTIPLIER)
 
+ALGORITHM_ORDER = (
+    "Algo 1",
+    "Algo 2",
+    "Algo 3",
+    "Algo 4",
+    "Algo 5",
+    "Algo 6",
+)
 ALGO_ACCOUNT_NAMES = {
     "Algo 1": "Algo 1 (Squeeze)",
     "Algo 2": "Algo 2 (Golden Dip)",
     "Algo 3": "Algo 3 (Reversal)",
+    "Algo 4": "Algo 4 (Improved Squeeze)",
+    "Algo 5": "Algo 5 (Improved Golden Dip)",
+    "Algo 6": "Algo 6 (Improved Reversal)",
 }
+TREND_ADX_THRESHOLD = 20.0
+RANGE_ADX_THRESHOLD = 15.0
+MIN_AVG_DOLLAR_VOLUME = 2_000_000.0
+BREAKOUT_VOLUME_MULTIPLIER = 1.5
+PULLBACK_RSI_THRESHOLD = 40.0
+SQUEEZE_PERCENTILE_MAX = 0.15
 
 STABLECOIN_BASES = {
     "USDT",
@@ -113,6 +135,30 @@ def should_run_on_startup() -> bool:
     }
 
 
+def _write_text_atomic(path: Path, text: str) -> None:
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+def trailing_percentile_rank(series: pd.Series, window: int) -> pd.Series:
+    def _rank(values: pd.Series) -> float:
+        sample = pd.Series(values)
+        return float(sample.rank(pct=True).iloc[-1])
+
+    return series.rolling(window).apply(_rank, raw=False)
+
+
 @dataclass(frozen=True)
 class OpenTrade:
     id: int
@@ -135,6 +181,15 @@ class ClosedTrade:
     pnl_usd: float
     entry_time: str
     exit_time: str
+
+
+@dataclass(frozen=True)
+class RegimeState:
+    trend_up: bool
+    range_bound: bool
+    liquid: bool
+    strong_downtrend: bool
+    squeeze_ready: bool
 
 
 class ExchangeGateway:
@@ -218,18 +273,31 @@ class IndicatorEngine:
         enriched = frame.copy()
         bbands = ta.bbands(enriched["close"], length=20, std=2)
         macd = ta.macd(enriched["close"])
+        adx = ta.adx(enriched["high"], enriched["low"], enriched["close"], length=14)
         if bbands is None or macd is None:
             return enriched
-        enriched = pd.concat([enriched, bbands, macd], axis=1)
+        pieces = [enriched, bbands, macd]
+        if adx is not None:
+            pieces.append(adx)
+        enriched = pd.concat(pieces, axis=1)
         enriched["bb_upper"] = enriched.get("BBU_20_2.0")
         enriched["bb_lower"] = enriched.get("BBL_20_2.0")
         enriched["bb_bandwidth"] = ((enriched["bb_upper"] - enriched["bb_lower"]) / enriched["close"]) * 100.0
+        enriched["bb_bandwidth_pct_rank_100"] = trailing_percentile_rank(enriched["bb_bandwidth"], 100)
         enriched["volume_sma_20"] = ta.sma(enriched["volume"], length=20)
+        enriched["ema_20"] = ta.ema(enriched["close"], length=20)
         enriched["ema_50"] = ta.ema(enriched["close"], length=50)
         enriched["ema_200"] = ta.ema(enriched["close"], length=200)
+        enriched["ema_50_slope_5"] = enriched["ema_50"].pct_change(5)
         enriched["rsi_14"] = ta.rsi(enriched["close"], length=14)
+        enriched["atr_14"] = ta.atr(enriched["high"], enriched["low"], enriched["close"], length=14)
+        enriched["adx_14"] = enriched.get("ADX_14")
         enriched["macd_line"] = enriched.get("MACD_12_26_9")
         enriched["macd_signal"] = enriched.get("MACDs_12_26_9")
+        enriched["macd_hist"] = enriched["macd_line"] - enriched["macd_signal"]
+        enriched["macd_hist_slope"] = enriched["macd_hist"].diff()
+        enriched["dollar_volume"] = enriched["close"] * enriched["volume"]
+        enriched["avg_dollar_volume_24"] = enriched["dollar_volume"].rolling(24).mean()
         return enriched
 
 
@@ -239,11 +307,14 @@ class StrategyEngine:
     @classmethod
     def evaluate_all(cls, frame: pd.DataFrame) -> dict[str, bool]:
         if len(frame) < cls.MIN_ROWS:
-            return {"Algo 1": False, "Algo 2": False, "Algo 3": False}
+            return {algorithm: False for algorithm in ALGORITHM_ORDER}
         return {
             "Algo 1": cls.algo_1_squeeze_breakout(frame),
             "Algo 2": cls.algo_2_golden_dip(frame),
             "Algo 3": cls.algo_3_reversal(frame),
+            "Algo 4": cls.algo_4_improved_squeeze_breakout(frame),
+            "Algo 5": cls.algo_5_improved_golden_dip(frame),
+            "Algo 6": cls.algo_6_improved_reversal(frame),
         }
 
     @staticmethod
@@ -298,6 +369,105 @@ class StrategyEngine:
             and rsi_cross_up
         )
 
+    @staticmethod
+    def _classify_regime(frame: pd.DataFrame) -> RegimeState:
+        latest = frame.iloc[-1]
+        trend_up = bool(
+            pd.notna(latest.get("ema_50"))
+            and pd.notna(latest.get("ema_200"))
+            and pd.notna(latest.get("adx_14"))
+            and pd.notna(latest.get("ema_50_slope_5"))
+            and latest["ema_50"] > latest["ema_200"]
+            and latest["adx_14"] >= TREND_ADX_THRESHOLD
+            and latest["ema_50_slope_5"] > 0
+        )
+        strong_downtrend = bool(
+            pd.notna(latest.get("ema_50"))
+            and pd.notna(latest.get("ema_200"))
+            and pd.notna(latest.get("adx_14"))
+            and latest["ema_50"] < latest["ema_200"]
+            and latest["adx_14"] >= TREND_ADX_THRESHOLD
+        )
+        range_bound = bool(pd.notna(latest.get("adx_14")) and latest["adx_14"] <= RANGE_ADX_THRESHOLD)
+        liquid = bool(
+            pd.notna(latest.get("avg_dollar_volume_24"))
+            and latest["avg_dollar_volume_24"] >= MIN_AVG_DOLLAR_VOLUME
+        )
+        squeeze_ready = bool(
+            pd.notna(latest.get("bb_bandwidth_pct_rank_100"))
+            and latest["bb_bandwidth_pct_rank_100"] <= SQUEEZE_PERCENTILE_MAX
+        )
+        return RegimeState(
+            trend_up=trend_up,
+            range_bound=range_bound,
+            liquid=liquid,
+            strong_downtrend=strong_downtrend,
+            squeeze_ready=squeeze_ready,
+        )
+
+    @classmethod
+    def algo_4_improved_squeeze_breakout(cls, frame: pd.DataFrame) -> bool:
+        previous = frame.iloc[-2]
+        latest = frame.iloc[-1]
+        regime = cls._classify_regime(frame)
+        return bool(
+            regime.trend_up
+            and regime.squeeze_ready
+            and pd.notna(latest.get("bb_upper"))
+            and latest["close"] > latest["bb_upper"]
+            and latest["close"] > previous["high"]
+            and pd.notna(latest.get("volume_sma_20"))
+            and latest["volume"] >= BREAKOUT_VOLUME_MULTIPLIER * latest["volume_sma_20"]
+        )
+
+    @classmethod
+    def algo_5_improved_golden_dip(cls, frame: pd.DataFrame) -> bool:
+        previous = frame.iloc[-2]
+        latest = frame.iloc[-1]
+        regime = cls._classify_regime(frame)
+        return bool(
+            regime.trend_up
+            and pd.notna(latest.get("ema_20"))
+            and pd.notna(latest.get("ema_50"))
+            and latest["low"] <= latest["ema_50"]
+            and latest["close"] >= latest["ema_20"]
+            and latest["close"] > previous["high"]
+            and pd.notna(latest.get("rsi_14"))
+            and latest["rsi_14"] <= PULLBACK_RSI_THRESHOLD
+        )
+
+    @classmethod
+    def algo_6_improved_reversal(cls, frame: pd.DataFrame) -> bool:
+        previous = frame.iloc[-2]
+        latest = frame.iloc[-1]
+        regime = cls._classify_regime(frame)
+        macd_cross_up = (
+            pd.notna(previous.get("macd_line"))
+            and pd.notna(previous.get("macd_signal"))
+            and pd.notna(latest.get("macd_line"))
+            and pd.notna(latest.get("macd_signal"))
+            and previous["macd_line"] <= previous["macd_signal"]
+            and latest["macd_line"] > latest["macd_signal"]
+        )
+        rsi_cross_up = (
+            pd.notna(previous.get("rsi_14"))
+            and pd.notna(latest.get("rsi_14"))
+            and previous["rsi_14"] <= 50.0
+            and latest["rsi_14"] > 50.0
+        )
+        return bool(
+            regime.liquid
+            and regime.range_bound
+            and not regime.strong_downtrend
+            and macd_cross_up
+            and latest["macd_line"] < 0
+            and latest["macd_signal"] < 0
+            and pd.notna(latest.get("macd_hist_slope"))
+            and latest["macd_hist_slope"] >= 0
+            and rsi_cross_up
+            and latest["close"] > previous["high"]
+        )
+
 
 class TradeRepository:
     def __init__(self, db_path: str | os.PathLike[str] = CRYPTO_PAPER_TRADES_DB_FILE) -> None:
@@ -345,7 +515,7 @@ class TradeRepository:
                 WHERE status = 'OPEN'
                 """
             )
-            for algorithm in ("Algo 1", "Algo 2", "Algo 3"):
+            for algorithm in ALGORITHM_ORDER:
                 conn.execute(
                     "INSERT OR IGNORE INTO accounts (algorithm, balance) VALUES (?, ?)",
                     (algorithm, 10000.0),
@@ -484,6 +654,105 @@ def build_close_message(closed_trade: ClosedTrade, balances: dict[str, float]) -
     return "\n".join(lines)
 
 
+def build_close_message(closed_trade: ClosedTrade) -> str:
+    lines = [
+        "TRADE CLOSED",
+        f"Coin: ${base_coin_from_symbol(closed_trade.coin)}",
+        f"Algorithm: {ALGO_ACCOUNT_NAMES[closed_trade.algorithm]}",
+        f"Result: {closed_trade.status}",
+        (
+            f"Entry: ${format_price(closed_trade.entry_price)} | "
+            f"Exit: ${format_price(closed_trade.exit_price)} | "
+            f"PnL: {format_signed_usd(closed_trade.pnl_usd)}"
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def build_balances_message(balances: dict[str, float]) -> str:
+    lines = [
+        "SYNTHETIC ACCOUNTS",
+        f"Updated (UTC): {utc_now_iso()}",
+    ]
+    for algorithm in ALGORITHM_ORDER:
+        lines.append(f"{ALGO_ACCOUNT_NAMES[algorithm]}: {format_usd(balances.get(algorithm, 0.0))}")
+    return "\n".join(lines)
+
+
+class TelegramNotifier:
+    def __init__(
+        self,
+        token: str,
+        chat_id: int,
+        balance_message_id_path: str | os.PathLike[str] = CRYPTO_PAPER_BALANCES_MESSAGE_ID_FILE,
+    ) -> None:
+        self.token = token
+        self.chat_id = chat_id
+        self.balance_message_id_path = Path(balance_message_id_path)
+
+    def _post(self, method: str, payload: dict[str, Any]) -> Optional[dict[str, Any]]:
+        url = f"https://api.telegram.org/bot{self.token}/{method}"
+        try:
+            response = requests.post(url, json=payload, timeout=20)
+            response.raise_for_status()
+            body = response.json()
+            if not body.get("ok", False):
+                LOGGER.error("Telegram API returned non-ok payload for %s: %s", method, body)
+                return None
+            return body
+        except Exception as exc:
+            LOGGER.error("Failed to call Telegram method %s: %s", method, exc)
+            return None
+
+    def _read_balance_message_id(self) -> Optional[int]:
+        if not self.balance_message_id_path.exists():
+            return None
+        try:
+            stored = self.balance_message_id_path.read_text(encoding="utf-8").strip()
+        except Exception as exc:
+            LOGGER.warning("Failed to read balances message id from %s: %s", self.balance_message_id_path, exc)
+            return None
+        return int(stored) if stored.isdigit() else None
+
+    def _write_balance_message_id(self, message_id: int) -> None:
+        try:
+            _write_text_atomic(self.balance_message_id_path, str(message_id))
+        except Exception as exc:
+            LOGGER.error("Failed to save balances message id to %s: %s", self.balance_message_id_path, exc)
+
+    def send_message(self, message: str) -> bool:
+        return self._post("sendMessage", {"chat_id": self.chat_id, "text": message}) is not None
+
+    def refresh_balances_message(self, balances: dict[str, float]) -> bool:
+        text = build_balances_message(balances)
+        message_id = self._read_balance_message_id()
+        if message_id and self._post(
+            "editMessageText",
+            {"chat_id": self.chat_id, "message_id": message_id, "text": text},
+        ):
+            self._ensure_pinned(message_id)
+            return True
+
+        created = self._post("sendMessage", {"chat_id": self.chat_id, "text": text})
+        if created is None:
+            return False
+        created_message_id = int(created["result"]["message_id"])
+        self._write_balance_message_id(created_message_id)
+        self._ensure_pinned(created_message_id)
+        return True
+
+    def _ensure_pinned(self, message_id: int) -> None:
+        chat_payload = self._post("getChat", {"chat_id": self.chat_id})
+        pinned_message = ((chat_payload or {}).get("result") or {}).get("pinned_message") or {}
+        pinned_message_id = pinned_message.get("message_id")
+        if isinstance(pinned_message_id, int) and pinned_message_id != message_id:
+            self._post("unpinChatMessage", {"chat_id": self.chat_id, "message_id": pinned_message_id})
+        self._post(
+            "pinChatMessage",
+            {"chat_id": self.chat_id, "message_id": message_id, "disable_notification": True},
+        )
+
+
 class CryptoPaperBot:
     def __init__(
         self,
@@ -502,6 +771,9 @@ class CryptoPaperBot:
             return
         try:
             LOGGER.info("Starting crypto paper-trading cycle")
+            # The balances message is the operator's single source of truth, so refresh
+            # it at the start of each cycle even when no trades fire during that hour.
+            self.notifier.refresh_balances_message(self.repository.get_balances())
             self._check_open_trades()
             self._find_new_setups()
             LOGGER.info("Crypto paper-trading cycle completed")
@@ -540,7 +812,8 @@ class CryptoPaperBot:
                 exit_time=utc_now_iso(),
             )
             balances = self.repository.get_balances()
-            self.notifier.send_message(build_close_message(closed_trade, balances))
+            self.notifier.send_message(build_close_message(closed_trade))
+            self.notifier.refresh_balances_message(balances)
 
     def _find_new_setups(self) -> None:
         ranked_symbols = self.exchange_gateway.fetch_top_usdt_symbols(limit=TOP_SYMBOL_LIMIT)
@@ -563,6 +836,7 @@ class CryptoPaperBot:
                 self.repository.create_open_trade(symbol, algorithm, entry_price, utc_now_iso())
                 blocked_symbols.add(symbol)
                 self.notifier.send_message(build_open_message(algorithm, symbol, entry_price))
+                self.notifier.refresh_balances_message(self.repository.get_balances())
                 break
 
 
@@ -570,9 +844,9 @@ def build_bot() -> CryptoPaperBot:
     load_dotenv()
     ensure_runtime_dirs()
 
-    token = (os.getenv("GROTESK_USEFUL_BOT_TOKEN") or "").strip()
+    token = (os.getenv("FINANCE_BOT_TOKEN") or "").strip()
     if not token:
-        raise RuntimeError("Missing GROTESK_USEFUL_BOT_TOKEN in .env")
+        raise RuntimeError("Missing FINANCE_BOT_TOKEN in .env")
     chat_id_raw = os.getenv("DANYLO_DEFAULT_CHAT_ID")
     if not chat_id_raw:
         raise RuntimeError("Missing DANYLO_DEFAULT_CHAT_ID in .env")
