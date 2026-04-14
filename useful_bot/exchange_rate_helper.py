@@ -25,6 +25,8 @@ KYIV_TZ = ZoneInfo("Europe/Kyiv")
 CHECK_HOURS_KYIV = tuple(range(8, 20))
 REQUEST_TIMEOUT_SECONDS = 20
 HISTORY_LIMIT = 600
+RECENT_SENT_MESSAGES_LIMIT = 200
+AUTO_SEND_REASONS = {"startup", "scheduled"}
 HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -68,6 +70,8 @@ class ExchangeRateHelper:
         ]
 
     async def on_startup(self, application: Application) -> None:
+        # Startup is allowed to catch up the current hour once, but it must honor the same
+        # hourly bucket guard as scheduled checks so a crash loop cannot spam Telegram.
         await self._run_check(application, reason="startup")
         self._monitor_task = asyncio.create_task(
             self._monitor_loop(application),
@@ -113,6 +117,12 @@ class ExchangeRateHelper:
         bot_data = getattr(application, "bot_data", {}) or {}
         service_health = bot_data.get("service_health")
         async with self._lock:
+            now_kyiv = self._now_kyiv()
+            auto_send_bucket = self._auto_send_bucket(reason=reason, now=now_kyiv)
+            if auto_send_bucket is not None and self._state.get("last_auto_sent_bucket") == auto_send_bucket:
+                if service_health is not None:
+                    service_health.record_success("exchange_rate_check", note=f"{reason}:already_sent_this_hour")
+                return False
             try:
                 snapshot = await self._fetch_snapshot()
             except Exception:
@@ -157,9 +167,12 @@ class ExchangeRateHelper:
                 **render_kwargs,
             )
             sent = False
+            sent_message_id: Optional[int] = None
             for attempt in (1, 2):
                 try:
-                    await application.bot.send_photo(chat_id=self._chat_id, photo=image_buf)
+                    image_buf.seek(0)
+                    message = await application.bot.send_photo(chat_id=self._chat_id, photo=image_buf)
+                    sent_message_id = getattr(message, "message_id", None)
                     sent = True
                     break
                 except RetryAfter as error:
@@ -173,21 +186,14 @@ class ExchangeRateHelper:
                     service_health.record_failure("exchange_rate_check", "telegram_send_failed")
                 return False
 
-            history.append(
-                {
-                    "fetched_at": snapshot.fetched_at,
-                    "source_date": snapshot.source_date,
-                    "usd_buy": snapshot.usd_buy,
-                    "usd_sell": snapshot.usd_sell,
-                    "eur_buy": snapshot.eur_buy,
-                    "eur_sell": snapshot.eur_sell,
-                    "usd_spread": usd_spread,
-                    "eur_sell_minus_usd_buy": eur_sell_minus_usd_buy,
-                }
-            )
-            history = history[-HISTORY_LIMIT:]
-            self._state["history"] = history
+            # The presenter already computed the exact snapshot-derived history row used by
+            # the renderer. Persisting that same structure avoids mismatches and fixes the
+            # undefined spread variables that previously crashed usefulbot on startup.
+            self._state["history"] = history_plus_today[-HISTORY_LIMIT:]
             self._state["last_snapshot"] = asdict(snapshot)
+            if auto_send_bucket is not None:
+                self._state["last_auto_sent_bucket"] = auto_send_bucket
+            self._record_sent_message(message_id=sent_message_id, reason=reason, sent_at=snapshot.fetched_at)
             self._save_state()
             if service_health is not None:
                 service_health.record_success("exchange_rate_check", note=reason)
@@ -199,7 +205,7 @@ class ExchangeRateHelper:
             response.raise_for_status()
             html = await response.text()
         parsed = self._parse_rates_from_html(html)
-        now_kyiv = datetime.now(KYIV_TZ)
+        now_kyiv = self._now_kyiv()
         return RateSnapshot(
             fetched_at=now_kyiv.isoformat(timespec="seconds"),
             source_date=parsed["source_date"],
@@ -268,6 +274,33 @@ class ExchangeRateHelper:
             round(snapshot.eur_sell, 2),
         )
 
+    def _now_kyiv(self) -> datetime:
+        return datetime.now(KYIV_TZ)
+
+    def _auto_send_bucket(self, *, reason: str, now: datetime) -> Optional[str]:
+        # Automatic sends should be capped to one card per Kyiv working hour; manual/status
+        # commands intentionally bypass this throttle because the operator asked for them.
+        if reason not in AUTO_SEND_REASONS:
+            return None
+        if now.hour not in CHECK_HOURS_KYIV:
+            return None
+        return now.strftime("%Y-%m-%dT%H")
+
+    def _record_sent_message(self, *, message_id: Optional[int], reason: str, sent_at: str) -> None:
+        if message_id is None:
+            return
+        recent = self._state.get("recent_sent_messages")
+        if not isinstance(recent, list):
+            recent = []
+        recent.append(
+            {
+                "message_id": int(message_id),
+                "reason": reason,
+                "sent_at": sent_at,
+            }
+        )
+        self._state["recent_sent_messages"] = recent[-RECENT_SENT_MESSAGES_LIMIT:]
+
     def _seconds_until_next_run(self, now: datetime) -> Tuple[float, datetime, str]:
         candidates = []
         for hour in CHECK_HOURS_KYIV:
@@ -303,17 +336,19 @@ class ExchangeRateHelper:
 
     def _load_state(self) -> Dict[str, Any]:
         if not STATE_FILE.exists():
-            return {"last_snapshot": None, "history": []}
+            return {"last_snapshot": None, "history": [], "recent_sent_messages": []}
         try:
             data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return {
                     "last_snapshot": data.get("last_snapshot"),
                     "history": data.get("history", []),
+                    "last_auto_sent_bucket": data.get("last_auto_sent_bucket"),
+                    "recent_sent_messages": data.get("recent_sent_messages", []),
                 }
         except Exception:
             logging.exception("Could not load state from %s", STATE_FILE)
-        return {"last_snapshot": None, "history": []}
+        return {"last_snapshot": None, "history": [], "recent_sent_messages": []}
 
     def _save_state(self) -> None:
         temp_file = STATE_FILE.with_suffix(".tmp")

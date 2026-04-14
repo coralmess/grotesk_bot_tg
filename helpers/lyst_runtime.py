@@ -17,11 +17,13 @@ SALE_EMOJI_UAH_THRESHOLD = 4000
 
 
 def get_sale_emoji(sale_percentage, uah_sale):
+    # These visual tiers were originally meant to make the sale severity legible at a
+    # glance. Restoring real emoji here fixes the mojibake/question-mark messages.
     if sale_percentage >= SALE_EMOJI_ROCKET_THRESHOLD:
-        return "??????"
+        return "🚀🚀🚀"
     if uah_sale < SALE_EMOJI_UAH_THRESHOLD:
-        return "??????"
-    return "??????"
+        return "✨✨✨"
+    return "🔥🔥🔥"
 
 
 def build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol, old_sale_price=None, status=None):
@@ -37,26 +39,26 @@ def build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol, old_s
     kurs_symbol_safe = _esc(kurs_symbol)
     old_sale_price_safe = _esc(old_sale_price)
     shoe_link = _esc(shoe.get("shoe_link"))
-    store_line = f"?? Store : <a href='{shoe_link}'>{store}</a>" if shoe_link else f"?? Store : {store}"
+    store_line = f"🏬 Store : <a href='{shoe_link}'>{store}</a>" if shoe_link else f"🏬 Store : {store}"
 
     if status is None:
         sale_emoji = get_sale_emoji(sale_percentage, uah_sale)
         return (
             f"{sale_emoji}  New item  {sale_emoji}\n{name}\n\n"
-            f"?? Prices : <s>{original_price}</s>  <b>{sale_price}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
-            f"?? Grivniki : <b>{uah_sale} UAH </b>\n"
-            f"?? Kurs : {kurs_symbol_safe} {kurs} \n"
+            f"💰 Prices : <s>{original_price}</s>  <b>{sale_price}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i>\n"
+            f"💸 Grivniki : <b>{uah_sale} UAH </b>\n"
+            f"💱 Kurs : {kurs_symbol_safe} {kurs} \n"
             f"{store_line}\n"
-            f"?? Country : {country}"
+            f"🌍 Country : {country}"
         )
     return (
-        f"?????? {_esc(status)} ?????? \n{name}:\n\n"
-        f"?? Prices : <s>{original_price}</s>  <s>{old_sale_price_safe}</s>  <b>{sale_price}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i> \n"
-        f"?? Grivniki : {uah_sale} UAH\n"
-        f"?? Lowest price : {lowest_price} ({shoe['lowest_price_uah']} UAH)\n"
-        f"?? Kurs : {kurs_symbol_safe} {kurs} \n"
+        f"📉📉📉 {_esc(status)} 📉📉📉 \n{name}:\n\n"
+        f"💰 Prices : <s>{original_price}</s>  <s>{old_sale_price_safe}</s>  <b>{sale_price}</b>  <i>(Sale: <b>{sale_percentage}%</b>)</i> \n"
+        f"💸 Grivniki : {uah_sale} UAH\n"
+        f"📌 Lowest price : {lowest_price} ({shoe['lowest_price_uah']} UAH)\n"
+        f"💱 Kurs : {kurs_symbol_safe} {kurs} \n"
         f"{store_line}\n"
-        f"?? Country : {country}"
+        f"🌍 Country : {country}"
     )
 
 
