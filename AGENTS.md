@@ -29,6 +29,7 @@
 - Prefer bundled scripts from the skill over retyping SSH/SCP/systemctl commands by hand when they cover the task.
 - For normal project work, update code locally first and test locally before any remote deployment.
 - For every code change, add concise code comments that explain why the change was made and why it is needed, not just what the code is doing.
+- If any crypto paper-trading algorithm or its trigger conditions change, update `useful_bot/crypto_paper_algorithms.md` in the same change so the reference stays aligned with the live bot behavior.
 - Do not use git branches in this project unless the user explicitly asks for them.
 - After local changes and tests are done, ask the user whether they want the change committed, merged, and deployed to the instance.
 - If the user approves the production path, perform it in this order: commit locally, merge into the production-bound state, then pull it on instance and deploy it on  instance. Do not skip the merge step in wording or execution.

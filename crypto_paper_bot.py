@@ -68,6 +68,14 @@ ALGO_ACCOUNT_NAMES = {
     "Algo 5": "Algo 5 (Improved Golden Dip)",
     "Algo 6": "Algo 6 (Improved Reversal)",
 }
+ALGO_MESSAGE_LABELS = {
+    "Algo 1": "Squeeze",
+    "Algo 2": "Golden Dip",
+    "Algo 3": "Reversal",
+    "Algo 4": "Squeeze+",
+    "Algo 5": "Golden Dip+",
+    "Algo 6": "Reversal+",
+}
 TREND_ADX_THRESHOLD = 20.0
 RANGE_ADX_THRESHOLD = 15.0
 MIN_AVG_DOLLAR_VOLUME = 2_000_000.0
@@ -123,6 +131,14 @@ def format_usd(value: float) -> str:
 def format_signed_usd(value: float) -> str:
     sign = "+" if value > 0 else "-"
     return f"{sign}${abs(value):,.2f}"
+
+
+def format_compact_delta(value: float) -> str:
+    if value > 0:
+        return f"+{abs(value):,.0f}"
+    if value < 0:
+        return f"-{abs(value):,.0f}"
+    return "0"
 
 
 def should_run_on_startup() -> bool:
@@ -604,6 +620,29 @@ class TradeRepository:
             rows = conn.execute("SELECT algorithm, balance FROM accounts ORDER BY algorithm ASC").fetchall()
         return {str(row["algorithm"]): float(row["balance"]) for row in rows}
 
+    def get_account_summary(self) -> dict[str, dict[str, float]]:
+        balances = self.get_balances()
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT algorithm, COUNT(*) AS open_trade_count
+                FROM paper_trades
+                WHERE status = 'OPEN'
+                GROUP BY algorithm
+                """
+            ).fetchall()
+        open_counts = {str(row["algorithm"]): int(row["open_trade_count"]) for row in rows}
+        summary: dict[str, dict[str, float]] = {}
+        for algorithm in ALGORITHM_ORDER:
+            open_trade_count = open_counts.get(algorithm, 0)
+            summary[algorithm] = {
+                "balance": balances.get(algorithm, 0.0),
+                "delta": balances.get(algorithm, 0.0) - 10000.0,
+                "open_trade_count": float(open_trade_count),
+                "invested_usd": float(open_trade_count) * POSITION_SIZE_USD,
+            }
+        return summary
+
 
 class TelegramNotifier:
     def __init__(self, token: str, chat_id: int) -> None:
@@ -669,13 +708,32 @@ def build_close_message(closed_trade: ClosedTrade) -> str:
     return "\n".join(lines)
 
 
-def build_balances_message(balances: dict[str, float]) -> str:
+def build_balances_message(account_summary: dict[str, dict[str, float]]) -> str:
+    ranked_algorithms = sorted(
+        ALGORITHM_ORDER,
+        key=lambda algorithm: (
+            -float(account_summary.get(algorithm, {}).get("balance", 0.0)),
+            algorithm,
+        ),
+    )
+    rank_markers = ["🥇", "🥈", "🥉"]
     lines = [
-        "SYNTHETIC ACCOUNTS",
-        f"Updated (UTC): {utc_now_iso()}",
+        "🏦 SYNTHETIC ACCOUNTS",
+        f"Updated: {utc_now_iso().replace('T', ' ').replace('+00:00', ' UTC')}",
+        "",
     ]
-    for algorithm in ALGORITHM_ORDER:
-        lines.append(f"{ALGO_ACCOUNT_NAMES[algorithm]}: {format_usd(balances.get(algorithm, 0.0))}")
+    for index, algorithm in enumerate(ranked_algorithms):
+        marker = rank_markers[index] if index < len(rank_markers) else ("▼" if index >= len(ranked_algorithms) - 2 else "•")
+        stats = account_summary.get(algorithm, {})
+        balance = float(stats.get("balance", 0.0))
+        delta = float(stats.get("delta", balance - 10000.0))
+        open_trade_count = int(stats.get("open_trade_count", 0))
+        invested_usd = float(stats.get("invested_usd", open_trade_count * POSITION_SIZE_USD))
+        lines.append(
+            f"{marker} {algorithm:<6} {ALGO_MESSAGE_LABELS[algorithm]:<12} "
+            f"{format_usd(balance):>10} {format_compact_delta(delta):>6} | "
+            f"Open {open_trade_count} ({format_usd(invested_usd)})"
+        )
     return "\n".join(lines)
 
 
@@ -723,8 +781,8 @@ class TelegramNotifier:
     def send_message(self, message: str) -> bool:
         return self._post("sendMessage", {"chat_id": self.chat_id, "text": message}) is not None
 
-    def refresh_balances_message(self, balances: dict[str, float]) -> bool:
-        text = build_balances_message(balances)
+    def refresh_balances_message(self, account_summary: dict[str, dict[str, float]]) -> bool:
+        text = build_balances_message(account_summary)
         message_id = self._read_balance_message_id()
         if message_id and self._post(
             "editMessageText",
@@ -773,7 +831,7 @@ class CryptoPaperBot:
             LOGGER.info("Starting crypto paper-trading cycle")
             # The balances message is the operator's single source of truth, so refresh
             # it at the start of each cycle even when no trades fire during that hour.
-            self.notifier.refresh_balances_message(self.repository.get_balances())
+            self.notifier.refresh_balances_message(self.repository.get_account_summary())
             self._check_open_trades()
             self._find_new_setups()
             LOGGER.info("Crypto paper-trading cycle completed")
@@ -811,9 +869,8 @@ class CryptoPaperBot:
                 exit_price=exit_price,
                 exit_time=utc_now_iso(),
             )
-            balances = self.repository.get_balances()
             self.notifier.send_message(build_close_message(closed_trade))
-            self.notifier.refresh_balances_message(balances)
+            self.notifier.refresh_balances_message(self.repository.get_account_summary())
 
     def _find_new_setups(self) -> None:
         ranked_symbols = self.exchange_gateway.fetch_top_usdt_symbols(limit=TOP_SYMBOL_LIMIT)
@@ -836,7 +893,7 @@ class CryptoPaperBot:
                 self.repository.create_open_trade(symbol, algorithm, entry_price, utc_now_iso())
                 blocked_symbols.add(symbol)
                 self.notifier.send_message(build_open_message(algorithm, symbol, entry_price))
-                self.notifier.refresh_balances_message(self.repository.get_balances())
+                self.notifier.refresh_balances_message(self.repository.get_account_summary())
                 break
 
 

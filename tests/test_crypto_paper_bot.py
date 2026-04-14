@@ -47,8 +47,15 @@ class FakeNotifier:
         self.messages.append(message)
         return True
 
-    def refresh_balances_message(self, balances: dict[str, float]) -> bool:
-        self.balance_updates.append(dict(balances))
+    def refresh_balances_message(self, account_summary: dict[str, dict[str, float]]) -> bool:
+        snapshot = {
+            algorithm: {
+                key: float(value)
+                for key, value in stats.items()
+            }
+            for algorithm, stats in account_summary.items()
+        }
+        self.balance_updates.append(snapshot)
         return True
 
 
@@ -185,6 +192,16 @@ class TradeRepositoryTests(unittest.TestCase):
         self.assertAlmostEqual(closed.pnl_usd, -50.0)
         self.assertAlmostEqual(balances["Algo 2"], 9950.0)
 
+    def test_account_summary_includes_open_counts_and_invested_usd(self) -> None:
+        self.repo.create_open_trade("BTC/USDT", "Algo 1", 100.0, "2026-01-01T00:00:00+00:00")
+        self.repo.create_open_trade("ETH/USDT", "Algo 4", 200.0, "2026-01-01T00:00:00+00:00")
+        summary = self.repo.get_account_summary()
+        self.assertEqual(summary["Algo 1"]["open_trade_count"], 1.0)
+        self.assertEqual(summary["Algo 1"]["invested_usd"], 1000.0)
+        self.assertEqual(summary["Algo 4"]["open_trade_count"], 1.0)
+        self.assertEqual(summary["Algo 4"]["delta"], 0.0)
+        self.assertEqual(summary["Algo 6"]["open_trade_count"], 0.0)
+
 
 class ExchangeGatewayTests(unittest.TestCase):
     def test_fetch_top_usdt_symbols_ranks_by_quote_volume_and_filters_unwanted_markets(self) -> None:
@@ -231,7 +248,8 @@ class BotOrchestrationTests(unittest.TestCase):
         open_trades = self.repo.get_open_trades()
         self.assertEqual(open_trades, [])
         self.assertAlmostEqual(balances["Algo 1"], 9950.0)
-        self.assertEqual(notifier.balance_updates[-1]["Algo 1"], 9950.0)
+        self.assertEqual(notifier.balance_updates[-1]["Algo 1"]["balance"], 9950.0)
+        self.assertEqual(notifier.balance_updates[-1]["Algo 1"]["open_trade_count"], 0.0)
 
     @mock.patch.object(cpb.time, "sleep", return_value=None)
     def test_find_new_setups_opens_only_one_trade_per_coin(self, _sleep: mock.Mock) -> None:
@@ -293,9 +311,20 @@ class BotOrchestrationTests(unittest.TestCase):
         self.assertIn("Coin: $BTC", message)
         self.assertIn("Algorithm: Algo 1 (Squeeze)", message)
         self.assertIn("PnL: +$150.00", message)
-        balances_text = cpb.build_balances_message({algorithm: 10000.0 for algorithm in cpb.ALGORITHM_ORDER})
-        self.assertIn("Algo 2 (Golden Dip): $10,000.00", balances_text)
-        self.assertIn("Algo 6 (Improved Reversal): $10,000.00", balances_text)
+        account_summary = {
+            "Algo 1": {"balance": 10300.0, "delta": 300.0, "open_trade_count": 2.0, "invested_usd": 2000.0},
+            "Algo 2": {"balance": 10150.0, "delta": 150.0, "open_trade_count": 0.0, "invested_usd": 0.0},
+            "Algo 3": {"balance": 10000.0, "delta": 0.0, "open_trade_count": 1.0, "invested_usd": 1000.0},
+            "Algo 4": {"balance": 9950.0, "delta": -50.0, "open_trade_count": 0.0, "invested_usd": 0.0},
+            "Algo 5": {"balance": 9900.0, "delta": -100.0, "open_trade_count": 3.0, "invested_usd": 3000.0},
+            "Algo 6": {"balance": 9800.0, "delta": -200.0, "open_trade_count": 0.0, "invested_usd": 0.0},
+        }
+        balances_text = cpb.build_balances_message(account_summary)
+        self.assertIn("🏦 SYNTHETIC ACCOUNTS", balances_text)
+        self.assertIn("🥇 Algo 1", balances_text)
+        self.assertIn("Squeeze", balances_text)
+        self.assertIn("▼ Algo 6", balances_text)
+        self.assertIn("Open 3 ($3,000.00)", balances_text)
 
     @mock.patch.object(cpb.requests, "post")
     def test_telegram_notifier_posts_to_bot_api(self, post: mock.Mock) -> None:
@@ -326,7 +355,17 @@ class BotOrchestrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             notifier = cpb.TelegramNotifier("123:abc", 42, Path(tmpdir) / "balance_message_id.txt")
             self.assertTrue(
-                notifier.refresh_balances_message({algorithm: 10000.0 for algorithm in cpb.ALGORITHM_ORDER})
+                notifier.refresh_balances_message(
+                    {
+                        algorithm: {
+                            "balance": 10000.0,
+                            "delta": 0.0,
+                            "open_trade_count": 0.0,
+                            "invested_usd": 0.0,
+                        }
+                        for algorithm in cpb.ALGORITHM_ORDER
+                    }
+                )
             )
         self.assertEqual(post.call_count, 3)
         self.assertIn("sendMessage", post.call_args_list[0].args[0])
