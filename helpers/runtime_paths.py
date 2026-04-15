@@ -52,13 +52,8 @@ STARTUP_ERROR_LOG_FILE = runtime_file(RUNTIME_LOGS_DIR, "startup_error.log")
 SHOES_DB_FILE = runtime_file(RUNTIME_DB_DIR, "shoes.db")
 OLX_ITEMS_DB_FILE = runtime_file(RUNTIME_DB_DIR, "olx_items.db")
 SHAFA_ITEMS_DB_FILE = runtime_file(RUNTIME_DB_DIR, "shafa_items.db")
-CRYPTO_PAPER_TRADES_DB_FILE = runtime_file(RUNTIME_DB_DIR, "crypto_paper_trades.db")
 
 STATUS_MESSAGE_ID_FILE = runtime_file(RUNTIME_TEXT_DIR, "status_message_id.txt")
-CRYPTO_PAPER_BALANCES_MESSAGE_ID_FILE = runtime_file(
-    RUNTIME_TEXT_DIR,
-    "crypto_paper_balances_message_id.txt",
-)
 
 LAST_RUNS_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "last_runs.json")
 MARKET_OLX_RUN_STATUS_FILE = runtime_file(RUNTIME_STATUS_DIR, "market_olx_run.json")
