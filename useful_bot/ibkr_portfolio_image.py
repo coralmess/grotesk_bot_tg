@@ -1152,6 +1152,19 @@ def _portfolio_prior_close_invested_value(snapshot: PortfolioSnapshot) -> Option
     return total if has_data else None
 
 
+def _portfolio_current_invested_value(snapshot: PortfolioSnapshot) -> Optional[float]:
+    total = 0.0
+    has_positions = False
+    # QQQM Total Diff should be able to compare against the capital actually deployed in
+    # positions, not net liquidation, so idle cash does not distort the cumulative tile.
+    for position in snapshot.positions:
+        if position.market_value is None:
+            continue
+        total += position.market_value
+        has_positions = True
+    return total if has_positions else None
+
+
 def _same_day_equity_trade_deltas(snapshot: PortfolioSnapshot) -> dict[tuple[str, int], float]:
     deltas: dict[tuple[str, int], float] = {}
     trade_date = snapshot.trade_date
@@ -1194,7 +1207,8 @@ def _position_at_prior_close(
 
 
 def initialize_qqqm_benchmark_baseline(snapshot: PortfolioSnapshot) -> Optional[dict[str, float | str]]:
-    if snapshot.net_liquidation <= 0 or not snapshot.trade_date:
+    invested_value = _portfolio_current_invested_value(snapshot)
+    if invested_value is None or invested_value <= 0 or not snapshot.trade_date:
         return None
     close_history = _fetch_qqqm_close_history(snapshot.trade_date, snapshot.trade_date)
     if close_history is None:
@@ -1204,6 +1218,9 @@ def initialize_qqqm_benchmark_baseline(snapshot: PortfolioSnapshot) -> Optional[
         return None
     return {
         "trade_date": snapshot.trade_date,
+        # Keep the invested baseline explicit so the cumulative tile uses the same
+        # deployed-capital philosophy as the daily QQQM proxy.
+        "invested_value": invested_value,
         "net_liquidation": snapshot.net_liquidation,
         "qqqm_start_close": start_close,
         "started_at": snapshot.fetched_at,
@@ -1216,9 +1233,14 @@ def compute_qqqm_total_diff(
     baseline_trade_date: str,
     baseline_net_liquidation: float,
     baseline_qqqm_start_close: float,
+    baseline_invested_value: Optional[float] = None,
     benchmark_mode: BenchmarkMode = "trade_date_close",
 ) -> Optional[float]:
-    if baseline_net_liquidation <= 0 or baseline_qqqm_start_close <= 0:
+    baseline_value = baseline_invested_value if baseline_invested_value is not None else baseline_net_liquidation
+    current_portfolio_value = _portfolio_current_invested_value(snapshot)
+    if current_portfolio_value is None or current_portfolio_value <= 0:
+        return None
+    if baseline_value <= 0 or baseline_qqqm_start_close <= 0:
         return None
     if not baseline_trade_date or not snapshot.trade_date:
         return None
@@ -1235,25 +1257,28 @@ def compute_qqqm_total_diff(
     if current_close is None or current_close <= 0:
         return None
 
-    synthetic_shares = baseline_net_liquidation / baseline_qqqm_start_close
+    synthetic_shares = baseline_value / baseline_qqqm_start_close
     synthetic_cash = 0.0
 
-    for cash_event in snapshot.cash_events:
-        if not _is_external_benchmark_cash_flow(cash_event):
-            continue
-        event_date = str(cash_event.get("event_date", "") or "")
-        if not event_date or event_date < baseline_trade_date:
-            continue
-        amount = coerce_optional_float(cash_event.get("amount"))
-        if amount is None or abs(amount) < 1e-9:
-            continue
-        benchmark_close = _first_close_on_or_after(benchmark_history.close_by_date, event_date)
-        if benchmark_close is None or benchmark_close <= 0:
-            return None
-        synthetic_shares += amount / benchmark_close
+    if baseline_invested_value is None:
+        # Older saved baselines only know full net liquidation. Keep their legacy cash-flow
+        # adjustment path so existing state does not break before the user resets baseline.
+        for cash_event in snapshot.cash_events:
+            if not _is_external_benchmark_cash_flow(cash_event):
+                continue
+            event_date = str(cash_event.get("event_date", "") or "")
+            if not event_date or event_date < baseline_trade_date:
+                continue
+            amount = coerce_optional_float(cash_event.get("amount"))
+            if amount is None or abs(amount) < 1e-9:
+                continue
+            benchmark_close = _first_close_on_or_after(benchmark_history.close_by_date, event_date)
+            if benchmark_close is None or benchmark_close <= 0:
+                return None
+            synthetic_shares += amount / benchmark_close
 
     synthetic_value = synthetic_cash + (synthetic_shares * current_close)
-    return snapshot.net_liquidation - synthetic_value
+    return current_portfolio_value - synthetic_value
 
 
 def _resolve_qqqm_valuation_price(

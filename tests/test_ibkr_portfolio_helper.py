@@ -27,6 +27,7 @@ from useful_bot.ibkr_portfolio_image import (
     QQQMTradeDateReturn,
     RENDER_STYLE_VERSION,
     _build_portfolio_html,
+    _portfolio_current_invested_value,
     _qqqm_hypothetical_pnl,
     compute_qqqm_total_diff,
     initialize_qqqm_benchmark_baseline,
@@ -593,11 +594,12 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
                 snapshot,
                 baseline_trade_date="2026-03-20",
                 baseline_net_liquidation=100000.0,
+                baseline_invested_value=4200.0,
                 baseline_qqqm_start_close=100.0,
             )
 
         self.assertAlmostEqual(qqqm_pnl, 417.9)
-        self.assertAlmostEqual(qqqm_total_difference, -5000.0)
+        self.assertAlmostEqual(qqqm_total_difference, -420.0)
 
     def test_qqqm_daily_pnl_excludes_same_day_buys_from_prior_close_capital(self) -> None:
         snapshot = make_snapshot(
@@ -709,12 +711,13 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
                 snapshot,
                 baseline_trade_date="2026-03-20",
                 baseline_net_liquidation=100000.0,
+                baseline_invested_value=4200.0,
                 baseline_qqqm_start_close=100.0,
             )
 
-        self.assertAlmostEqual(qqqm_total_difference, -5000.0)
+        self.assertAlmostEqual(qqqm_total_difference, -420.0)
 
-    def test_qqqm_total_difference_applies_external_cash_flows_on_event_dates(self) -> None:
+    def test_qqqm_total_difference_returns_none_when_only_idle_cash_exists(self) -> None:
         snapshot = make_snapshot(
             trade_date="2026-03-23",
             net_liquidation=201000.0,
@@ -744,7 +747,7 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
                 baseline_qqqm_start_close=100.0,
             )
 
-        self.assertAlmostEqual(qqqm_total_difference, 0.0)
+        self.assertIsNone(qqqm_total_difference)
 
     def test_qqqm_values_return_none_when_quote_is_unavailable(self) -> None:
         snapshot = make_snapshot()
@@ -770,7 +773,13 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
         self.assertIsNotNone(baseline)
         self.assertEqual(baseline["trade_date"], "2026-03-23")
         self.assertAlmostEqual(float(baseline["net_liquidation"]), 95000.0)
+        self.assertAlmostEqual(float(baseline["invested_value"]), 4200.0)
         self.assertAlmostEqual(float(baseline["qqqm_start_close"]), 101.0)
+
+    def test_portfolio_current_invested_value_excludes_idle_cash(self) -> None:
+        snapshot = make_snapshot(net_liquidation=5000.0, cash_value=3800.0)
+
+        self.assertAlmostEqual(_portfolio_current_invested_value(snapshot) or 0.0, 4200.0)
 
     def test_qqqm_total_difference_returns_none_when_close_history_is_missing(self) -> None:
         snapshot = make_snapshot()
@@ -815,6 +824,7 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
                 snapshot,
                 baseline_trade_date="2026-03-20",
                 baseline_net_liquidation=100000.0,
+                baseline_invested_value=4200.0,
                 baseline_qqqm_start_close=100.0,
             )
 
@@ -916,6 +926,21 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
             trade_date="2026-03-23",
             fetched_at=datetime(2026, 3, 23, 12, 15, tzinfo=NEW_YORK_TZ),
             net_liquidation=111000.0,
+            cash_value=0.0,
+            raw_positions=[
+                {
+                    "symbol": "QQQ",
+                    "con_id": 1,
+                    "sec_type": "STK",
+                    "quantity": 1000,
+                    "market_price": 111.0,
+                    "market_value": 111000.0,
+                    "average_cost": 100.0,
+                    "unrealized_pnl": 11000.0,
+                    "daily_pnl": 6000.0,
+                    "prior_close_price": 105.0,
+                }
+            ],
         )
 
         with patch(
@@ -937,10 +962,81 @@ class IBKRPortfolioCoreTests(unittest.TestCase):
                 baseline_trade_date="2026-03-20",
                 baseline_net_liquidation=100000.0,
                 baseline_qqqm_start_close=100.0,
+                baseline_invested_value=100000.0,
                 benchmark_mode="live_session",
             )
 
         self.assertAlmostEqual(qqqm_total_difference or 0.0, 1000.0)
+
+    def test_qqqm_total_difference_uses_invested_value_when_baseline_carries_it(self) -> None:
+        snapshot = make_snapshot(
+            trade_date="2026-03-23",
+            net_liquidation=1500.0,
+            cash_value=300.0,
+            raw_positions=[
+                {
+                    "symbol": "AAPL",
+                    "con_id": 1,
+                    "sec_type": "STK",
+                    "quantity": 4,
+                    "market_price": 300.0,
+                    "market_value": 1200.0,
+                    "average_cost": 250.0,
+                    "unrealized_pnl": 200.0,
+                    "daily_pnl": 40.0,
+                    "prior_close_price": 290.0,
+                }
+            ],
+        )
+
+        with patch(
+            "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
+            return_value=QQQMCloseHistory(
+                latest_close=110.0,
+                close_by_date={"2026-03-20": 100.0, "2026-03-23": 110.0},
+            ),
+        ):
+            qqqm_total_difference = compute_qqqm_total_diff(
+                snapshot,
+                baseline_trade_date="2026-03-20",
+                baseline_net_liquidation=1500.0,
+                baseline_invested_value=1200.0,
+                baseline_qqqm_start_close=100.0,
+            )
+
+        self.assertAlmostEqual(qqqm_total_difference or 0.0, -120.0)
+
+    def test_qqqm_total_difference_keeps_legacy_cash_flow_path_without_invested_baseline(self) -> None:
+        snapshot = make_snapshot(
+            trade_date="2026-03-23",
+            net_liquidation=1000.0,
+            cash_value=1000.0,
+            raw_positions=[],
+            raw_cash_events=[
+                {
+                    "event_date": "2026-03-23",
+                    "amount": 1000.0,
+                    "section": "CashTransactions",
+                    "description": "Deposit",
+                }
+            ],
+        )
+
+        with patch(
+            "useful_bot.ibkr_portfolio_image._fetch_qqqm_close_history",
+            return_value=QQQMCloseHistory(
+                latest_close=200.0,
+                close_by_date={"2026-03-20": 100.0, "2026-03-23": 200.0},
+            ),
+        ):
+            qqqm_total_difference = compute_qqqm_total_diff(
+                snapshot,
+                baseline_trade_date="2026-03-20",
+                baseline_net_liquidation=100000.0,
+                baseline_qqqm_start_close=100.0,
+            )
+
+        self.assertIsNone(qqqm_total_difference)
 
 
 class IBKRPortfolioHelperTests(unittest.IsolatedAsyncioTestCase):

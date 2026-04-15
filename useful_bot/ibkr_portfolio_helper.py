@@ -284,6 +284,7 @@ class IBKRPortfolioHelper:
                     baseline_trade_date=str(baseline["trade_date"]),
                     baseline_net_liquidation=float(baseline["net_liquidation"]),
                     baseline_qqqm_start_close=float(baseline["qqqm_start_close"]),
+                    baseline_invested_value=coerce_optional_float(baseline.get("invested_value")),
                     benchmark_mode=benchmark_mode,
                 )
             # Only the scheduled/daily paths should suppress same-trade-date resends. The
@@ -367,12 +368,16 @@ class IBKRPortfolioHelper:
             return None
         trade_date = str(baseline.get("trade_date", "") or "")
         net_liquidation = coerce_optional_float(baseline.get("net_liquidation"))
+        invested_value = coerce_optional_float(baseline.get("invested_value"))
         qqqm_start_close = coerce_optional_float(baseline.get("qqqm_start_close"))
         if not trade_date or net_liquidation is None or net_liquidation <= 0 or qqqm_start_close is None or qqqm_start_close <= 0:
             return None
         return {
             "trade_date": trade_date,
             "net_liquidation": net_liquidation,
+            # Preserve the optional invested-value baseline so the cumulative tile can
+            # move onto the same deployed-capital basis as the daily QQQM tile.
+            "invested_value": invested_value,
             "qqqm_start_close": qqqm_start_close,
             "started_at": str(baseline.get("started_at", "") or ""),
         }
