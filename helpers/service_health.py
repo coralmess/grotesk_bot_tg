@@ -24,6 +24,7 @@ DEFAULT_METRICS_PORTS = {
     "usefulbot": 9103,
     "svitlobot": 9104,
     "tsekbot": 9105,
+    "auto-ria-bot": 9106,
 }
 
 

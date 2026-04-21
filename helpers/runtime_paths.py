@@ -52,6 +52,9 @@ STARTUP_ERROR_LOG_FILE = runtime_file(RUNTIME_LOGS_DIR, "startup_error.log")
 SHOES_DB_FILE = runtime_file(RUNTIME_DB_DIR, "shoes.db")
 OLX_ITEMS_DB_FILE = runtime_file(RUNTIME_DB_DIR, "olx_items.db")
 SHAFA_ITEMS_DB_FILE = runtime_file(RUNTIME_DB_DIR, "shafa_items.db")
+# Auto RIA needs its own dedupe ledger so car alerts can evolve independently from the
+# fashion marketplaces without sharing state or risking cross-bot resend collisions.
+AUTO_RIA_ITEMS_DB_FILE = runtime_file(RUNTIME_DB_DIR, "auto_ria_items.db")
 
 STATUS_MESSAGE_ID_FILE = runtime_file(RUNTIME_TEXT_DIR, "status_message_id.txt")
 
