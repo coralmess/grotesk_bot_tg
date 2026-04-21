@@ -111,13 +111,36 @@ def parse_vin_decoder_html(html_text: str) -> VinDecoderDetails:
     return VinDecoderDetails(trim=trim, transmission=transmission)
 
 
+def parse_nhtsa_vpic_payload(payload: dict) -> VinDecoderDetails:
+    results = payload.get("Results") or []
+    if not results:
+        return VinDecoderDetails()
+
+    row = results[0] or {}
+    trim = _clean_text(row.get("Trim"))
+    if not trim:
+        trim = _clean_text(" ".join(filter(None, [row.get("Series"), row.get("Series2")])))
+
+    transmission = _clean_text(row.get("TransmissionStyle"))
+    speeds = _clean_text(row.get("TransmissionSpeeds"))
+    if transmission and speeds:
+        transmission = f"{transmission} ({speeds}-speed)"
+
+    return VinDecoderDetails(
+        trim=trim or None,
+        transmission=transmission or None,
+    )
+
+
 def build_auto_ria_caption(
     listing: AutoRiaListing,
     *,
     transmission: Optional[str],
     trim: Optional[str],
 ) -> str:
-    lines = [f"<b>{html.escape(listing.title)}</b>"]
+    # Making the title itself clickable keeps the message compact while still letting the
+    # user jump straight into the listing from the most visually prominent line.
+    lines = [f'<a href="{html.escape(listing.url, quote=True)}"><b>{html.escape(listing.title)}</b></a>']
     if listing.subtitle:
         lines.append(html.escape(listing.subtitle))
     lines.append("")

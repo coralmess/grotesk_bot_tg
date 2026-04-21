@@ -4,10 +4,11 @@ import asyncio
 import logging
 import os
 import random
+import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
-import aiohttp
+import requests
 from telegram import Bot
 
 from config import RUN_ACCEPT_LANGUAGE, RUN_USER_AGENT
@@ -16,13 +17,12 @@ from helpers.auto_ria.models import AutoRiaListing, VinDecoderDetails
 from helpers.auto_ria.parsing import (
     build_auto_ria_caption,
     extract_vin_from_detail_html,
+    parse_nhtsa_vpic_payload,
     parse_auto_ria_search_html,
-    parse_vin_decoder_html,
 )
 from helpers.auto_ria.storage import AutoRiaStorage
 from helpers.auto_ria.vin import build_vin_decoder_url
 from helpers.marketplace_sender import (
-    build_image_downloader,
     build_media_sender,
     build_message_sender,
     build_photo_sender,
@@ -59,13 +59,14 @@ class AutoRiaBotRuntime:
             for source in sources
             if source.get("url") and source.get("url_name")
         ]
-        self._check_interval_sec = max(60, int(check_interval_sec))
+        # This bot is intended to check Auto RIA on an hourly cadence, so the default
+        # interval is a true hour instead of the shorter marketplace polling cadence.
+        self._check_interval_sec = max(3600, int(check_interval_sec))
         self._check_jitter_sec = max(0, int(check_jitter_sec))
         self._request_timeout_sec = max(5, int(request_timeout_sec))
         self._storage = AutoRiaStorage(AUTO_RIA_ITEMS_DB_FILE)
         self._service_health = service_health or build_service_health("auto-ria-bot")
         self._logger = logger or logging.getLogger("auto_ria_bot")
-        self._http_session: Optional[aiohttp.ClientSession] = None
         self._http_semaphore = asyncio.Semaphore(max(2, connector_limit))
         self._send_semaphore = asyncio.Semaphore(2)
         self._connector_limit = max(4, int(connector_limit))
@@ -84,17 +85,11 @@ class AutoRiaBotRuntime:
     async def start(self) -> None:
         self._storage.create_tables()
         await self._bot.initialize()
-        connector = aiohttp.TCPConnector(limit=self._connector_limit, ttl_dns_cache=300)
-        timeout = aiohttp.ClientTimeout(total=self._request_timeout_sec)
-        self._http_session = aiohttp.ClientSession(connector=connector, timeout=timeout)
         self._service_health.start()
         self._service_health.mark_ready("auto ria bot starting")
 
     async def shutdown(self) -> None:
         self._service_health.mark_stopping("auto ria bot stopping")
-        if self._http_session is not None:
-            await self._http_session.close()
-            self._http_session = None
         await self._bot.shutdown()
 
     async def run_forever(self) -> None:
@@ -173,55 +168,86 @@ class AutoRiaBotRuntime:
         if not vin:
             return VinDecoderDetails()
 
-        decoder_html = await self._fetch_text(
-            build_vin_decoder_url(vin),
+        model_year = self._extract_model_year(listing.title)
+        decoder_payload = await self._fetch_json(
+            build_vin_decoder_url(vin, model_year=model_year),
             allow_statuses={403, 404, 429},
         )
-        if not decoder_html:
+        if not decoder_payload:
             # VIN enrichment is intentionally best-effort so third-party decoder failures
             # never suppress a real car alert that already matched the monitored search page.
             return VinDecoderDetails()
 
-        return parse_vin_decoder_html(decoder_html)
+        return parse_nhtsa_vpic_payload(decoder_payload)
 
     async def _fetch_text(self, url: str, *, allow_statuses: Optional[set[int]] = None) -> Optional[str]:
-        if self._http_session is None:
-            raise RuntimeError("HTTP session not started")
+        try:
+            return await asyncio.to_thread(self._fetch_text_sync, url, allow_statuses)
+        except Exception as exc:
+            self._logger.warning("HTTP fetch failed for %s: %s", url, exc)
+            return None
 
+    async def _fetch_json(self, url: str, *, allow_statuses: Optional[set[int]] = None) -> Optional[dict]:
+        try:
+            return await asyncio.to_thread(self._fetch_json_sync, url, allow_statuses)
+        except Exception as exc:
+            self._logger.warning("JSON fetch failed for %s: %s", url, exc)
+            return None
+
+    def _fetch_text_sync(self, url: str, allow_statuses: Optional[set[int]] = None) -> Optional[str]:
         headers = {
             "User-Agent": RUN_USER_AGENT,
             "Accept-Language": RUN_ACCEPT_LANGUAGE,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-        try:
-            async with self._http_semaphore:
-                async with self._http_session.get(url, headers=headers) as response:
-                    if allow_statuses and response.status in allow_statuses:
-                        self._logger.info("Allowed non-success status %s for %s", response.status, url)
-                        return None
-                    response.raise_for_status()
-                    return await response.text()
-        except Exception as exc:
-            self._logger.warning("HTTP fetch failed for %s: %s", url, exc)
+        response = requests.get(url, headers=headers, timeout=self._request_timeout_sec)
+        if allow_statuses and response.status_code in allow_statuses:
+            self._logger.info("Allowed non-success status %s for %s", response.status_code, url)
             return None
+        response.raise_for_status()
+        return response.text
 
-    def _get_http_session(self) -> aiohttp.ClientSession:
-        if self._http_session is None:
-            raise RuntimeError("HTTP session not started")
-        return self._http_session
+    def _fetch_json_sync(self, url: str, allow_statuses: Optional[set[int]] = None) -> Optional[dict]:
+        headers = {
+            "User-Agent": RUN_USER_AGENT,
+            "Accept-Language": RUN_ACCEPT_LANGUAGE,
+            "Accept": "application/json,text/plain,*/*",
+        }
+        response = requests.get(url, headers=headers, timeout=self._request_timeout_sec)
+        if allow_statuses and response.status_code in allow_statuses:
+            self._logger.info("Allowed non-success status %s for %s", response.status_code, url)
+            return None
+        response.raise_for_status()
+        return response.json()
+
+    def _extract_model_year(self, title: str) -> Optional[int]:
+        match = re.search(r"\b(19|20)\d{2}\b", title or "")
+        return int(match.group(0)) if match else None
 
     def _is_valid_image_url(self, image_url: Optional[str]) -> bool:
         return bool(image_url and image_url.startswith(("http://", "https://")))
 
     @property
     def _download_image_bytes(self):
-        return build_image_downloader(
-            http_semaphore=self._http_semaphore,
-            get_http_session=self._get_http_session,
-            user_agent=RUN_USER_AGENT,
-            accept_language=RUN_ACCEPT_LANGUAGE,
-            logger=self._logger,
-        )
+        async def _download(url: str) -> Optional[bytes]:
+            # Requests-based image downloads match the verified local preview path and avoid
+            # the DNS issue we observed from aiohttp against Auto RIA infrastructure here.
+            return await asyncio.to_thread(self._download_image_bytes_sync, url)
+
+        return _download
+
+    def _download_image_bytes_sync(self, url: str) -> Optional[bytes]:
+        headers = {
+            "User-Agent": RUN_USER_AGENT,
+            "Accept-Language": RUN_ACCEPT_LANGUAGE,
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        response = requests.get(url, headers=headers, timeout=self._request_timeout_sec)
+        if response.status_code == 403:
+            self._logger.warning("Image forbidden (403). Falling back to text-only send.")
+            return None
+        response.raise_for_status()
+        return response.content
 
 
 def build_auto_ria_runtime(*, logger=None) -> AutoRiaBotRuntime:
@@ -242,8 +268,8 @@ def build_auto_ria_runtime(*, logger=None) -> AutoRiaBotRuntime:
         bot_token=bot_token,
         chat_id=chat_id,
         sources=AUTO_RIA_URLS,
-        check_interval_sec=int(os.getenv("AUTO_RIA_CHECK_INTERVAL_SEC", "900")),
-        check_jitter_sec=int(os.getenv("AUTO_RIA_CHECK_JITTER_SEC", "60")),
+        check_interval_sec=int(os.getenv("AUTO_RIA_CHECK_INTERVAL_SEC", "3600")),
+        check_jitter_sec=int(os.getenv("AUTO_RIA_CHECK_JITTER_SEC", "0")),
         request_timeout_sec=int(os.getenv("AUTO_RIA_REQUEST_TIMEOUT_SEC", "30")),
         connector_limit=int(os.getenv("AUTO_RIA_HTTP_CONNECTOR_LIMIT", "8")),
         logger=logger,

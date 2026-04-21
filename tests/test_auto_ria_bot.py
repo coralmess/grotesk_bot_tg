@@ -7,7 +7,7 @@ from helpers.auto_ria.parsing import (
     extract_vin_from_detail_html,
     normalize_auto_ria_image_url,
     parse_auto_ria_search_html,
-    parse_vin_decoder_html,
+    parse_nhtsa_vpic_payload,
 )
 from helpers.auto_ria.storage import AutoRiaStorage
 
@@ -41,12 +41,17 @@ DETAIL_HTML = """
 </div>
 """
 
-VIN_DECODER_HTML = """
-<table>
-  <tr><th>Trim</th><td>Premium</td></tr>
-  <tr><th>Transmission</th><td>QYZ(6A)</td></tr>
-</table>
-"""
+NHTSA_VPIC_PAYLOAD = {
+    "Results": [
+        {
+            "Trim": "quattro Premium",
+            "Series": "",
+            "Series2": "",
+            "TransmissionStyle": "Automatic",
+            "TransmissionSpeeds": "",
+        }
+    ]
+}
 
 
 class AutoRiaParsingTests(unittest.TestCase):
@@ -71,27 +76,27 @@ class AutoRiaParsingTests(unittest.TestCase):
     def test_extract_vin_from_detail_html(self) -> None:
         self.assertEqual(extract_vin_from_detail_html(DETAIL_HTML), "WAUB8GFF5G1020011")
 
-    def test_parse_vin_decoder_html(self) -> None:
-        vin_details = parse_vin_decoder_html(VIN_DECODER_HTML)
-        self.assertEqual(vin_details.trim, "Premium")
-        self.assertEqual(vin_details.transmission, "QYZ(6A)")
+    def test_parse_nhtsa_vpic_payload(self) -> None:
+        vin_details = parse_nhtsa_vpic_payload(NHTSA_VPIC_PAYLOAD)
+        self.assertEqual(vin_details.trim, "quattro Premium")
+        self.assertEqual(vin_details.transmission, "Automatic")
 
     def test_build_caption_includes_optional_vin_fields(self) -> None:
         listing = parse_auto_ria_search_html(SEARCH_HTML)[0]
         caption = build_auto_ria_caption(
             listing,
-            transmission="QYZ(6A)",
-            trim="Premium",
+            transmission="Automatic",
+            trim="quattro Premium",
         )
         self.assertEqual(
             caption,
-            "<b>Audi A3 2015</b>\n"
+            '<a href="https://auto.ria.com/uk/auto_audi_a3_39769491.html"><b>Audi A3 2015</b></a>\n'
             "8V  •  2.0T S-Tronic (220 к.с.) Quattro  •  Basis\n\n"
             "Ціна: <b>10 490 $</b>\n"
             "Пробіг: 109 тис. км\n"
             "Бензин, 1.98 л\n"
-            "Коробка: QYZ(6A)\n"
-            "Комплектація: Premium",
+            "Коробка: Automatic\n"
+            "Комплектація: quattro Premium",
         )
 
     def test_build_caption_omits_vin_fields_when_unavailable(self) -> None:

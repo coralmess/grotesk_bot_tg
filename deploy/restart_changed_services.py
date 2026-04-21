@@ -70,6 +70,16 @@ SERVICE_RULES = {
         "helpers/service_health.py",
         "config.py",
     ),
+    "auto-ria-bot.service": (
+        "auto_ria_bot.py",
+        "auto-ria-bot.service",
+        "config_auto_ria_urls.py",
+        "helpers/auto_ria/",
+        "helpers/process_pool.py",
+        "helpers/runtime_paths.py",
+        "helpers/service_health.py",
+        "config.py",
+    ),
 }
 
 
