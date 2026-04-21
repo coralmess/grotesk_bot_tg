@@ -1,7 +1,7 @@
-import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, sqlite3, threading, hashlib, os, random
+import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, requests, threading, hashlib, os, random
 from pathlib import Path
 from telegram.constants import ParseMode
-from collections import defaultdict, namedtuple, deque
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from playwright.async_api import async_playwright
@@ -22,6 +22,10 @@ from helpers import lyst_identity as lyst_identity_helpers
 from helpers import lyst_runtime as lyst_runtime_helpers
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers import lyst_state as lyst_state_helpers
+from helpers.lyst import parsing as lyst_parsing_helpers
+from helpers.lyst import pricing as lyst_pricing_helpers
+from helpers.lyst import processing as lyst_processing_helpers
+from helpers.lyst.storage import LystStorage
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC
 from config_lyst import (
     BASE_URLS,
@@ -42,7 +46,6 @@ from helpers.scheduler import run_lyst_scheduler
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
-import aiosqlite
 from helpers.runtime_paths import (
     PYTHON_LOG_FILE,
     SHOES_DB_FILE as RUNTIME_SHOES_DB_FILE,
@@ -52,7 +55,7 @@ from helpers.runtime_paths import (
     SHOE_DATA_JSON_FILE,
     EXCHANGE_RATES_JSON_FILE,
 )
-from helpers.sqlite_runtime import RUNTIME_DB_PRAGMA_STATEMENTS, run_runtime_db_maintenance
+from helpers.sqlite_runtime import run_runtime_db_maintenance
 try:
     import cv2
 except Exception:
@@ -192,24 +195,7 @@ try:
 except Exception:
     pass
 
-# Database semaphore to prevent concurrent access issues
-DB_SEMAPHORE = Semaphore(1)
 LYST_HTTP_SEMAPHORE = asyncio.Semaphore(LYST_HTTP_CONCURRENCY)
-
-# Define namedtuples and container classes
-ConversionResult = namedtuple('ConversionResult', ['uah_amount', 'exchange_rate', 'currency_symbol'])
-EMPTY_CONVERSION_RESULT = ConversionResult(0, 0, '')
-CURRENCY_CODE_BY_SYMBOL = {
-    '\u20ac': 'EUR',
-    '\u00e2\u201a\u00ac': 'EUR',
-    '\u00a3': 'GBP',
-    '\u00c2\u00a3': 'GBP',
-    '$': 'USD',
-}
-CURRENCY_DISPLAY_SYMBOL_BY_SYMBOL = {
-    '\u00e2\u201a\u00ac': '\u20ac',
-    '\u00c2\u00a3': '\u00a3',
-}
 
 # Statistics tracking
 max_wait_times = {'url_changes': 0, 'final_url_changes': 0}
@@ -256,6 +242,14 @@ file_handler.setFormatter(ColoredFormatter('%(asctime)s', datefmt='%d.%m %H:%M:%
 logger.addHandler(file_handler)
 configure_third_party_loggers()
 install_secret_redaction(logger)
+
+# The Lyst service still owns the overall scrape control flow, but shoe-state
+# persistence now lives behind one storage adapter instead of raw sqlite helpers.
+lyst_storage = LystStorage(
+    db_name=DB_NAME,
+    shoe_data_file=SHOE_DATA_FILE,
+    logger=logger,
+)
 
 class SpecialLogger:
     @staticmethod
@@ -517,117 +511,19 @@ def process_image(image_url, uah_price, sale_percentage):
         edsr_model_url=EDSR_MODEL_URL,
     )
 
-# Database functions
-PRAGMA_STATEMENTS = ['PRAGMA foreign_keys = ON', *RUNTIME_DB_PRAGMA_STATEMENTS]
-
-def connect_db():
-    conn = sqlite3.connect(DB_NAME, timeout=30.0)
-    for stmt in PRAGMA_STATEMENTS:
-        conn.execute(stmt)
-    return conn
-
-def create_tables():
-    conn = connect_db()
-    conn.executescript('''
-    CREATE TABLE IF NOT EXISTS shoes (
-        key TEXT PRIMARY KEY, name TEXT, unique_id TEXT,
-        original_price TEXT, sale_price TEXT, image_url TEXT,
-        store TEXT, country TEXT, shoe_link TEXT,
-        lowest_price TEXT, lowest_price_uah REAL,
-        uah_price REAL, active INTEGER);
-    CREATE TABLE IF NOT EXISTS processed_shoes (
-        key TEXT PRIMARY KEY, active INTEGER DEFAULT 1);
-    CREATE INDEX IF NOT EXISTS idx_processed_shoes_active 
-        ON processed_shoes(key) WHERE active = 1;
-    CREATE INDEX IF NOT EXISTS idx_shoe_active ON shoes (active, country, uah_price);
-    ''')
-    conn.commit(); conn.close()
-
-async def db_operation_with_retry(operation_func, max_retries=3):
-    """Helper function to handle database operations with retry logic"""
-    async with DB_SEMAPHORE:
-        for attempt in range(max_retries):
-            try:
-                async with aiosqlite.connect(DB_NAME, timeout=30.0) as conn:
-                    for stmt in PRAGMA_STATEMENTS:
-                        await conn.execute(stmt)
-                    return await operation_func(conn)
-            except Exception as e:
-                if "database is locked" in str(e).lower() and attempt < max_retries - 1:
-                    logger.warning(f"Database locked, retrying in {2 ** attempt} seconds (attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(2 ** attempt)
-                    continue
-                raise
-
-async def is_shoe_processed(key):
-    async def _operation(conn):
-        async with conn.execute("SELECT 1 FROM processed_shoes WHERE key = ?", (key,)) as cursor:
-            return await cursor.fetchone() is not None
-    return await db_operation_with_retry(_operation)
-
-async def mark_shoe_processed(key):
-    async def _operation(conn):
-        await conn.execute("INSERT OR IGNORE INTO processed_shoes(key, active) VALUES (?, 1)", (key,))
-        await conn.commit()
-    await db_operation_with_retry(_operation)
-
-def load_shoe_data_from_db():
-    conn = connect_db()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM shoes')
-    data = {row[0]: {
-        'name': row[1], 'unique_id': row[2], 'original_price': row[3],
-        'sale_price': row[4], 'image_url': row[5], 'store': row[6],
-        'country': row[7], 'shoe_link': row[8], 'lowest_price': row[9],
-        'lowest_price_uah': row[10], 'uah_price': row[11], 'active': bool(row[12])
-    } for row in cursor.fetchall()}
-    conn.close()
-    return data
-
-def load_shoe_data_from_json():
-    try:
-        with open(SHOE_DATA_FILE, 'r') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-async def save_shoe_data_bulk(shoes):
-    """Save multiple shoes to database in a single transaction."""
-    async def _operation(conn):
-        data = [(
-            s['key'], s['name'], s['unique_id'], s['original_price'], s['sale_price'], s['image_url'],
-            s['store'], s['country'], s.get('shoe_link', ''), s.get('lowest_price', ''), s.get('lowest_price_uah', 0.0),
-            s.get('uah_price', 0.0), 1 if s.get('active', True) else 0
-        ) for s in shoes]
-        await conn.executemany('''INSERT OR REPLACE INTO shoes (
-            key, name, unique_id, original_price, sale_price,
-            image_url, store, country, shoe_link, lowest_price,
-            lowest_price_uah, uah_price, active
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''', data)
-        await conn.commit()
-    
-    await db_operation_with_retry(_operation)
-
-async def async_save_shoe_data(shoe_data):
-    shoes = [dict(shoe, key=key) for key, shoe in shoe_data.items()]
-    await save_shoe_data_bulk(shoes)
-
-async def migrate_json_to_sqlite():
-    async def _operation(conn):
-        async with conn.execute('SELECT COUNT(*) FROM shoes') as cursor:
-            return (await cursor.fetchone())[0]
-    if await db_operation_with_retry(_operation) == 0:
-        data = load_shoe_data_from_json()
-        if data: await async_save_shoe_data(data)
-
-async def load_shoe_data():
-    create_tables()
-    await migrate_json_to_sqlite()
-    # load_shoe_data_from_db uses sync sqlite3; run it in a thread so the event loop stays responsive.
-    return await asyncio.to_thread(load_shoe_data_from_db)
-
-async def save_shoe_data(data):
-    await async_save_shoe_data(data)
+# Database functions now live in helpers/lyst/storage.py so the service lifecycle
+# can depend on one storage adapter instead of reaching into sqlite everywhere.
+create_tables = lyst_storage.create_tables
+db_operation_with_retry = lyst_storage.db_operation_with_retry
+is_shoe_processed = lyst_storage.is_shoe_processed
+mark_shoe_processed = lyst_storage.mark_shoe_processed
+load_shoe_data_from_db = lyst_storage.load_shoe_data_from_db
+load_shoe_data_from_json = lyst_storage.load_shoe_data_from_json
+save_shoe_data_bulk = lyst_storage.save_shoe_data_bulk
+async_save_shoe_data = lyst_storage.async_save_shoe_data
+migrate_json_to_sqlite = lyst_storage.migrate_json_to_sqlite
+load_shoe_data = lyst_storage.load_shoe_data
+save_shoe_data = lyst_storage.save_shoe_data
 
 # Web scraping and browser functions
 BLOCKED_RESOURCE_TYPES = {"media", "font", "stylesheet"}
@@ -2121,6 +2017,42 @@ def convert_to_uah(price, country, exchange_rates, name):
         logger.error(f"Error converting price '{price}' for '{name}' country '{country}': {e}")
         return EMPTY_CONVERSION_RESULT
 
+# Route runtime calls through the internal Lyst package so orchestration can stay here
+# while pricing and parsing logic live in cohesive modules with focused tests.
+ConversionResult = lyst_pricing_helpers.ConversionResult
+EMPTY_CONVERSION_RESULT = lyst_pricing_helpers.EMPTY_CONVERSION_RESULT
+extract_price = lyst_pricing_helpers.extract_price
+extract_price_tokens = lyst_pricing_helpers.extract_price_tokens
+_parse_price_amount = lyst_pricing_helpers.parse_price_amount
+calculate_sale_percentage = lyst_pricing_helpers.calculate_sale_percentage
+load_exchange_rates = lambda: lyst_pricing_helpers.load_exchange_rates(
+    exchange_rate_api_key=EXCHANGERATE_API_KEY,
+    exchange_rates_file=EXCHANGE_RATES_FILE,
+    logger=logger,
+)
+convert_to_uah = lambda price, country, exchange_rates, name: lyst_pricing_helpers.convert_to_uah(
+    price,
+    country,
+    exchange_rates,
+    name,
+    logger=logger,
+)
+_normalize_image_url = lyst_parsing_helpers.normalize_image_url
+_pick_src_from_srcset = lyst_parsing_helpers.pick_src_from_srcset
+_extract_image_url_from_tag = lyst_parsing_helpers.extract_image_url_from_tag
+_upgrade_lyst_image_url = lyst_parsing_helpers.upgrade_lyst_image_url
+_image_url_candidates = lyst_parsing_helpers.image_url_candidates
+find_price_strings = lyst_parsing_helpers.find_price_strings
+extract_ldjson_image_map = lyst_parsing_helpers.extract_ldjson_image_map
+extract_shoe_data = lambda card, country, image_fallback_map=None: lyst_parsing_helpers.extract_shoe_data(
+    card,
+    country,
+    logger=logger,
+    skipped_items=SKIPPED_ITEMS,
+    normalize_product_link=_normalize_lyst_product_link,
+    image_fallback_map=image_fallback_map,
+)
+
 # Message formatting and sending
 get_sale_emoji = lyst_runtime_helpers.get_sale_emoji
 build_shoe_message = lyst_runtime_helpers.build_shoe_message
@@ -2330,6 +2262,65 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
                 await asyncio.sleep(0)
     _touch_lyst_progress("process_shoes_done", removed_total=len(removed_shoes), new_total=new_shoe_count)
 
+# Keep Lyst state transitions in the internal package so the main module focuses on
+# run orchestration and resume flow, not per-item mutation rules.
+_merge_base_url_into_shoes = lambda result, base_url, country: lyst_processing_helpers.merge_base_url_into_shoes(
+    result,
+    base_url,
+    country,
+    logger=logger,
+)
+filter_duplicates = lambda shoes, exchange_rates: lyst_processing_helpers.filter_duplicates(
+    shoes,
+    exchange_rates,
+    country_priority=COUNTRY_PRIORITY,
+    convert_to_uah=convert_to_uah,
+)
+_shoe_key = lyst_processing_helpers.shoe_key
+_apply_new_shoe_state = lyst_processing_helpers.apply_new_shoe_state
+_apply_existing_shoe_state = lambda shoe, old_shoe, uah_sale, exchange_rates: lyst_processing_helpers.apply_existing_shoe_state(
+    shoe,
+    old_shoe,
+    uah_sale,
+    exchange_rates,
+    convert_to_uah=convert_to_uah,
+)
+_save_single_shoe = lambda key, shoe: lyst_processing_helpers.save_single_shoe(
+    key,
+    shoe,
+    save_shoe_data_bulk=save_shoe_data_bulk,
+)
+process_shoe = lambda shoe, old_data, message_queue, exchange_rates: lyst_processing_helpers.process_shoe(
+    shoe,
+    old_data,
+    message_queue,
+    exchange_rates,
+    is_shoe_processed=is_shoe_processed,
+    mark_shoe_processed=mark_shoe_processed,
+    save_shoe_data_bulk=save_shoe_data_bulk,
+    build_shoe_message=build_shoe_message,
+    calculate_sale_percentage=calculate_sale_percentage,
+    convert_to_uah=convert_to_uah,
+)
+process_all_shoes = lambda all_shoes, old_data, message_queue, exchange_rates: lyst_processing_helpers.process_all_shoes(
+    all_shoes,
+    old_data,
+    message_queue,
+    exchange_rates,
+    shoe_concurrency=LYST_SHOE_CONCURRENCY,
+    resolve_redirects=RESOLVE_REDIRECTS,
+    run_failed=LYST_RUN_FAILED,
+    logger=logger,
+    touch_progress=_touch_lyst_progress,
+    calculate_sale_percentage=calculate_sale_percentage,
+    convert_to_uah=convert_to_uah,
+    build_shoe_message=build_shoe_message,
+    is_shoe_processed=is_shoe_processed,
+    mark_shoe_processed=mark_shoe_processed,
+    save_shoe_data_bulk=save_shoe_data_bulk,
+    get_final_clear_link=get_final_clear_link,
+)
+
 def _scrape_target_url(base_url, page, use_pagination):
     return base_url['url'] if not use_pagination or page == 1 else f"{base_url['url']}&page={page}"
 
@@ -2537,7 +2528,7 @@ async def maintenance_loop(interval_s: int, *, service_health=None):
         started = time.perf_counter()
         try:
             # Serialize shoes.db maintenance with async writes to avoid lock contention.
-            async with DB_SEMAPHORE:
+            async with lyst_storage.db_semaphore:
                 await asyncio.to_thread(_db_maintenance_sync, [SHOES_DB_FILE])
         except Exception as exc:
             if service_health is not None:
