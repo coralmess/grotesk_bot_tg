@@ -89,6 +89,7 @@ class ServiceHealthReporter:
         self._status = "starting"
         self._note = ""
         self._operation_stats: dict[str, dict[str, Any]] = {}
+        self._service_state: dict[str, Any] = {}
         self._metrics_started = False
         self._registry = CollectorRegistry()
         self._service_up = Gauge(
@@ -185,6 +186,20 @@ class ServiceHealthReporter:
             self._heartbeat.labels(service=self._config.service_name).set(time.time())
             self._write_snapshot_locked()
 
+    def set_state_fields(self, **fields: Any) -> None:
+        # Service-specific runtime state lives here so health snapshots become the
+        # single source of truth instead of being split across parallel status files.
+        with self._lock:
+            for key, value in fields.items():
+                self._service_state[key] = value
+            self._write_snapshot_locked()
+
+    def clear_state_fields(self, *keys: str) -> None:
+        with self._lock:
+            for key in keys:
+                self._service_state.pop(key, None)
+            self._write_snapshot_locked()
+
     def record_success(self, operation: str, *, duration_seconds: Optional[float] = None, note: str = "") -> None:
         now_iso = utc_now_iso()
         service = self._config.service_name
@@ -271,6 +286,7 @@ class ServiceHealthReporter:
             "metrics_port": self._config.metrics_port,
             "heartbeat_interval_sec": self._config.heartbeat_interval_sec,
             "operation_stats": self._operation_stats,
+            "service_state": self._service_state,
         }
         _write_json_atomic(self._config.health_file, payload)
 

@@ -15,6 +15,7 @@ from helpers.runtime_paths import (
     MARKET_OLX_RUN_STATUS_FILE,
     MARKET_SHAFA_RUN_STATUS_FILE,
     LYST_RUN_STATUS_FILE,
+    service_health_file as runtime_service_health_file,
 )
 
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
@@ -39,6 +40,7 @@ LYST_RUN_HAD_ERRORS = False
 LYST_RUN_NOTES = []
 _LYST_RUN_STARTED_THIS_CYCLE = False
 LOGGER = logging.getLogger(__name__)
+service_health_file = runtime_service_health_file
 
 
 def _parse_utc_datetime(raw_value):
@@ -169,7 +171,61 @@ def _seed_status_from_legacy_if_needed() -> None:
 
 def read_all_service_statuses() -> dict[str, dict]:
     _seed_status_from_legacy_if_needed()
-    return {name: _read_service_status(path) for name, path in STATUS_FILES.items()}
+    statuses = {name: _read_service_status(path) for name, path in STATUS_FILES.items()}
+    market_snapshot = _read_health_snapshot("grotesk-market")
+    if market_snapshot:
+        _merge_market_health_snapshot(statuses, market_snapshot)
+    lyst_snapshot = _read_health_snapshot("grotesk-lyst")
+    if lyst_snapshot:
+        _merge_lyst_health_snapshot(statuses, lyst_snapshot)
+    return statuses
+
+
+def _read_health_snapshot(service_name: str) -> dict | None:
+    path = service_health_file(service_name)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOGGER.warning("Failed to read health snapshot from %s: %s", path, exc)
+        return None
+
+
+def _merge_market_health_snapshot(statuses: dict[str, dict], snapshot: dict) -> None:
+    operation_stats = snapshot.get("operation_stats") or {}
+    _apply_operation_status(statuses["olx"], operation_stats.get("olx_run"))
+    _apply_operation_status(statuses["shafa"], operation_stats.get("shafa_run"))
+
+
+def _apply_operation_status(status: dict, operation_snapshot: dict | None) -> None:
+    if not isinstance(operation_snapshot, dict):
+        return
+    last_success = _parse_utc_datetime(operation_snapshot.get("last_success_utc"))
+    last_failure = _parse_utc_datetime(operation_snapshot.get("last_failure_utc"))
+    if last_success and (not last_failure or last_success >= last_failure):
+        status["last_run_end_utc"] = last_success
+        status["last_run_ok"] = True
+        status["last_run_note"] = operation_snapshot.get("last_note") or ""
+    elif last_failure:
+        status["last_run_end_utc"] = last_failure
+        status["last_run_ok"] = False
+        status["last_run_note"] = operation_snapshot.get("last_error") or ""
+
+
+def _merge_lyst_health_snapshot(statuses: dict[str, dict], snapshot: dict) -> None:
+    service_state = snapshot.get("service_state") or {}
+    lyst = statuses["lyst"]
+    if service_state:
+        lyst["last_run_start_utc"] = _parse_utc_datetime(service_state.get("lyst_last_run_start_utc"))
+        lyst["last_run_end_utc"] = _parse_utc_datetime(service_state.get("lyst_last_run_end_utc"))
+        last_run_ok = service_state.get("lyst_last_run_ok")
+        lyst["last_run_ok"] = last_run_ok if isinstance(last_run_ok, bool) else None
+        lyst["last_run_note"] = service_state.get("lyst_last_run_note") or snapshot.get("note") or ""
+        return
+    _apply_operation_status(lyst, (snapshot.get("operation_stats") or {}).get("lyst_run"))
+    if snapshot.get("note") and not lyst["last_run_note"]:
+        lyst["last_run_note"] = snapshot.get("note") or ""
 
 
 def save_last_runs_to_file():

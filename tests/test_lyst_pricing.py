@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers.lyst import pricing
 
@@ -33,4 +35,18 @@ class LystPricingTests(unittest.TestCase):
                 exchange_rates_file=path,
                 logger=self.logger,
             )
+        self.assertEqual(rates["USD"], 0.025)
+
+    def test_async_load_exchange_rates_uses_fresh_cache_without_network(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rates.json"
+            path.write_text('{"last_update":"2026-04-21T10:00:00","rates":{"EUR":0.04,"USD":0.025,"GBP":0.03}}', encoding="utf-8")
+            with mock.patch.object(pricing, "async_update_exchange_rates", side_effect=AssertionError("network not expected")):
+                rates = asyncio.run(
+                    pricing.async_load_exchange_rates(
+                        exchange_rate_api_key="unused",
+                        exchange_rates_file=path,
+                        logger=self.logger,
+                    )
+                )
         self.assertEqual(rates["USD"], 0.025)

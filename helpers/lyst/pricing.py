@@ -6,7 +6,7 @@ from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
 
-import requests
+import aiohttp
 
 
 ConversionResult = namedtuple("ConversionResult", ["uah_amount", "exchange_rate", "currency_symbol"])
@@ -139,6 +139,10 @@ def calculate_sale_percentage(original_price: str, sale_price: str, country: str
 
 
 def update_exchange_rates(*, exchange_rate_api_key: str, exchange_rates_file: Path, logger):
+    # Keep the sync wrapper only as a compatibility shim while callers migrate to
+    # the async loader. The real runtime path should use async_update_exchange_rates.
+    import requests
+
     try:
         resp = requests.get(
             f"https://v6.exchangerate-api.com/v6/{exchange_rate_api_key}/latest/UAH",
@@ -155,14 +159,29 @@ def update_exchange_rates(*, exchange_rate_api_key: str, exchange_rates_file: Pa
         return None
 
 
+async def async_update_exchange_rates(*, exchange_rate_api_key: str, exchange_rates_file: Path, logger):
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"https://v6.exchangerate-api.com/v6/{exchange_rate_api_key}/latest/UAH"
+            ) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        rates = {k: payload["conversion_rates"][k] for k in ("EUR", "USD", "GBP")}
+        with exchange_rates_file.open("w", encoding="utf-8") as handle:
+            json.dump({"last_update": datetime.now().isoformat(), "rates": rates}, handle)
+        return rates
+    except Exception as exc:
+        logger.error("Error updating exchange rates: %s", exc)
+        return None
+
+
 def load_exchange_rates(*, exchange_rate_api_key: str, exchange_rates_file: Path, logger):
     cached_rates = None
+    is_fresh = False
     try:
-        with exchange_rates_file.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        cached_rates = data.get("rates")
-        last_update = data.get("last_update")
-        is_fresh = bool(last_update) and (datetime.now() - datetime.fromisoformat(last_update)).days < 1
+        cached_rates, is_fresh = _load_cached_exchange_rates(exchange_rates_file)
         if is_fresh and cached_rates:
             return cached_rates
     except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
@@ -179,6 +198,40 @@ def load_exchange_rates(*, exchange_rate_api_key: str, exchange_rates_file: Path
         logger.warning("Using cached exchange rates due to update failure")
         return cached_rates
     return {"EUR": 1, "USD": 1, "GBP": 1}
+
+
+async def async_load_exchange_rates(*, exchange_rate_api_key: str, exchange_rates_file: Path, logger):
+    cached_rates = None
+    is_fresh = False
+    try:
+        cached_rates, is_fresh = _load_cached_exchange_rates(exchange_rates_file)
+        if is_fresh and cached_rates:
+            return cached_rates
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
+        cached_rates = None
+
+    updated = await async_update_exchange_rates(
+        exchange_rate_api_key=exchange_rate_api_key,
+        exchange_rates_file=exchange_rates_file,
+        logger=logger,
+    )
+    if updated:
+        return updated
+    if cached_rates:
+        logger.warning("Using cached exchange rates due to update failure")
+        return cached_rates
+    return {"EUR": 1, "USD": 1, "GBP": 1}
+
+
+def _load_cached_exchange_rates(exchange_rates_file: Path):
+    with exchange_rates_file.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    cached_rates = data.get("rates")
+    last_update = data.get("last_update")
+    # The bot treats FX cache freshness as a calendar-day safeguard, not a strict
+    # 24-hour SLA, so a previous-day cache is still acceptable before re-fetching.
+    is_fresh = bool(last_update) and (datetime.now() - datetime.fromisoformat(last_update)).days <= 1
+    return cached_rates, is_fresh
 
 
 def convert_to_uah(price: str, country: str, exchange_rates: dict, name: str, *, logger) -> ConversionResult:

@@ -5,7 +5,10 @@ import random
 import re
 import urllib.parse
 
-import requests
+from bs4 import BeautifulSoup
+
+from helpers.lyst.http_client import AsyncLystHttpClient
+from helpers.lyst.models import FetchResult, FetchStatus
 
 
 class LystHttpTerminalPage(Exception):
@@ -84,38 +87,14 @@ def fetch_lyst_http_content(
     headers: dict,
     logger,
 ):
-    # All remaining sync requests usage is isolated here so the async Lyst flow
-    # can call it through explicit thread offload instead of blocking the loop.
-    if request_jitter_sec > 0:
-        time_to_sleep = random.uniform(0, request_jitter_sec)
-        if time_to_sleep > 0:
-            import time
-
-            time.sleep(time_to_sleep)
-    base_url = http_base_url(url)
-    with requests.Session() as session:
-        session.headers.update({"User-Agent": user_agent, **headers})
-        for attempt in range(cloudflare_retry_count + 1):
-            response = session.get(base_url, timeout=timeout_sec, allow_redirects=True)
-            if response.status_code == 410:
-                raise LystHttpTerminalPage(response.text)
-            response.raise_for_status()
-            content = response.text
-            if is_cloudflare_challenge(content):
-                if attempt >= cloudflare_retry_count:
-                    raise RuntimeError("lyst_cloudflare_http")
-                if cloudflare_retry_delay_sec > 0:
-                    import time
-
-                    time.sleep(cloudflare_retry_delay_sec)
-                continue
-            return content
-    logger.warning(f"LYST HTTP returned no content for {url}")
-    return None
+    # The old sync helper is intentionally retired so callers cannot silently fall
+    # back to requests-based blocking I/O after the async transport refactor.
+    raise RuntimeError("fetch_lyst_http_content retired; use fetch_http_page")
 
 
 async def get_page_content_http(
     url: str,
+    country: str = "US",
     *,
     timeout_sec: int,
     request_jitter_sec: float,
@@ -125,9 +104,9 @@ async def get_page_content_http(
     headers: dict,
     logger,
 ):
-    return await asyncio.to_thread(
-        fetch_lyst_http_content,
+    result = await fetch_http_page(
         url,
+        country=country,
         timeout_sec=timeout_sec,
         request_jitter_sec=request_jitter_sec,
         cloudflare_retry_count=cloudflare_retry_count,
@@ -136,6 +115,11 @@ async def get_page_content_http(
         headers=headers,
         logger=logger,
     )
+    if result.status == FetchStatus.TERMINAL:
+        raise LystHttpTerminalPage(result.content or "")
+    if not result.is_ok:
+        raise RuntimeError(result.extra.get("error") or "http_only_unusable_response")
+    return result.content
 
 
 def is_target_closed_error(exc: Exception) -> bool:
@@ -154,3 +138,114 @@ def is_pipe_closed_error(exc: Exception) -> bool:
         return False
     lowered = msg.lower()
     return "pipe closed" in lowered or "os.write(pipe, data)" in lowered or "epipe" in lowered
+
+
+async def fetch_http_page(
+    url: str,
+    *,
+    country: str,
+    timeout_sec: int,
+    request_jitter_sec: float,
+    cloudflare_retry_count: int,
+    cloudflare_retry_delay_sec: float,
+    user_agent: str,
+    headers: dict,
+    logger,
+    http_client: AsyncLystHttpClient | None = None,
+) -> FetchResult:
+    # All HTTP fetching is routed through the async client so the Lyst runtime no
+    # longer blocks the event loop waiting on requests.Session or requests.get.
+    owns_client = http_client is None
+    client = http_client or AsyncLystHttpClient(
+        timeout_sec=timeout_sec,
+        user_agent=user_agent,
+        default_headers=headers,
+        request_jitter_sec=0.0,
+    )
+    last_error = ""
+    variants = (False, True)
+    try:
+        for warm_home in variants:
+            for _ in range(2):
+                if request_jitter_sec > 0:
+                    await asyncio.sleep(random.uniform(0, request_jitter_sec))
+                try:
+                    response = await client.fetch_text(url, country, warm_home=warm_home)
+                except Exception as exc:
+                    last_error = str(exc)
+                    continue
+                status_code = response.status_code
+                content = response.text
+                if status_code == 410:
+                    return FetchResult(status=FetchStatus.TERMINAL, content=content, final_url=response.final_url)
+                if is_cloudflare_challenge(content) or status_code in (403, 429):
+                    for _ in range(cloudflare_retry_count):
+                        await asyncio.sleep(cloudflare_retry_delay_sec)
+                        response = await client.fetch_text(url, country, warm_home=warm_home)
+                        status_code = response.status_code
+                        content = response.text
+                        if not (is_cloudflare_challenge(content) or status_code in (403, 429)):
+                            break
+                    if is_cloudflare_challenge(content) or status_code in (403, 429):
+                        return FetchResult(
+                            status=FetchStatus.CLOUDFLARE,
+                            content=content,
+                            final_url=response.final_url,
+                            extra={"error": f"cloudflare_{status_code}"},
+                        )
+                if status_code >= 400:
+                    last_error = f"http_status_{status_code}"
+                    continue
+                if not content.strip():
+                    last_error = "empty_response"
+                    continue
+                if not http_content_has_product_cards(content):
+                    last_error = "http_only_missing_product_cards"
+                    continue
+                return FetchResult(
+                    status=FetchStatus.OK,
+                    content=content,
+                    final_url=response.final_url,
+                    extra={"source": "http"},
+                )
+        logger.warning("LYST HTTP returned no usable content for %s", url)
+        return FetchResult(status=FetchStatus.FAILED, extra={"error": last_error or "http_only_unusable_response"})
+    finally:
+        if owns_client:
+            await client.close()
+
+
+async def fetch_browser_page(*args, **kwargs) -> FetchResult:
+    # Browser fetching stays owned by the orchestrator until the Playwright path is
+    # fully extracted, but the typed return contract is established here already.
+    raise NotImplementedError("browser fetch remains orchestrator-owned")
+
+
+async def get_soup_and_content(
+    url: str,
+    *,
+    country: str,
+    timeout_sec: int,
+    request_jitter_sec: float,
+    cloudflare_retry_count: int,
+    cloudflare_retry_delay_sec: float,
+    user_agent: str,
+    headers: dict,
+    logger,
+    http_client: AsyncLystHttpClient | None = None,
+):
+    result = await fetch_http_page(
+        url,
+        country=country,
+        timeout_sec=timeout_sec,
+        request_jitter_sec=request_jitter_sec,
+        cloudflare_retry_count=cloudflare_retry_count,
+        cloudflare_retry_delay_sec=cloudflare_retry_delay_sec,
+        user_agent=user_agent,
+        headers=headers,
+        logger=logger,
+        http_client=http_client,
+    )
+    if not result.content:
+        return None, None, result
+    return BeautifulSoup(result.content, "lxml"), result.content, result
