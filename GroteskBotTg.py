@@ -4,7 +4,6 @@ from telegram.constants import ParseMode
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
@@ -17,14 +16,24 @@ from GroteskBotStatus import (
     finalize_lyst_run,
 )
 from helpers.dynamic_sources import add_dynamic_url, detect_source
-from helpers import image_pipeline as image_pipeline_helpers
 from helpers import lyst_identity as lyst_identity_helpers
-from helpers import lyst_runtime as lyst_runtime_helpers
 from helpers import telegram_runtime as telegram_runtime_helpers
 from helpers import lyst_state as lyst_state_helpers
+from helpers.lyst import diagnostics as lyst_diagnostics_helpers
+from helpers.lyst import fetch as lyst_fetch_helpers
+from helpers.lyst import media as lyst_media_helpers
+from helpers.lyst import notify as lyst_notify_helpers
+from helpers.lyst import cycle as lyst_cycle_helpers
 from helpers.lyst import parsing as lyst_parsing_helpers
 from helpers.lyst import pricing as lyst_pricing_helpers
 from helpers.lyst import processing as lyst_processing_helpers
+from helpers.lyst.browser import (
+    BrowserPool,
+    LystContextPool,
+    create_country_context as lyst_create_country_context,
+    launch_browser as lyst_launch_browser,
+)
+from helpers.lyst.resume import LystResumeController
 from helpers.lyst.storage import LystStorage
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC
 from config_lyst import (
@@ -265,129 +274,36 @@ special_logger = SpecialLogger()
 for level_name, level_num in [("STAT", 35), ("GOOD", 25), ("LIGHTBLUE_INFO", 22)]:
     logging.addLevelName(level_num, level_name)
 
-class BrowserPool:
-    def __init__(self, max_browsers=6):
-        self.max_browsers, self._semaphore = max_browsers, Semaphore(max_browsers)
-        self._playwright, self._browser_type = None, None
-
-    async def init(self):
-        if not self._playwright:
-            self._playwright = await async_playwright().start()
-            self._browser_type = self._playwright.chromium
-
-    async def close(self):
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-
-    async def get_browser(self):
-        await self.init()
-        await self._semaphore.acquire()
-        browser = await _launch_browser(self._browser_type)
-        return BrowserWrapper(browser, self._semaphore)
-
-class BrowserWrapper:
-    def __init__(self, browser, semaphore):
-        self.browser, self._semaphore = browser, semaphore
-
-    async def __aenter__(self):
-        return self.browser
-
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        await self.browser.close()
-        self._semaphore.release()
-
-browser_pool = BrowserPool(max_browsers=LYST_MAX_BROWSERS)
-
-class LystContextPool:
-    def __init__(self):
-        self._playwright = None
-        self._browser = None
-        self._contexts = {}
-        self._context_init_locks = {}
-        self._country_semaphores = {}
-        self._init_lock = asyncio.Lock()
-
-    async def init(self):
-        async with self._init_lock:
-            if self._playwright:
-                return
-            self._playwright = await async_playwright().start()
-            self._browser = await _launch_browser(self._playwright.chromium)
-
-    def get_country_semaphore(self, country):
-        sem = self._country_semaphores.get(country)
-        if sem is None:
-            sem = asyncio.Semaphore(LYST_COUNTRY_CONCURRENCY)
-            self._country_semaphores[country] = sem
-        return sem
-
-    async def get_context(self, country):
-        await self.init()
-        lock = self._context_init_locks.get(country)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._context_init_locks[country] = lock
-        async with lock:
-            ctx = self._contexts.get(country)
-            if ctx is not None:
-                return ctx, True
-            ctx = await _create_lyst_country_context(self._browser, country)
-            self._contexts[country] = ctx
-            return ctx, False
-
-    async def reset_context(self, country):
-        ctx = self._contexts.pop(country, None)
-        if ctx is None:
-            return
-        try:
-            await ctx.close()
-        except Exception:
-            pass
-
-    async def reset_browser(self):
-        try:
-            for ctx in list(self._contexts.values()):
-                try:
-                    await ctx.close()
-                except Exception:
-                    pass
-            self._contexts.clear()
-        except Exception:
-            pass
-        try:
-            if self._browser:
-                await self._browser.close()
-        except Exception:
-            pass
-        self._browser = await _launch_browser(self._playwright.chromium)
-
-lyst_context_pool = LystContextPool()
-
-# Helper functions
 async def _launch_browser(browser_type):
-    return await browser_type.launch(
-        headless=not LIVE_MODE,
-        args=BROWSER_LAUNCH_ARGS,
+    return await lyst_launch_browser(
+        browser_type,
+        live_mode=LIVE_MODE,
+        browser_launch_args=BROWSER_LAUNCH_ARGS,
     )
 
 async def _create_lyst_country_context(browser, country):
-    storage_state_path = lyst_identity_helpers.country_storage_state_path(country)
-    context_kwargs = {
-        "user_agent": STEALTH_UA,
-        "locale": "en-US",
-        "timezone_id": "Europe/Kyiv",
-        "extra_http_headers": STEALTH_HEADERS,
-    }
-    if storage_state_path.exists():
-        context_kwargs["storage_state"] = str(storage_state_path)
-    ctx = await browser.new_context(
-        **context_kwargs,
+    return await lyst_create_country_context(
+        browser,
+        country,
+        storage_state_path=lyst_identity_helpers.country_storage_state_path(country),
+        stealth_user_agent=STEALTH_UA,
+        stealth_headers=STEALTH_HEADERS,
+        stealth_script=STEALTH_SCRIPT,
+        persist_storage_state=lambda c, ctx: lyst_identity_helpers.persist_context_storage_state(c, ctx, logger),
     )
-    await ctx.add_init_script(STEALTH_SCRIPT)
-    await ctx.add_cookies([{'name': 'country', 'value': country, 'domain': '.lyst.com', 'path': '/'}])
-    await lyst_identity_helpers.persist_context_storage_state(country, ctx, logger)
-    return ctx
+
+
+# Browser lifecycle moved behind helpers/lyst/browser.py so the service entrypoint
+# keeps dependency wiring and not the Playwright pooling implementation.
+browser_pool = BrowserPool(
+    max_browsers=LYST_MAX_BROWSERS,
+    launch_browser=_launch_browser,
+)
+lyst_context_pool = LystContextPool(
+    launch_browser=_launch_browser,
+    create_country_context=_create_lyst_country_context,
+    country_concurrency=LYST_COUNTRY_CONCURRENCY,
+)
 
 # Compiled once because link cleanup runs for many outgoing messages.
 DISPLAY_LINK_PREFIX_RE = re.compile(r'^(https?://)?(www\.)?', re.IGNORECASE)
@@ -396,82 +312,80 @@ def clean_link_for_display(link):
     cleaned_link = DISPLAY_LINK_PREFIX_RE.sub('', link or "")
     return (cleaned_link[:22] + '...') if len(cleaned_link) > 25 else cleaned_link
 
+resume_controller = LystResumeController(
+    resume_file=LYST_RESUME_FILE,
+    kyiv_tz=KYIV_TZ,
+    logger=logger,
+    abort_event=LYST_ABORT_EVENT,
+    resume_lock=LYST_RESUME_LOCK,
+)
+
+
 def _resume_key(base_url, country):
-    return f"{base_url['url_name']}|{country}"
+    return resume_controller.resume_key(base_url, country)
 
 def _now_kyiv_str():
-    return datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
+    return resume_controller.now_kyiv_str()
 
 def _write_json_atomic(path: Path, payload):
     # Delegated to shared helper to keep one atomic-write implementation across bot modules.
     lyst_state_helpers._write_json_atomic(path, payload)
 
 def load_lyst_resume_state():
-    return lyst_state_helpers.load_resume_state(resume_file=LYST_RESUME_FILE, logger=logger)
+    global LYST_RESUME_STATE
+    LYST_RESUME_STATE = resume_controller.load_state()
+    return LYST_RESUME_STATE
 
 def save_lyst_resume_state(state):
-    lyst_state_helpers.save_resume_state(resume_file=LYST_RESUME_FILE, state=state, logger=logger)
+    global LYST_RESUME_STATE
+    LYST_RESUME_STATE = state
+    resume_controller.state = state
+    resume_controller.save_state()
 
 async def update_lyst_resume_entry(key, **fields):
-    await lyst_state_helpers.update_resume_entry(
-        resume_lock=LYST_RESUME_LOCK,
-        resume_state=LYST_RESUME_STATE,
-        key=key,
-        fields=fields,
-        now_kyiv_str_fn=_now_kyiv_str,
-        save_state_fn=save_lyst_resume_state,
-    )
+    resume_controller.state = LYST_RESUME_STATE
+    await resume_controller.update_entry(key, **fields)
 
 def init_lyst_resume_state():
     global LYST_RESUME_STATE, LYST_RUN_FAILED, LYST_RUN_PROGRESS, LYST_CYCLE_STARTED_IN_RESUME, LYST_RESUME_ENTRY_OUTCOMES
-    # Wrapper keeps old API while shared helper owns the state-reset rules.
     loaded_state = load_lyst_resume_state()
-    LYST_RESUME_STATE, LYST_RUN_FAILED, LYST_RUN_PROGRESS = lyst_state_helpers.init_resume_state(
-        loaded_state=loaded_state,
-        abort_event=LYST_ABORT_EVENT,
-    )
+    resume_controller.state = loaded_state
+    # The controller now owns resume-state rules so GroteskBotTg only coordinates
+    # run-level globals while the package owns persistence transitions.
+    LYST_RESUME_STATE = resume_controller.init_run(loaded_state)
+    LYST_RUN_FAILED = False
+    LYST_RUN_PROGRESS = {}
     LYST_CYCLE_STARTED_IN_RESUME = bool(LYST_RESUME_STATE.get("resume_active", False))
     LYST_RESUME_ENTRY_OUTCOMES = {}
 
 async def mark_lyst_run_failed(reason: str):
     global LYST_RUN_FAILED
-    LYST_RUN_FAILED = await lyst_state_helpers.mark_run_failed(
-        reason=reason,
-        resume_lock=LYST_RESUME_LOCK,
-        resume_state=LYST_RESUME_STATE,
-        run_progress=LYST_RUN_PROGRESS,
-        now_kyiv_str_fn=_now_kyiv_str,
-        save_state_fn=save_lyst_resume_state,
-        abort_event=LYST_ABORT_EVENT,
-    )
+    resume_controller.state = LYST_RESUME_STATE
+    LYST_RUN_FAILED = await resume_controller.mark_run_failed(reason, LYST_RUN_PROGRESS)
 
 def log_lyst_run_progress_summary():
-    lyst_state_helpers.log_run_progress_summary(run_progress=LYST_RUN_PROGRESS, logger=logger)
+    resume_controller.log_run_progress_summary(LYST_RUN_PROGRESS)
 
 async def finalize_lyst_resume_after_processing():
-    await lyst_state_helpers.finalize_resume_after_processing(
-        resume_lock=LYST_RESUME_LOCK,
-        resume_state=LYST_RESUME_STATE,
-        run_failed=LYST_RUN_FAILED,
-        save_state_fn=save_lyst_resume_state,
-    )
+    resume_controller.state = LYST_RESUME_STATE
+    await resume_controller.finalize_after_processing(run_failed=LYST_RUN_FAILED)
 
 def load_font(font_size, prefer_heavy=False):
-    return image_pipeline_helpers.load_font(
+    return lyst_media_helpers.load_font(
         font_size,
         fonts_dir=Path(__file__).with_name("fonts"),
         prefer_heavy=prefer_heavy,
     )
 
 def _ensure_edsr_weights():
-    return image_pipeline_helpers._ensure_edsr_weights(
+    return lyst_media_helpers.ensure_edsr_weights(
         model_path=EDSR_MODEL_PATH,
         model_url=EDSR_MODEL_URL,
         logger=logger,
     )
 
 def _get_edsr_superres():
-    return image_pipeline_helpers._get_edsr_superres(
+    return lyst_media_helpers.get_edsr_superres(
         cv2_module=cv2,
         model_path=EDSR_MODEL_PATH,
         model_url=EDSR_MODEL_URL,
@@ -479,7 +393,7 @@ def _get_edsr_superres():
     )
 
 def _upscale_with_edsr(pil_img):
-    return image_pipeline_helpers._upscale_with_edsr(
+    return lyst_media_helpers.upscale_with_edsr(
         pil_img,
         cv2_module=cv2,
         np_module=np,
@@ -489,14 +403,15 @@ def _upscale_with_edsr(pil_img):
     )
 
 def _fetch_image_bytes(image_url: str) -> bytes:
-    return image_pipeline_helpers._fetch_image_bytes(
+    return lyst_media_helpers.fetch_image_bytes(
         image_url,
         image_url_candidates_fn=_image_url_candidates,
     )
 
 def process_image(image_url, uah_price, sale_percentage):
-    # Shared image rendering/compression pipeline extracted to helper for easier testing.
-    return image_pipeline_helpers.process_image(
+    # Image rendering now sits behind helpers/lyst/media.py so Telegram sending
+    # does not own compression, font, or upscaling decisions directly.
+    return lyst_media_helpers.process_image(
         image_url,
         uah_price,
         sale_percentage,
@@ -543,67 +458,30 @@ BLOCKED_URL_PARTS = (
 )
 
 async def handle_route(route):
-    url = route.request.url
-    resource_type = route.request.resource_type
-    if resource_type in BLOCKED_RESOURCE_TYPES or any(part in url for part in BLOCKED_URL_PARTS):
-        await route.abort()
-    else:
-        await route.continue_()
+    await lyst_fetch_helpers.handle_route(
+        route,
+        blocked_resource_types=BLOCKED_RESOURCE_TYPES,
+        blocked_url_parts=BLOCKED_URL_PARTS,
+    )
 
 async def normalize_lazy_images(page):
-    # Promote lazy-load attributes into src/srcset so HTML contains image URLs
-    await page.evaluate("""
-        () => {
-            const attrs = [
-                {from: 'data-src', to: 'src'},
-                {from: 'data-lazy-src', to: 'src'},
-                {from: 'data-srcset', to: 'srcset'},
-                {from: 'data-lazy-srcset', to: 'srcset'},
-            ];
-            document.querySelectorAll('img').forEach(img => {
-                attrs.forEach(({from, to}) => {
-                    const val = img.getAttribute(from);
-                    if (val && !img.getAttribute(to)) {
-                        img.setAttribute(to, val);
-                    }
-                });
-            });
-        }
-    """)
+    await lyst_fetch_helpers.normalize_lazy_images(page)
 
 def is_cloudflare_challenge(content: str) -> bool:
-    if not content:
-        return False
-    lowered = content.lower()
-    if "cloudflare" in lowered and ("just a moment" in lowered or "checking your browser" in lowered):
-        return True
-    if "cf-challenge" in lowered or "cf_challenge" in lowered or "cf-turnstile" in lowered:
-        return True
-    if "<title>just a moment" in lowered or "<title>attention required" in lowered:
-        return True
-    return False
+    return lyst_fetch_helpers.is_cloudflare_challenge(content)
 
-class LystHttpTerminalPage(Exception):
+class LystHttpTerminalPage(lyst_fetch_helpers.LystHttpTerminalPage):
     def __init__(self, status_code: int, content: str = ""):
-        super().__init__(f"http_only_terminal_status_{status_code}")
+        super().__init__(content or "")
         self.status_code = status_code
-        self.content = content or ""
 
 
 def _lyst_http_base_url(url: str) -> str:
-    parsed = urllib.parse.urlsplit(url)
-    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
-    filtered_query = [(key, value) for key, value in query if key.lower() != "page"]
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(filtered_query, doseq=True), "")
-    )
+    return lyst_fetch_helpers.http_base_url(url)
 
 
 def _lyst_http_content_has_product_cards(content: str) -> bool:
-    if not content:
-        return False
-    lowered = content.lower()
-    return 'data-testid="product-card"' in lowered or "data-testid='product-card'" in lowered or "_693owt3" in content
+    return lyst_fetch_helpers.http_content_has_product_cards(content)
 
 
 def _fetch_lyst_http_content(url: str, country: str, variant: str = "direct"):
@@ -843,52 +721,35 @@ async def scroll_page(page, max_attempts=None):
             await asyncio.sleep(SCROLL_PAUSE_TIME)
 
 def is_target_closed_error(exc: Exception) -> bool:
-    try:
-        if exc.__class__.__name__ == "TargetClosedError":
-            return True
-    except Exception:
-        pass
-    msg = str(exc)
-    return "Target page, context or browser has been closed" in msg or "TargetClosedError" in msg
+    return lyst_fetch_helpers.is_target_closed_error(exc)
 
 def is_pipe_closed_error(exc: Exception) -> bool:
-    msg = str(exc)
-    if not msg:
-        return False
-    lowered = msg.lower()
-    return "pipe closed" in lowered or "os.write(pipe, data)" in lowered or "epipe" in lowered
+    return lyst_fetch_helpers.is_pipe_closed_error(exc)
 
 def _lyst_url_suffix(url_name=None, page_num=None):
-    if url_name or page_num is not None:
-        return f" | url_name={url_name or ''} page={page_num if page_num is not None else ''}"
-    return ""
+    return lyst_diagnostics_helpers.url_suffix(url_name=url_name, page_num=page_num)
 
 def _lyst_page_progress_data(url, country, url_name=None, page_num=None, attempt=None):
-    data = {
-        "url": url,
-        "country": country,
-        "url_name": url_name,
-        "page_num": page_num,
-    }
-    if attempt is not None:
-        data["attempt"] = attempt
-    return data
+    return lyst_diagnostics_helpers.page_progress_data(
+        url,
+        country,
+        url_name=url_name,
+        page_num=page_num,
+        attempt=attempt,
+    )
 
 def _mark_lyst_page_step(step, url, country, url_name=None, page_num=None, attempt=None):
     _touch_lyst_progress(step, **_lyst_page_progress_data(url, country, url_name, page_num, attempt))
     logger.info(f"LYST step={step} url={url}")
 
 def _safe_page_final_url(page):
-    try:
-        return page.url
-    except Exception:
-        return None
+    return lyst_diagnostics_helpers.safe_page_final_url(page)
 
 def _lyst_debug_snapshot(page):
-    return (
-        datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S'),
-        tail_log_lines(BOT_LOG_FILE, line_count=200),
-        _safe_page_final_url(page),
+    return lyst_diagnostics_helpers.debug_snapshot(
+        page=page,
+        kyiv_tz=KYIV_TZ,
+        log_lines_func=lambda: tail_log_lines(BOT_LOG_FILE, line_count=200),
     )
 
 async def _dump_lyst_debug_event_safe(
@@ -906,28 +767,23 @@ async def _dump_lyst_debug_event_safe(
     content=None,
     shield=False,
 ):
-    now_kyiv, log_lines, final_url = _lyst_debug_snapshot(page)
-    payload = dict(
-        reason=reason,
-        url=url,
-        country=country,
-        url_name=url_name,
-        page_num=page_num,
-        step=step,
-        page=page,
-        now_kyiv=now_kyiv,
-        log_lines=log_lines,
-        extra_lines=debug_events,
-        context_lines=context_lines,
-        final_url=final_url,
-    )
-    if content is not None:
-        payload["content"] = content
     try:
-        if shield:
-            await asyncio.shield(dump_lyst_debug_event(prefix, **payload))
-        else:
-            await dump_lyst_debug_event(prefix, **payload)
+        await lyst_diagnostics_helpers.dump_debug_event_safe(
+            prefix,
+            reason=reason,
+            url=url,
+            country=country,
+            url_name=url_name,
+            page_num=page_num,
+            step=step,
+            page=page,
+            debug_events=debug_events,
+            context_lines=context_lines,
+            kyiv_tz=KYIV_TZ,
+            log_lines_func=lambda: tail_log_lines(BOT_LOG_FILE, line_count=200),
+            content=content,
+            shield=shield,
+        )
     except Exception:
         pass
 
@@ -1248,6 +1104,8 @@ def extract_embedded_url(url):
 
 def _touch_lyst_progress(step: str | None = None, **details):
     global LYST_LAST_PROGRESS_TS, LYST_LAST_STEP_INFO
+    # Progress bookkeeping now flows through helpers/lyst/diagnostics.py so the
+    # fetch and cycle layers can share one snapshot format during extraction.
     LYST_LAST_PROGRESS_TS, info = lyst_state_helpers.touch_progress(
         step=step,
         details=details,
@@ -1257,16 +1115,16 @@ def _touch_lyst_progress(step: str | None = None, **details):
         LYST_LAST_STEP_INFO = info
 
 def _lyst_step_snapshot():
-    return lyst_state_helpers.step_snapshot(LYST_LAST_STEP_INFO)
+    return lyst_diagnostics_helpers.step_snapshot(LYST_LAST_STEP_INFO)
 
 def _format_task_stack(task):
-    return lyst_state_helpers.format_task_stack(task)
+    return lyst_diagnostics_helpers.format_task_stack(task)
 
 def _format_tasks_snapshot(limit=10):
-    return lyst_state_helpers.format_tasks_snapshot(file_hint="GroteskBotTg.py", limit=limit)
+    return lyst_diagnostics_helpers.format_tasks_snapshot(file_hint="GroteskBotTg.py", limit=limit)
 
 def _describe_task_wait_chain(task, max_depth=6):
-    return lyst_state_helpers.describe_task_wait_chain(task, max_depth=max_depth)
+    return lyst_diagnostics_helpers.describe_task_wait_chain(task, max_depth=max_depth)
 
 async def get_final_clear_link(initial_url, semaphore, item_name, country, current_item, total_items):
     logger.info(f"Processing final link for {item_name} | Country: {country} | Progress: {current_item}/{total_items}")
@@ -1343,9 +1201,7 @@ CURRENCY_MARKERS = tuple(
 )
 
 def extract_price(price_str):
-    price_num = re.sub(r'[^\d.]', '', price_str)
-    try: return float(price_num)
-    except ValueError: return 0
+    return lyst_pricing_helpers.extract_price(price_str)
 
 def _normalize_currency_token(token: str) -> str:
     value = (token or "").replace("\xa0", "").strip()
@@ -1953,112 +1809,40 @@ def calculate_sale_percentage(original_price, sale_price, country):
         return 0
 
 def load_exchange_rates():
-    cached_rates = None
-    try:
-        with open(EXCHANGE_RATES_FILE, 'r') as f:
-            data = json.load(f)
-        cached_rates = data.get('rates')
-        last_update = data.get('last_update')
-        is_fresh = bool(last_update) and (datetime.now() - datetime.fromisoformat(last_update)).days < 1
-        if is_fresh and cached_rates:
-            return cached_rates
-    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
-        cached_rates = None
-    updated = update_exchange_rates()
-    if updated:
-        return updated
-    if cached_rates:
-        logger.warning("Using cached exchange rates due to update failure")
-        return cached_rates
-    return {'EUR': 1, 'USD': 1, 'GBP': 1}
+    return lyst_pricing_helpers.load_exchange_rates(
+        exchange_rate_api_key=EXCHANGERATE_API_KEY,
+        exchange_rates_file=EXCHANGE_RATES_FILE,
+        logger=logger,
+    )
 
 
 def update_exchange_rates():
-    try:
-        resp = requests.get(
-            f"https://v6.exchangerate-api.com/v6/{EXCHANGERATE_API_KEY}/latest/UAH",
-            timeout=15,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        rates = {k: payload['conversion_rates'][k] for k in ('EUR', 'USD', 'GBP')}
-        with open(EXCHANGE_RATES_FILE, 'w') as f:
-            json.dump({'last_update': datetime.now().isoformat(), 'rates': rates}, f)
-        return rates
-    except Exception as e:
-        logger.error(f"Error updating exchange rates: {e}")
-        return None
+    return lyst_pricing_helpers.update_exchange_rates(
+        exchange_rate_api_key=EXCHANGERATE_API_KEY,
+        exchange_rates_file=EXCHANGE_RATES_FILE,
+        logger=logger,
+    )
 
 def convert_to_uah(price, country, exchange_rates, name):
-    try:
-        currency = None
-        currency_symbol = ''
-        for symbol, code in CURRENCY_CODE_BY_SYMBOL.items():
-            if symbol in price:
-                currency = code
-                currency_symbol = CURRENCY_DISPLAY_SYMBOL_BY_SYMBOL.get(symbol, symbol)
-                break
-        if not currency:
-            logger.error(f"Unrecognized currency symbol in price '{price}' for '{name}' country '{country}'")
-            return EMPTY_CONVERSION_RESULT
-        amount = _parse_price_amount(price)
-        if amount <= 0:
-            logger.error(f"Failed to parse price '{price}' for '{name}' country '{country}'")
-            return ConversionResult(0, 0, currency_symbol)
-
-        rate = exchange_rates.get(currency)
-        if not rate:
-            logger.error(f"Exchange rate not found for currency '{currency}' (country: {country})")
-            return EMPTY_CONVERSION_RESULT
-
-        uah_amount = amount / rate
-        return ConversionResult(round(uah_amount / 10) * 10, round(1 / rate, 2), currency_symbol)
-    except (ValueError, KeyError) as e:
-        logger.error(f"Error converting price '{price}' for '{name}' country '{country}': {e}")
-        return EMPTY_CONVERSION_RESULT
+    return lyst_pricing_helpers.convert_to_uah(
+        price,
+        country,
+        exchange_rates,
+        name,
+        logger=logger,
+    )
 
 # Route runtime calls through the internal Lyst package so orchestration can stay here
 # while pricing and parsing logic live in cohesive modules with focused tests.
 ConversionResult = lyst_pricing_helpers.ConversionResult
 EMPTY_CONVERSION_RESULT = lyst_pricing_helpers.EMPTY_CONVERSION_RESULT
-extract_price = lyst_pricing_helpers.extract_price
-extract_price_tokens = lyst_pricing_helpers.extract_price_tokens
-_parse_price_amount = lyst_pricing_helpers.parse_price_amount
-calculate_sale_percentage = lyst_pricing_helpers.calculate_sale_percentage
-load_exchange_rates = lambda: lyst_pricing_helpers.load_exchange_rates(
-    exchange_rate_api_key=EXCHANGERATE_API_KEY,
-    exchange_rates_file=EXCHANGE_RATES_FILE,
-    logger=logger,
-)
-convert_to_uah = lambda price, country, exchange_rates, name: lyst_pricing_helpers.convert_to_uah(
-    price,
-    country,
-    exchange_rates,
-    name,
-    logger=logger,
-)
-_normalize_image_url = lyst_parsing_helpers.normalize_image_url
-_pick_src_from_srcset = lyst_parsing_helpers.pick_src_from_srcset
-_extract_image_url_from_tag = lyst_parsing_helpers.extract_image_url_from_tag
-_upgrade_lyst_image_url = lyst_parsing_helpers.upgrade_lyst_image_url
-_image_url_candidates = lyst_parsing_helpers.image_url_candidates
-find_price_strings = lyst_parsing_helpers.find_price_strings
-extract_ldjson_image_map = lyst_parsing_helpers.extract_ldjson_image_map
-extract_shoe_data = lambda card, country, image_fallback_map=None: lyst_parsing_helpers.extract_shoe_data(
-    card,
-    country,
-    logger=logger,
-    skipped_items=SKIPPED_ITEMS,
-    normalize_product_link=_normalize_lyst_product_link,
-    image_fallback_map=image_fallback_map,
-)
 
 # Message formatting and sending
-get_sale_emoji = lyst_runtime_helpers.get_sale_emoji
-build_shoe_message = lyst_runtime_helpers.build_shoe_message
+get_sale_emoji = lyst_notify_helpers.get_sale_emoji
+build_shoe_message = lyst_notify_helpers.build_shoe_message
 
 async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah_price=None, sale_percentage=None, max_retries=3):
-    return await lyst_runtime_helpers.send_telegram_message(
+    return await lyst_notify_helpers.send_telegram_message(
         bot_token,
         chat_id,
         message,
@@ -2072,13 +1856,13 @@ async def send_telegram_message(bot_token, chat_id, message, image_url=None, uah
     )
 
 def get_allowed_chat_ids():
-    return lyst_runtime_helpers.get_allowed_chat_ids(DANYLO_DEFAULT_CHAT_ID, TELEGRAM_CHAT_ID)
+    return lyst_notify_helpers.get_allowed_chat_ids(DANYLO_DEFAULT_CHAT_ID, TELEGRAM_CHAT_ID)
 
 def tail_log_lines(path, line_count=LOG_TAIL_LINES):
-    return lyst_runtime_helpers.tail_log_lines(path, line_count=line_count, logger=logger)
+    return lyst_notify_helpers.tail_log_lines(path, line_count=line_count, logger=logger)
 
 async def send_log_tail(bot, chat_id, log_path, line_count=LOG_TAIL_LINES):
-    await lyst_runtime_helpers.send_log_tail(
+    await lyst_notify_helpers.send_log_tail(
         bot,
         chat_id,
         log_path,
@@ -2087,7 +1871,7 @@ async def send_log_tail(bot, chat_id, log_path, line_count=LOG_TAIL_LINES):
     )
 
 async def command_listener(bot_token, allowed_chat_ids, log_path):
-    await lyst_runtime_helpers.command_listener(
+    await lyst_notify_helpers.command_listener(
         bot_token,
         allowed_chat_ids,
         log_path,
@@ -2098,250 +1882,107 @@ async def command_listener(bot_token, allowed_chat_ids, log_path):
 
 # Processing functions
 def _merge_base_url_into_shoes(result, base_url, country):
-    merged = []
-    for shoe in result:
-        if isinstance(shoe, dict):
-            shoe['base_url'] = base_url
-            merged.append(shoe)
-        else:
-            logger.error(f"Unexpected item data type for {country}: {type(shoe)}")
-    return merged
+    return lyst_processing_helpers.merge_base_url_into_shoes(
+        result,
+        base_url,
+        country,
+        logger=logger,
+    )
 
 def filter_duplicates(shoes, exchange_rates):
-    filtered_shoes, grouped_shoes = [], defaultdict(list)
-    for shoe in shoes:
-        grouped_shoes[_shoe_key(shoe)].append(shoe)
-
-    for group in grouped_shoes.values():
-        # Deduplicate within same country: prefer item with valid image_url
-        country_map = {}
-        for shoe in group:
-            country = shoe['country']
-            if country not in country_map:
-                country_map[country] = shoe
-            else:
-                existing = country_map[country]
-                existing_img = existing.get('image_url')
-                new_img = shoe.get('image_url')
-                
-                existing_has_img = existing_img and existing_img.startswith(('http', 'https'))
-                new_has_img = new_img and new_img.startswith(('http', 'https'))
-                
-                if not existing_has_img and new_has_img:
-                    country_map[country] = shoe
-        
-        group = list(country_map.values())
-
-        if len(group) == 1:
-            filtered_shoes.append(group[0])
-            continue
-        group.sort(key=lambda x: COUNTRY_PRIORITY.index(x['country']) if x['country'] in COUNTRY_PRIORITY else len(COUNTRY_PRIORITY))
-        for shoe in group:
-            shoe['uah_price'] = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name']).uah_amount
-        base = group[0]
-        replacement = next((s for s in group[1:] if base['uah_price'] - s['uah_price'] >= 200), None)
-        filtered_shoes.append(replacement or base)
-    return filtered_shoes
+    return lyst_processing_helpers.filter_duplicates(
+        shoes,
+        exchange_rates,
+        country_priority=COUNTRY_PRIORITY,
+        convert_to_uah=convert_to_uah,
+    )
 
 def _shoe_key(shoe):
-    return f"{shoe['name']}_{shoe['unique_id']}"
+    return lyst_processing_helpers.shoe_key(shoe)
 
 def _apply_new_shoe_state(shoe, uah_sale):
-    shoe.update({
-        'lowest_price': shoe['sale_price'],
-        'lowest_price_uah': uah_sale,
-        'uah_price': uah_sale,
-        'active': True
-    })
+    return lyst_processing_helpers.apply_new_shoe_state(shoe, uah_sale)
 
 def _apply_existing_shoe_state(shoe, old_shoe, uah_sale, exchange_rates):
-    old_sale_price = old_shoe['sale_price']
-    old_sale_country = old_shoe['country']
-    old_uah = old_shoe.get('uah_price') or convert_to_uah(old_sale_price, old_sale_country, exchange_rates, shoe['name']).uah_amount
-    lowest_price_uah = old_shoe.get('lowest_price_uah') or old_uah
-
-    shoe['uah_price'] = uah_sale
-    # Update lowest price if needed
-    if uah_sale < lowest_price_uah:
-        shoe['lowest_price'], shoe['lowest_price_uah'] = shoe['sale_price'], uah_sale
-    else:
-        shoe['lowest_price'], shoe['lowest_price_uah'] = old_shoe['lowest_price'], lowest_price_uah
-    shoe['active'] = True
+    return lyst_processing_helpers.apply_existing_shoe_state(
+        shoe,
+        old_shoe,
+        uah_sale,
+        exchange_rates,
+        convert_to_uah=convert_to_uah,
+    )
 
 async def _save_single_shoe(key, shoe):
-    # Save individual shoe instead of entire dataset
-    await save_shoe_data_bulk([dict(shoe, key=key)])
+    await lyst_processing_helpers.save_single_shoe(
+        key,
+        shoe,
+        save_shoe_data_bulk=save_shoe_data_bulk,
+    )
 
 async def process_shoe(shoe, old_data, message_queue, exchange_rates):
-    key = _shoe_key(shoe)
-    is_new_item = key not in old_data
-    was_processed = await is_shoe_processed(key) if is_new_item else False
-
-    # Calculate sale details
-    sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], shoe['country'])
-    sale_exchange_data = convert_to_uah(shoe['sale_price'], shoe['country'], exchange_rates, shoe['name'])
-    kurs, uah_sale, kurs_symbol = sale_exchange_data.exchange_rate, sale_exchange_data.uah_amount, sale_exchange_data.currency_symbol
-
-    # Handle new shoe
-    if is_new_item:
-        _apply_new_shoe_state(shoe, uah_sale)
-        # Important: do NOT globally skip this function based on processed_shoes.
-        # That old behavior prevented future state updates for existing items.
-        # We only use processed_shoes to suppress duplicate "new item" notifications.
-        if not was_processed:
-            message = build_shoe_message(shoe, sale_percentage, uah_sale, kurs, kurs_symbol)
-            await message_queue.add_message(shoe['base_url']['telegram_chat_id'], message, shoe['image_url'], uah_sale, sale_percentage)
-            await mark_shoe_processed(key)
-        old_data[key] = shoe
-        await _save_single_shoe(key, shoe)
-    else:
-        # Update existing shoe
-        old_shoe = old_data[key]
-        _apply_existing_shoe_state(shoe, old_shoe, uah_sale, exchange_rates)
-        old_data[key] = shoe
-        await _save_single_shoe(key, shoe)
+    await lyst_processing_helpers.process_shoe(
+        shoe,
+        old_data,
+        message_queue,
+        exchange_rates,
+        is_shoe_processed=is_shoe_processed,
+        mark_shoe_processed=mark_shoe_processed,
+        save_shoe_data_bulk=save_shoe_data_bulk,
+        build_shoe_message=build_shoe_message,
+        calculate_sale_percentage=calculate_sale_percentage,
+        convert_to_uah=convert_to_uah,
+    )
 
 async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
-    new_shoe_count = 0
-    semaphore = asyncio.Semaphore(LYST_SHOE_CONCURRENCY)  # Reduce concurrency to prevent database locks
-    total_items = len(all_shoes)
-    _touch_lyst_progress("process_shoes_start", total_items=total_items)
-
-    async def process_single_shoe(i, shoe):
-        nonlocal new_shoe_count
-        async with semaphore:  # Limit concurrency
-            try:
-                _touch_lyst_progress("process_shoe", index=i, total_items=total_items)
-                country, name = shoe['country'], shoe['name']
-                key = _shoe_key(shoe)
-                sale_percentage = calculate_sale_percentage(shoe['original_price'], shoe['sale_price'], country)
-                
-                if sale_percentage < shoe['base_url']['min_sale']: return
-
-                # Get final link or use existing one
-                if key not in old_data:
-                    if RESOLVE_REDIRECTS:
-                        shoe['shoe_link'] = await get_final_clear_link(shoe['shoe_link'], semaphore, name, country, i, total_items)
-                    # else: shoe['shoe_link'] remains the initial URL
-                    new_shoe_count += 1
-                else:
-                    shoe['shoe_link'] = old_data[key]['shoe_link']
-                
-                await process_shoe(shoe, old_data, message_queue, exchange_rates)
-            except Exception as e:
-                logger.error(f"Error processing shoe {shoe.get('name', 'unknown')}: {e}")
-                logger.error(traceback.format_exc())
-
-    # Process shoes in smaller batches to reduce database contention
-    batch_size = 10
-    for i in range(0, len(all_shoes), batch_size):
-        batch = all_shoes[i:i + batch_size]
-        await asyncio.gather(*[process_single_shoe(i + j, shoe) for j, shoe in enumerate(batch)])
-        _touch_lyst_progress("process_shoes_batch", batch_start=i, batch_size=len(batch))
-        # Small delay between batches to prevent overwhelming the database
-        await asyncio.sleep(0.1)
-    
-    logger.info(f"Processed {new_shoe_count} new shoes in total")
-
-    # Only deactivate missing items after a full successful Lyst run. On partial runs
-    # (Cloudflare aborts, timeouts, stalls), the scraper has not seen the untouched
-    # pages yet, so treating them as removed would corrupt active/inactive state.
-    removed_shoes = []
-    if not LYST_RUN_FAILED:
-        current_shoes = {_shoe_key(shoe) for shoe in all_shoes}
-        removed_shoes = [dict(shoe, key=k, active=False) for k, shoe in old_data.items() if k not in current_shoes and shoe.get('active', True)]
-        for s in removed_shoes:
-            old_data[s['key']]['active'] = False
-        if removed_shoes:
-            logger.info(f"Marking {len(removed_shoes)} removed shoes inactive")
-            chunk_size = 500
-            for i in range(0, len(removed_shoes), chunk_size):
-                chunk = removed_shoes[i:i + chunk_size]
-                await save_shoe_data_bulk(chunk)
-                _touch_lyst_progress("removed_shoes_batch", batch_start=i, batch_size=len(chunk), total_removed=len(removed_shoes))
-                await asyncio.sleep(0)
-    _touch_lyst_progress("process_shoes_done", removed_total=len(removed_shoes), new_total=new_shoe_count)
-
-# Keep Lyst state transitions in the internal package so the main module focuses on
-# run orchestration and resume flow, not per-item mutation rules.
-_merge_base_url_into_shoes = lambda result, base_url, country: lyst_processing_helpers.merge_base_url_into_shoes(
-    result,
-    base_url,
-    country,
-    logger=logger,
-)
-filter_duplicates = lambda shoes, exchange_rates: lyst_processing_helpers.filter_duplicates(
-    shoes,
-    exchange_rates,
-    country_priority=COUNTRY_PRIORITY,
-    convert_to_uah=convert_to_uah,
-)
-_shoe_key = lyst_processing_helpers.shoe_key
-_apply_new_shoe_state = lyst_processing_helpers.apply_new_shoe_state
-_apply_existing_shoe_state = lambda shoe, old_shoe, uah_sale, exchange_rates: lyst_processing_helpers.apply_existing_shoe_state(
-    shoe,
-    old_shoe,
-    uah_sale,
-    exchange_rates,
-    convert_to_uah=convert_to_uah,
-)
-_save_single_shoe = lambda key, shoe: lyst_processing_helpers.save_single_shoe(
-    key,
-    shoe,
-    save_shoe_data_bulk=save_shoe_data_bulk,
-)
-process_shoe = lambda shoe, old_data, message_queue, exchange_rates: lyst_processing_helpers.process_shoe(
-    shoe,
-    old_data,
-    message_queue,
-    exchange_rates,
-    is_shoe_processed=is_shoe_processed,
-    mark_shoe_processed=mark_shoe_processed,
-    save_shoe_data_bulk=save_shoe_data_bulk,
-    build_shoe_message=build_shoe_message,
-    calculate_sale_percentage=calculate_sale_percentage,
-    convert_to_uah=convert_to_uah,
-)
-process_all_shoes = lambda all_shoes, old_data, message_queue, exchange_rates: lyst_processing_helpers.process_all_shoes(
-    all_shoes,
-    old_data,
-    message_queue,
-    exchange_rates,
-    shoe_concurrency=LYST_SHOE_CONCURRENCY,
-    resolve_redirects=RESOLVE_REDIRECTS,
-    run_failed=LYST_RUN_FAILED,
-    logger=logger,
-    touch_progress=_touch_lyst_progress,
-    calculate_sale_percentage=calculate_sale_percentage,
-    convert_to_uah=convert_to_uah,
-    build_shoe_message=build_shoe_message,
-    is_shoe_processed=is_shoe_processed,
-    mark_shoe_processed=mark_shoe_processed,
-    save_shoe_data_bulk=save_shoe_data_bulk,
-    get_final_clear_link=get_final_clear_link,
-)
+    await lyst_processing_helpers.process_all_shoes(
+        all_shoes,
+        old_data,
+        message_queue,
+        exchange_rates,
+        shoe_concurrency=LYST_SHOE_CONCURRENCY,
+        resolve_redirects=RESOLVE_REDIRECTS,
+        run_failed=LYST_RUN_FAILED,
+        logger=logger,
+        touch_progress=_touch_lyst_progress,
+        calculate_sale_percentage=calculate_sale_percentage,
+        convert_to_uah=convert_to_uah,
+        build_shoe_message=build_shoe_message,
+        is_shoe_processed=is_shoe_processed,
+        mark_shoe_processed=mark_shoe_processed,
+        save_shoe_data_bulk=save_shoe_data_bulk,
+        get_final_clear_link=get_final_clear_link,
+    )
 
 def _scrape_target_url(base_url, page, use_pagination):
-    return base_url['url'] if not use_pagination or page == 1 else f"{base_url['url']}&page={page}"
+    return lyst_cycle_helpers.build_scrape_target_url(base_url, page, use_pagination)
 
 def _log_scrape_target(url_name, country, page, use_pagination):
-    if use_pagination:
-        logger.info(f"Scraping page {page} for country {country} - {url_name}")
-    else:
-        logger.info(f"Scraping single page for country {country} - {url_name}")
+    lyst_cycle_helpers.log_scrape_target(
+        logger=logger,
+        url_name=url_name,
+        country=country,
+        page=page,
+        use_pagination=use_pagination,
+    )
 
 async def _update_resume_with_url(key, url, **fields):
-    await update_lyst_resume_entry(key, last_url=url, **fields)
+    await lyst_cycle_helpers.update_resume_with_url(
+        update_entry=update_lyst_resume_entry,
+        key=key,
+        url=url,
+        **fields,
+    )
 
 async def process_url(base_url, countries, exchange_rates):
-    _touch_lyst_progress()
-    mark_lyst_start()
-    all_shoes = []
-    country_results = await asyncio.gather(*(scrape_all_pages(base_url, c) for c in countries))
-    for country, result in zip(countries, country_results):
-        all_shoes.extend(_merge_base_url_into_shoes(result, base_url, country))
-        special_logger.info(f"Found {len(result)} items for {country} - {base_url['url_name']}")
-    return all_shoes
+    return await lyst_cycle_helpers.process_url(
+        base_url,
+        countries,
+        scrape_all_pages=scrape_all_pages,
+        merge_base_url_into_shoes=_merge_base_url_into_shoes,
+        touch_progress=_touch_lyst_progress,
+        mark_start=mark_lyst_start,
+        special_logger=special_logger,
+    )
 
 # Utility functions
 def print_statistics():
@@ -2362,53 +2003,41 @@ def print_link_statistics():
 def center_text(text, width, fill_char=' '): return text.center(width, fill_char)
 
 def _collect_successful_lyst_results(url_results):
-    all_shoes = []
-    for result in url_results:
-        if isinstance(result, Exception):
-            logger.error(f"Lyst task failed: {result}")
-            continue
-        all_shoes.extend(result)
-    return all_shoes
+    return lyst_cycle_helpers.collect_successful_results(url_results, logger=logger)
 
 
 def _should_restart_after_terminal_resume(all_shoes):
-    if all_shoes or not LYST_CYCLE_STARTED_IN_RESUME:
-        return False
-    if not LYST_RESUME_ENTRY_OUTCOMES:
-        return False
-    return all(outcome == "terminal_only_resume" for outcome in LYST_RESUME_ENTRY_OUTCOMES.values())
+    return resume_controller.should_restart_after_terminal_resume(
+        all_shoes=all_shoes,
+        cycle_started_in_resume=LYST_CYCLE_STARTED_IN_RESUME,
+        entry_outcomes=LYST_RESUME_ENTRY_OUTCOMES,
+    )
 
 async def _clear_lyst_resume_state():
-    async with LYST_RESUME_LOCK:
-        LYST_RESUME_STATE["resume_active"] = False
-        LYST_RESUME_STATE["entries"] = {}
-        for key in ("last_run_progress", "last_failure_reason", "last_failure_at"):
-            LYST_RESUME_STATE.pop(key, None)
-        save_lyst_resume_state(LYST_RESUME_STATE)
+    global LYST_RESUME_STATE
+    resume_controller.state = LYST_RESUME_STATE
+    await lyst_cycle_helpers.clear_resume_state(resume_controller=resume_controller)
+    LYST_RESUME_STATE = resume_controller.state
 
 async def _run_lyst_resume_step(progress_name, operation, timeout_issue, timeout_log):
-    try:
-        _touch_lyst_progress(f"{progress_name}_start")
-        await asyncio.wait_for(operation(), timeout=60)
-        _touch_lyst_progress(f"{progress_name}_done")
-    except asyncio.TimeoutError:
-        mark_lyst_issue(timeout_issue)
-        logger.error(timeout_log)
+    await lyst_cycle_helpers.run_resume_step(
+        progress_name=progress_name,
+        operation=operation,
+        touch_progress=_touch_lyst_progress,
+        mark_issue=mark_lyst_issue,
+        logger=logger,
+        timeout_issue=timeout_issue,
+        timeout_log=timeout_log,
+    )
 
 async def _finalize_lyst_resume_state():
-    await _run_lyst_resume_step(
-        "finalize_resume",
-        finalize_lyst_resume_after_processing,
-        "resume finalize timeout",
-        "LYST finalize resume timed out; continuing without resume update",
-    )
-    if LYST_RUN_FAILED:
-        return
-    await _run_lyst_resume_step(
-        "finalize_clear",
-        _clear_lyst_resume_state,
-        "resume clear timeout",
-        "LYST resume clear timed out; continuing",
+    await lyst_cycle_helpers.finalize_resume_state(
+        finalize_resume_after_processing=finalize_lyst_resume_after_processing,
+        clear_resume_state=_clear_lyst_resume_state,
+        run_failed=LYST_RUN_FAILED,
+        touch_progress=_touch_lyst_progress,
+        mark_issue=mark_lyst_issue,
+        logger=logger,
     )
 
 async def _shutdown_background_tasks(tasks):
@@ -2418,17 +2047,15 @@ async def _shutdown_background_tasks(tasks):
         await asyncio.gather(*tasks, return_exceptions=True)
 
 def _log_lyst_collection_stats(all_shoes, exchange_rates):
-    if not all_shoes and not LYST_RUN_FAILED:
-        mark_lyst_issue("0 items scraped")
-
-    collected_ids = {shoe['unique_id'] for shoe in all_shoes}
-    recovered_count = sum(1 for uid in SKIPPED_ITEMS if uid in collected_ids)
-    special_logger.stat(f"Items skipped due to image but present in final list: {recovered_count}/{len(SKIPPED_ITEMS)}")
-
-    unfiltered_len = len(all_shoes)
-    all_shoes = filter_duplicates(all_shoes, exchange_rates)
-    special_logger.stat(f"Removed {unfiltered_len - len(all_shoes)} duplicates")
-    return all_shoes
+    return lyst_cycle_helpers.log_collection_stats(
+        all_shoes,
+        exchange_rates,
+        run_failed=LYST_RUN_FAILED,
+        mark_issue=mark_lyst_issue,
+        special_logger=special_logger,
+        skipped_items=SKIPPED_ITEMS,
+        filter_duplicates=filter_duplicates,
+    )
 
 def _finalize_lyst_cycle(issue=None, error=None):
     if error is not None:
