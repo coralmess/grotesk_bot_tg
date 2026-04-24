@@ -127,7 +127,7 @@ class AutoRiaParsingTests(unittest.TestCase):
         url = "https://auto.ria.com/uk/search/?search_type=1&page=2&limit=20&price[2]=13000"
         self.assertEqual(
             normalize_auto_ria_search_url(url),
-            "https://auto.ria.com/uk/search/?search_type=1&page=0&limit=100&price%5B2%5D=13000",
+            "https://auto.ria.com/uk/search/?search_type=1&page=0&limit=100&price%5B2%5D=13000&order=7",
         )
 
     def test_sold_detail_detection_uses_schema_availability(self) -> None:
@@ -182,7 +182,7 @@ class AutoRiaRuntimeTests(unittest.TestCase):
             sources=[{"url": "https://auto.ria.com/uk/search/?page=2&limit=20", "url_name": "cars"}],
         )
 
-        self.assertEqual(runtime._sources[0].url, "https://auto.ria.com/uk/search/?page=0&limit=100")
+        self.assertEqual(runtime._sources[0].url, "https://auto.ria.com/uk/search/?page=0&limit=100&order=7")
 
     def test_refresh_sold_status_edits_stored_photo_message(self) -> None:
         async def run_test() -> tuple[FakeAutoRiaBot, FakeAutoRiaSoldStorage]:

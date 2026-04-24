@@ -17,11 +17,13 @@ _SOLD_AVAILABILITY_RE = re.compile(r'"availability"\s*:\s*"https://schema\.org/S
 def normalize_auto_ria_search_url(url: str, *, limit: int = 100) -> str:
     parsed = urlsplit(url)
     # Auto RIA already exposes page size in query params, so one large first page
-    # covers the configured searches without extra browser pagination state.
+    # covers the configured searches without extra browser pagination state. The newest
+    # ordering is forced too so old listings do not displace fresh candidates in that page.
     normalized_limit = str(max(1, int(limit)))
     query_pairs: list[tuple[str, str]] = []
     saw_page = False
     saw_limit = False
+    saw_order = False
     for key, value in parse_qsl(parsed.query, keep_blank_values=True):
         if key == "page":
             if not saw_page:
@@ -33,11 +35,18 @@ def normalize_auto_ria_search_url(url: str, *, limit: int = 100) -> str:
                 query_pairs.append(("limit", normalized_limit))
                 saw_limit = True
             continue
+        if key == "order":
+            if not saw_order:
+                query_pairs.append(("order", "7"))
+                saw_order = True
+            continue
         query_pairs.append((key, value))
     if not saw_page:
         query_pairs.append(("page", "0"))
     if not saw_limit:
         query_pairs.append(("limit", normalized_limit))
+    if not saw_order:
+        query_pairs.append(("order", "7"))
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query_pairs), parsed.fragment))
 
 
