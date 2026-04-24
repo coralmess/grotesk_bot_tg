@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
 
 # Keep rules explicit. Each service restart should be tied only to files that
 # can actually change its runtime behavior after a pull.
@@ -82,6 +83,8 @@ SERVICE_RULES = {
     ),
 }
 
+TRACKED_SERVICE_UNITS = {service_name for service_name in SERVICE_RULES if (PROJECT_ROOT / service_name).exists()}
+
 
 def run_git_diff(base_ref: str, head_ref: str) -> list[str]:
     result = subprocess.run(
@@ -102,8 +105,30 @@ def should_restart(service_name: str, changed_files: list[str]) -> bool:
     return False
 
 
+def changed_unit_files(changed_files: list[str]) -> list[str]:
+    return [path for path in changed_files if path in TRACKED_SERVICE_UNITS]
+
+
+def install_changed_unit_files(changed_files: list[str]) -> None:
+    units = changed_unit_files(changed_files)
+    if not units:
+        return
+    for unit_name in units:
+        # Service units live in git, but systemd only reads /etc/systemd/system.
+        # Copy changed units before restart so the process uses the pulled config.
+        subprocess.run(
+            ["sudo", "cp", str(PROJECT_ROOT / unit_name), (SYSTEMD_UNIT_DIR / unit_name).as_posix()],
+            check=True,
+        )
+    subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+
+
 def restart_service(service_name: str) -> None:
     subprocess.run(["sudo", "systemctl", "restart", service_name], check=True)
+
+
+def verify_service_active(service_name: str) -> None:
+    subprocess.run(["systemctl", "is-active", "--quiet", service_name], check=True)
 
 
 def main() -> int:
@@ -126,7 +151,16 @@ def main() -> int:
     for path in changed_files:
         print(f" - {path}")
 
+    changed_units = changed_unit_files(changed_files)
+    if changed_units:
+        print("Installing changed systemd units:")
+        for unit_name in changed_units:
+            print(f" - {unit_name}")
+        if not args.dry_run:
+            install_changed_unit_files(changed_files)
+
     restarted_any = False
+    restarted_services: list[str] = []
     for service_name in SERVICE_RULES:
         if not should_restart(service_name, changed_files):
             print(f"Skip {service_name}: no relevant changes.")
@@ -139,6 +173,13 @@ def main() -> int:
 
         print(f"Restarting {service_name}")
         restart_service(service_name)
+        restarted_services.append(service_name)
+
+    if restarted_services:
+        print("Verifying restarted services:")
+        for service_name in restarted_services:
+            verify_service_active(service_name)
+            print(f" - {service_name}: active")
 
     if not restarted_any:
         print("No service restarts required.")
