@@ -22,6 +22,7 @@ from helpers.lyst import media as lyst_media_helpers
 from helpers.lyst import notify as lyst_notify_helpers
 from helpers.lyst import cycle as lyst_cycle_helpers
 from helpers.lyst import parsing as lyst_parsing_helpers
+from helpers.lyst import page_scraper as lyst_page_scraper
 from helpers.lyst import pricing as lyst_pricing_helpers
 from helpers.lyst import processing as lyst_processing_helpers
 from helpers.lyst.cloudflare_backoff import CloudflareBackoff
@@ -1163,28 +1164,23 @@ def extract_shoe_data(card, country, image_fallback_map=None):
     )
 
 async def scrape_page(url, country, max_scroll_attempts=None, url_name=None, page_num=None, use_pagination=None):
-    try:
-        soup, content = await get_soup_and_content(
-            url,
-            country,
-            max_scroll_attempts=max_scroll_attempts,
-            url_name=url_name,
-            page_num=page_num,
-            use_pagination=use_pagination,
-        )
-    except LystCloudflareChallenge:
-        return [], None, "cloudflare"
-    except LystRunAborted:
-        return [], None, "aborted"
-    except LystHttpTerminalPage as exc:
-        return [], exc.content, "terminal"
-    if not soup:
-        _mark_lyst_issue("Failed to get soup")
-        return [], content, "failed"
-    
-    shoe_cards = soup.find_all('div', class_='_693owt3')
-    image_fallback_map = extract_ldjson_image_map(soup)
-    return [data for card in shoe_cards if (data := extract_shoe_data(card, country, image_fallback_map))], content, "ok"
+    # Keep this public runtime function stable while the actual single-page
+    # parsing path lives in a focused helper that is easier to test.
+    return await lyst_page_scraper.scrape_page(
+        url,
+        country,
+        get_soup_and_content=get_soup_and_content,
+        extract_ldjson_image_map=extract_ldjson_image_map,
+        extract_shoe_data=extract_shoe_data,
+        mark_issue=_mark_lyst_issue,
+        cloudflare_exception=LystCloudflareChallenge,
+        aborted_exception=LystRunAborted,
+        terminal_exception=LystHttpTerminalPage,
+        max_scroll_attempts=max_scroll_attempts,
+        url_name=url_name,
+        page_num=page_num,
+        use_pagination=use_pagination,
+    )
 
 async def scrape_all_pages(base_url, country, use_pagination=None):
     global LYST_LAST_CLOUDFLARE_EVENT

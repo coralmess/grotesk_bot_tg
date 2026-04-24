@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest import mock
 
@@ -127,6 +128,43 @@ class LystRuntimeTests(unittest.TestCase):
         self.assertIs(helper.call_args.kwargs["skipped_items"], GroteskBotTg.SKIPPED_ITEMS)
         self.assertIs(helper.call_args.kwargs["normalize_product_link"], GroteskBotTg._normalize_lyst_product_link)
         self.assertEqual(helper.call_args.kwargs["image_fallback_map"], fallback_map)
+
+    def test_scrape_page_wrapper_delegates_runtime_dependencies(self):
+        import GroteskBotTg
+
+        async def run_case():
+            expected = ([{"name": "Delegated Shoe"}], "<html></html>", "ok")
+            with mock.patch.object(
+                GroteskBotTg.lyst_page_scraper,
+                "scrape_page",
+                new=mock.AsyncMock(return_value=expected),
+            ) as helper:
+                result = await GroteskBotTg.scrape_page(
+                    "https://www.lyst.com/shop",
+                    "US",
+                    max_scroll_attempts=4,
+                    url_name="Test URL",
+                    page_num=2,
+                    use_pagination=True,
+                )
+            return expected, result, helper
+
+        expected, result, helper = asyncio.run(run_case())
+        self.assertEqual(result, expected)
+        helper.assert_awaited_once()
+        args, kwargs = helper.await_args
+        self.assertEqual(args, ("https://www.lyst.com/shop", "US"))
+        self.assertIs(kwargs["get_soup_and_content"], GroteskBotTg.get_soup_and_content)
+        self.assertIs(kwargs["extract_ldjson_image_map"], GroteskBotTg.extract_ldjson_image_map)
+        self.assertIs(kwargs["extract_shoe_data"], GroteskBotTg.extract_shoe_data)
+        self.assertIs(kwargs["mark_issue"], GroteskBotTg._mark_lyst_issue)
+        self.assertIs(kwargs["cloudflare_exception"], GroteskBotTg.LystCloudflareChallenge)
+        self.assertIs(kwargs["aborted_exception"], GroteskBotTg.LystRunAborted)
+        self.assertIs(kwargs["terminal_exception"], GroteskBotTg.LystHttpTerminalPage)
+        self.assertEqual(kwargs["max_scroll_attempts"], 4)
+        self.assertEqual(kwargs["url_name"], "Test URL")
+        self.assertEqual(kwargs["page_num"], 2)
+        self.assertTrue(kwargs["use_pagination"])
 
 
 if __name__ == "__main__":
