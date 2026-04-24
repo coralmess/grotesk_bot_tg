@@ -48,6 +48,23 @@ class LystStatusManager:
             )
             self._reporter.mark_degraded(note)
 
+    def set_state_fields(self, **fields: Any) -> None:
+        self._reporter.set_state_fields(**fields)
+
+    def finish_outcome(self, outcome, *, duration_seconds: float | None = None) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        finished_at_utc = _utc_now_iso()
+        state_fields = outcome.service_state_fields()
+        state_fields["lyst_last_run_end_utc"] = finished_at_utc
+        self._reporter.set_state_fields(**state_fields)
+        if outcome.ok:
+            self._reporter.record_success("lyst_run", duration_seconds=duration_seconds, note=outcome.note)
+        else:
+            self._reporter.record_failure("lyst_run", outcome.note, duration_seconds=duration_seconds)
+        self._write_legacy(ok=outcome.ok, note=outcome.note, end_utc=finished_at_utc)
+
     def finish_success(self, *, duration_seconds: float | None = None) -> None:
         if self._finished:
             return

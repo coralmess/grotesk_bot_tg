@@ -61,6 +61,29 @@ class LystStatusManagerTests(unittest.TestCase):
         self.assertEqual(snapshot["service_state"]["lyst_last_run_note"], "stalled")
         self.assertEqual(snapshot["operation_stats"]["lyst_run"]["failure_count"], 1)
 
+    def test_finish_outcome_records_cloudflare_phase(self) -> None:
+        from helpers.lyst.outcome import LystRunOutcome
+
+        self.manager.begin_cycle()
+        self.manager.finish_outcome(
+            LystRunOutcome.cloudflare_partial(
+                source_name="Main brands",
+                country="US",
+                page=3,
+                items_seen=120,
+                new_items=0,
+            ),
+            duration_seconds=12.5,
+        )
+
+        snapshot = self._snapshot()
+        service_state = snapshot["service_state"]
+        self.assertEqual(service_state["lyst_last_run_ok"], False)
+        self.assertEqual(service_state["lyst_cycle_phase"], "failed_cloudflare")
+        self.assertEqual(service_state["lyst_failure_source"], "Main brands")
+        self.assertEqual(snapshot["operation_stats"]["lyst_run"]["failure_count"], 1)
+        self.assertIn("Cloudflare challenge", self.legacy_calls[-1]["note"])
+
 
 if __name__ == "__main__":
     unittest.main()
