@@ -1,4 +1,4 @@
-import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, uuid, threading, hashlib, os, random
+import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, threading, hashlib, os, random
 from pathlib import Path
 from telegram.constants import ParseMode
 from collections import defaultdict, deque
@@ -1106,438 +1106,61 @@ async def get_final_clear_link(initial_url, semaphore, item_name, country, curre
             await context.close()
 
 # Data extraction and processing
-PRICE_TOKEN_RE = re.compile(r'([\d.,]+\s*[^\d\s]+|[^\d\s]+\s*[\d.,]+)')
-PRICE_TRAILING_TOKEN_RE = re.compile(r'(\d[\d.,]*)\s*([^\d\s]+)')
-# Canonical marker list (lower-cased) keeps token matching stable across locales.
-CURRENCY_MARKERS = tuple(
-    marker.lower()
-    for marker in (
-        "\u20ac",
-        "\u00a3",
-        "$",
-        "EUR",
-        "GBP",
-        "USD",
-        "UAH",
-        "\u0433\u0440\u043d",
-        "\u0433\u0440\u043d.",
-        "uah",
-    )
-)
-
 def extract_price(price_str):
     return lyst_pricing_helpers.extract_price(price_str)
 
 def _normalize_currency_token(token: str) -> str:
-    value = (token or "").replace("\xa0", "").strip()
-    if not value:
-        return ""
-    normalized_values = [value]
-    # Recover common UTF-8 -> latin1 mojibake when present.
-    # This prevents silent misses like "215â‚¬" where the symbol got garbled.
-    try:
-        repaired = value.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
-        if repaired:
-            normalized_values.append(repaired)
-    except Exception:
-        pass
-    return " ".join(normalized_values).lower()
+    # Compatibility wrapper: pricing normalization now lives in helpers/lyst so
+    # parser fixes are tested once and reused by both runtime and unit tests.
+    return lyst_pricing_helpers.normalize_currency_token(token)
 
 def extract_price_tokens(text):
-    if not text:
-        return []
-    tokens = []
-    for m in PRICE_TOKEN_RE.finditer(text.replace('\xa0', ' ')):
-        token = m.group(0).replace(' ', '')
-        # Normalize trailing currency (e.g. "215€") to leading ("€215")
-        if token and token[-1] not in '0123456789' and (token[0].isdigit() or token[0] == '.'):
-            token = token[-1] + token[:-1]
-        if any(marker.lower() in token.lower() for marker in CURRENCY_MARKERS):
-            tokens.append(token)
-    return tokens
+    # Keep the historical GroteskBotTg symbol while delegating implementation to
+    # the focused pricing helper.
+    return lyst_pricing_helpers.extract_price_tokens(text)
 
 def _extract_price_tokens_enhanced(text):
-    if not text:
-        return []
-    tokens = []
-    normalized_text = text.replace('\xa0', ' ')
-    for m in PRICE_TOKEN_RE.finditer(normalized_text):
-        raw_token = m.group(0).replace(' ', '')
-        candidates = [raw_token]
-        # Keep backward-compatible formatting for single-char trailing currency.
-        if raw_token and raw_token[-1] not in '0123456789' and (raw_token[0].isdigit() or raw_token[0] == '.'):
-            candidates.append(raw_token[-1] + raw_token[:-1])
-        for token in candidates:
-            normalized = _normalize_currency_token(token)
-            if any(marker in normalized for marker in CURRENCY_MARKERS):
-                tokens.append(token)
-                break
-    if tokens:
-        return tokens
-
-    # Second pass: run on repaired text too, so malformed encodings still produce tokens.
-    fallback_inputs = [normalized_text]
-    try:
-        repaired = normalized_text.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
-        if repaired:
-            fallback_inputs.append(repaired)
-    except Exception:
-        pass
-
-    seen = set()
-    for source_text in fallback_inputs:
-        for m in PRICE_TRAILING_TOKEN_RE.finditer(source_text):
-            token = f"{m.group(1)}{m.group(2)}"
-            normalized = _normalize_currency_token(token)
-            if any(marker in normalized for marker in CURRENCY_MARKERS) and token not in seen:
-                seen.add(token)
-                tokens.append(token)
-    return tokens
-
-# Keep the old function for debugging, but route runtime calls to the resilient one.
-extract_price_tokens = _extract_price_tokens_enhanced
+    return lyst_pricing_helpers.extract_price_tokens(text)
 
 def _parse_price_amount(raw: str) -> float:
-    if not raw:
-        return 0.0
-    cleaned = re.sub(r'[^\d,\.]', '', raw)
-    if not cleaned:
-        return 0.0
-    if ',' in cleaned and '.' in cleaned:
-        cleaned = cleaned.replace(',', '')
-    elif ',' in cleaned and '.' not in cleaned:
-        parts = cleaned.split(',')
-        if len(parts[-1]) == 3:
-            cleaned = ''.join(parts)
-        else:
-            cleaned = '.'.join(parts)
-    elif '.' in cleaned:
-        parts = cleaned.split('.')
-        if len(parts[-1]) == 3:
-            cleaned = ''.join(parts)
-    try:
-        return float(cleaned)
-    except ValueError:
-        return 0.0
+    return lyst_pricing_helpers.parse_price_amount(raw)
 
 def _normalize_image_url(url: str | None) -> str | None:
-    if not url:
-        return None
-    url = url.strip()
-    if url.startswith("//"):
-        return f"https:{url}"
-    return url
+    return lyst_parsing_helpers.normalize_image_url(url)
 
 def _pick_src_from_srcset(srcset_value):
-    if not srcset_value:
-        return None
-    best_url = None
-    best_score = -1.0
-    for part in srcset_value.split(','):
-        part = part.strip()
-        if not part:
-            continue
-        tokens = part.split()
-        url = tokens[0].strip() if tokens else ""
-        score = 0.0
-        if len(tokens) > 1:
-            desc = tokens[1].strip().lower()
-            if desc.endswith("w"):
-                try:
-                    score = float(desc[:-1])
-                except Exception:
-                    score = 0.0
-            elif desc.endswith("x"):
-                try:
-                    score = float(desc[:-1]) * 1000.0
-                except Exception:
-                    score = 0.0
-        if score >= best_score:
-            best_score = score
-            best_url = url
-    best_url = _normalize_image_url(best_url)
-    if best_url and best_url.startswith(("http://", "https://")):
-        return best_url
-    return None
+    return lyst_parsing_helpers.pick_src_from_srcset(srcset_value)
 
 def _extract_image_url_from_tag(tag):
-    if not tag:
-        return None
-    candidates = [
-        tag.get('src'),
-        tag.get('data-src'),
-        tag.get('data-lazy-src'),
-        _pick_src_from_srcset(tag.get('srcset')),
-        _pick_src_from_srcset(tag.get('data-srcset')),
-        _pick_src_from_srcset(tag.get('data-lazy-srcset')),
-    ]
-    for url in candidates:
-        url = _normalize_image_url(url)
-        if url and url.startswith(("http://", "https://")):
-            return url
-    return None
+    return lyst_parsing_helpers.extract_image_url_from_tag(tag)
 
 def _upgrade_lyst_image_url(url: str | None) -> str | None:
-    if not url:
-        return url
-    url = _normalize_image_url(url)
-    if not url or not url.startswith(("http://", "https://")):
-        return url
-    try:
-        parsed = urllib.parse.urlsplit(url)
-    except Exception:
-        return url
-    host = parsed.netloc.lower()
-    if "lystit.com" not in host:
-        return url
-    path = parsed.path
-    new_path = re.sub(r"^/\d+/\d+/(?:tr/)?photos/", "/photos/", path)
-    if new_path != path:
-        return parsed._replace(path=new_path).geturl()
-    return url
+    return lyst_parsing_helpers.upgrade_lyst_image_url(url)
 
 def _image_url_candidates(url: str | None) -> list[str]:
-    url = _normalize_image_url(url)
-    upgraded = _upgrade_lyst_image_url(url)
-    if upgraded and url and upgraded != url:
-        return [upgraded, url]
-    return [url] if url else []
+    return lyst_parsing_helpers.image_url_candidates(url)
 
 def _dedupe_preserve(items):
-    seen = set()
-    deduped = []
-    for item in items:
-        if item in seen:
-            continue
-        seen.add(item)
-        deduped.append(item)
-    return deduped
+    return lyst_parsing_helpers.dedupe_preserve(items)
 
 def find_price_strings(root):
-    if not root:
-        return None, None
-    # Prefer explicit strike-through price for original
-    del_el = root.find(['del', 's', 'strike'])
-    del_tokens = extract_price_tokens(del_el.get_text(" ", strip=True)) if del_el else []
-    tokens = _dedupe_preserve(extract_price_tokens(root.get_text(" ", strip=True)))
-    if not tokens:
-        return None, None
-    if del_tokens:
-        original = del_tokens[0]
-        others = [t for t in tokens if t != original]
-        sale = min(others, key=extract_price) if others else original
-        return original, sale
-    if len(tokens) >= 2:
-        original = max(tokens, key=extract_price)
-        sale = min(tokens, key=extract_price)
-        return original, sale
-    return tokens[0], tokens[0]
+    return lyst_parsing_helpers.find_price_strings(root)
 
 def extract_ldjson_image_map(soup):
-    if not soup:
-        return {}
-    image_map = {}
-    for script in soup.find_all('script', type='application/ld+json'):
-        text = script.string or script.get_text(strip=True)
-        if not text or 'ItemList' not in text:
-            continue
-        try:
-            data = json.loads(text)
-        except Exception:
-            continue
-        if data.get('@type') != 'ItemList':
-            continue
-        for item in data.get('itemListElement', []):
-            product = item.get('item', {}) if isinstance(item, dict) else {}
-            url = product.get('url')
-            images = product.get('image') or []
-            if isinstance(images, str):
-                images = [images]
-            image_url = images[0] if images else None
-            image_url = _upgrade_lyst_image_url(image_url)
-            if url and image_url:
-                image_map[url] = image_url
-                if url.startswith("https://www.lyst.com"):
-                    image_map[url.replace("https://www.lyst.com", "")] = image_url
-    return image_map
+    return lyst_parsing_helpers.extract_ldjson_image_map(soup)
 
 def extract_shoe_data(card, country, image_fallback_map=None):
-    if not card:
-        logger.warning("Received None card in extract_shoe_data")
-        return None
-        
-    try:
-        # Extract name via a few fallback strategies
-        finders = [
-            lambda: card.find_all('span', class_=lambda x: x and 'vjlibs5' in x),
-            lambda: card.find_all('span', class_=lambda x: x and 'vjlibs5' in x and 'vjlibs2' in x),
-            lambda: card.find_all('span', class_=re.compile(r'.*vjlibs5.*')),
-            lambda: card.find_all('span', class_=lambda x: x and ('_1b08vvh31' in x and 'vjlibs' in x)),
-        ]
-        name_elements = []
-        for fn in finders:
-            name_elements = fn()
-            if name_elements: break
-        if not name_elements:
-            # Fallback to image alt or link text
-            img_alt = None
-            img_tag = card.find('img', alt=True)
-            if img_tag:
-                img_alt = (img_tag.get('alt') or '').strip()
-            link_text = None
-            link_tag = card.find('a', href=True)
-            if link_tag:
-                link_text = link_tag.get_text(" ", strip=True)
-            full_name = (img_alt or link_text or "").strip()
-            if not full_name:
-                logger.warning(f"No name elements found. Card HTML structure:")
-                debug_spans = card.find_all('span', class_=re.compile(r'.*vjlibs.*'))
-                for i, span in enumerate(debug_spans[:5]):
-                    logger.warning(f"  Debug span {i}: class='{span.get('class')}', text='{span.text.strip()[:50]}'")
-                return None
-        else:
-            full_name = ' '.join(e.text.strip() for e in name_elements if e and e.text)
-        if full_name and "view all" in full_name.strip().lower():
-            return None
-        if 'Giuseppe Zanotti' in full_name: return None
-        
-        # Extract price elements (prefer data-testid, fallback to class heuristics)
-        price_container = card.find('div', attrs={'data-testid': 'product-price'}) or card.find('div', class_='ducdwf0')
-        if not price_container:
-            # Fallback: try extracting prices from the whole card text
-            tokens = extract_price_tokens(card.get_text(" ", strip=True))
-            if len(tokens) >= 2:
-                original_price = max(tokens, key=extract_price)
-                sale_price = min(tokens, key=extract_price)
-            elif len(tokens) == 1:
-                original_price = sale_price = tokens[0]
-            else:
-                logger.warning("Price container not found")
-                return None
-        else:
-            original_price, sale_price = find_price_strings(price_container)
-        if not original_price or not sale_price:
-            # Legacy class-based fallbacks
-            price_div = card.find('div', class_='ducdwf0') or price_container
-            strategies = [
-                lambda: (
-                    price_div.find('div', class_=lambda x: x and '_1b08vvhr6' in x and 'vjlibs1' in x),
-                    price_div.find('div', class_=lambda x: x and '_1b08vvh36' in x and 'vjlibs2' in x)
-                ),
-                lambda: (
-                    price_div.find('div', class_=lambda x: x and ('_1b08vvhos' in x and 'vjlibs1' in x)),
-                    price_div.find('div', class_=lambda x: x and ('_1b08vvh1w' in x and 'vjlibs2' in x))
-                ),
-                lambda: (
-                    price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and 'vjlibs2' in x and '_1b08vvhq2' in x and '_1b08vvh36' not in x),
-                    price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh36' in x)
-                ),
-                lambda: (
-                    price_div.find('div', class_=lambda x: x and 'vjlibs1' in x and '_1b08vvhnk' in x and '_1b08vvh1q' not in x),
-                    price_div.find('div', class_=lambda x: x and 'vjlibs2' in x and '_1b08vvh1q' in x) or
-                    price_div.find('div', class_=lambda x: x and '_1b08vvh1w' in x)
-                ),
-            ]
-            for strat in strategies:
-                o, s = strat()
-                if o and s and o != s:
-                    o_tokens = extract_price_tokens(o.get_text(" ", strip=True))
-                    s_tokens = extract_price_tokens(s.get_text(" ", strip=True))
-                    if o_tokens and s_tokens:
-                        original_price, sale_price = o_tokens[0], s_tokens[0]
-                    break
-            if not original_price or not sale_price:
-                logger.warning("Price elements not found")
-                return None
-        if extract_price(original_price) < 80:
-            logger.info(f"Skipping item '{full_name}' with original price {original_price}")
-            return None
-        
-        # Extract unique ID
-        product_card_div = card.find('div', attrs={'data-testid': 'product-card'}) or card.find('div', class_=lambda x: x and 'kah5ce0' in x and 'kah5ce2' in x)
-        unique_id = product_card_div['id'] if product_card_div and 'id' in product_card_div.attrs else None
-
-        # Extract store
-        store = "Unknown Store"
-        retailer_name = card.find('span', attrs={'data-testid': 'retailer-name'})
-        if retailer_name:
-            store_span = retailer_name.find('span', class_='_1fcx6l24')
-            store_text = store_span.get_text(" ", strip=True) if store_span else retailer_name.get_text(" ", strip=True)
-            store = store_text if store_text else store
-        else:
-            store_elem = card.find('div', attrs={'data-testid': 'retailer'}) or card.find('span', class_='_1fcx6l24')
-            if store_elem:
-                store_text = store_elem.get_text(" ", strip=True)
-                store = store_text if store_text else store
-        
-        # Extract link
-        link_elem = None
-        track_href = None
-        product_href = None
-        for a in card.find_all('a', href=True):
-            href = a.get('href') or ''
-            if not track_href and '/track/lead/' in href:
-                track_href = href
-            if not product_href and any(p in href for p in ['/clothing/', '/shoes/', '/accessories/', '/bags/', '/jewelry/']):
-                product_href = href
-            if track_href and product_href:
-                break
-        href = track_href or product_href
-        if not href:
-            link_elem = card.find('a', href=True)
-            href = link_elem['href'] if link_elem and 'href' in link_elem.attrs else None
-        full_url = f"https://www.lyst.com{href}" if href and href.startswith('/') else href if href and href.startswith('http') else None
-        product_url = None
-        if product_href:
-            product_url = f"https://www.lyst.com{product_href}" if product_href.startswith('/') else product_href
-        canonical_for_id = _normalize_lyst_product_link(product_url or full_url)
-        if not unique_id and canonical_for_id:
-            unique_id = str(uuid.uuid5(uuid.NAMESPACE_URL, canonical_for_id))
-
-        # Extract image
-        img_elem = (
-            card.find('img', src=True)
-            or card.find('img', attrs={'data-src': True})
-            or card.find('img', attrs={'data-lazy-src': True})
-            or card.find('img', attrs={'data-srcset': True})
-            or card.find('img', attrs={'data-lazy-srcset': True})
-            or card.find('img', srcset=True)
-        )
-        image_url = _extract_image_url_from_tag(img_elem)
-        if not image_url:
-            source_elem = card.find('source', srcset=True) or card.find('source', attrs={'data-srcset': True})
-            image_url = _extract_image_url_from_tag(source_elem)
-        # Fallback to JSON-LD image map if lazy image isn't in DOM
-        if (not image_url or not image_url.startswith(("http://", "https://"))) and image_fallback_map:
-            if full_url and full_url in image_fallback_map:
-                image_url = image_fallback_map.get(full_url)
-            elif href and href in image_fallback_map:
-                image_url = image_fallback_map.get(href)
-        image_url = _upgrade_lyst_image_url(image_url)
-        # Ignore inline data URLs or non-external image sources
-        if not image_url or not image_url.startswith(("http://", "https://")):
-            if unique_id:
-                SKIPPED_ITEMS.add(unique_id)
-            return None
-        
-        # Validate required fields
-        required_fields = {
-            'name': full_name, 'original_price': original_price, 'sale_price': sale_price,
-            'image_url': image_url, 'store': store, 'shoe_link': full_url, 'unique_id': unique_id
-        }
-        if any(not v for v in required_fields.values()):
-            missing_fields = [f for f, v in required_fields.items() if not v]
-            logger.warning(f"Missing required fields: {', '.join(missing_fields)}")
-            return None
-        
-        return {
-            'name': full_name, 'original_price': original_price, 'sale_price': sale_price,
-            'image_url': image_url, 'store': store, 'country': country,
-            'shoe_link': full_url, 'unique_id': unique_id
-        }
-    except Exception as e:
-        logger.error(f"Error extracting shoe data: {e}")
-        return None
+    # The parser needs runtime context for logging, skipped-image accounting, and
+    # stable product-link IDs; pass those explicitly instead of keeping parser code
+    # inside the service entrypoint.
+    return lyst_parsing_helpers.extract_shoe_data(
+        card,
+        country,
+        logger=logger,
+        skipped_items=SKIPPED_ITEMS,
+        normalize_product_link=_normalize_lyst_product_link,
+        image_fallback_map=image_fallback_map,
+    )
 
 async def scrape_page(url, country, max_scroll_attempts=None, url_name=None, page_num=None, use_pagination=None):
     try:

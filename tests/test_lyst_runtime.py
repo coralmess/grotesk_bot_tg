@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from helpers.lyst_runtime import build_shoe_message, get_sale_emoji
 
@@ -78,6 +79,54 @@ class LystRuntimeTests(unittest.TestCase):
                 return False
 
         self.assertTrue(_should_skip_lyst_source_for_backoff("Main brands", "US", Backoff()))
+
+    def test_image_url_wrapper_delegates_to_parsing_helper(self):
+        import GroteskBotTg
+
+        with mock.patch.object(
+            GroteskBotTg.lyst_parsing_helpers,
+            "upgrade_lyst_image_url",
+            return_value="https://img.example/item.jpg",
+        ) as helper:
+            result = GroteskBotTg._upgrade_lyst_image_url("https://raw.example/item.jpg")
+
+        self.assertEqual(result, "https://img.example/item.jpg")
+        helper.assert_called_once_with("https://raw.example/item.jpg")
+
+    def test_image_candidates_wrapper_delegates_to_parsing_helper(self):
+        import GroteskBotTg
+
+        with mock.patch.object(
+            GroteskBotTg.lyst_parsing_helpers,
+            "image_url_candidates",
+            return_value=["https://img.example/a.jpg"],
+        ) as helper:
+            result = GroteskBotTg._image_url_candidates("https://img.example/a.jpg")
+
+        self.assertEqual(result, ["https://img.example/a.jpg"])
+        helper.assert_called_once_with("https://img.example/a.jpg")
+
+    def test_extract_shoe_data_wrapper_passes_runtime_context_to_helper(self):
+        import GroteskBotTg
+
+        card = object()
+        fallback_map = {"product": "image"}
+        expected = {"name": "Delegated Shoe"}
+        with mock.patch.object(
+            GroteskBotTg.lyst_parsing_helpers,
+            "extract_shoe_data",
+            return_value=expected,
+        ) as helper:
+            result = GroteskBotTg.extract_shoe_data(card, "US", fallback_map)
+
+        self.assertEqual(result, expected)
+        helper.assert_called_once()
+        _, country = helper.call_args.args
+        self.assertEqual(country, "US")
+        self.assertIs(helper.call_args.kwargs["logger"], GroteskBotTg.logger)
+        self.assertIs(helper.call_args.kwargs["skipped_items"], GroteskBotTg.SKIPPED_ITEMS)
+        self.assertIs(helper.call_args.kwargs["normalize_product_link"], GroteskBotTg._normalize_lyst_product_link)
+        self.assertEqual(helper.call_args.kwargs["image_fallback_map"], fallback_map)
 
 
 if __name__ == "__main__":
