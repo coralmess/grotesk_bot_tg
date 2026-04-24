@@ -24,6 +24,7 @@ from helpers.lyst import cycle as lyst_cycle_helpers
 from helpers.lyst import parsing as lyst_parsing_helpers
 from helpers.lyst import pricing as lyst_pricing_helpers
 from helpers.lyst import processing as lyst_processing_helpers
+from helpers.lyst.cloudflare_backoff import CloudflareBackoff
 from helpers.lyst.http_client import AsyncLystHttpClient
 from helpers.lyst.models import FetchStatus
 from helpers.lyst.outcome import LystRunOutcome
@@ -36,7 +37,7 @@ from helpers.lyst.browser import (
 )
 from helpers.lyst.resume import LystResumeController
 from helpers.lyst.storage import LystStorage
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC, LYST_CLOUDFLARE_BASE_COOLDOWN_SEC, LYST_CLOUDFLARE_MAX_COOLDOWN_SEC
 from config_lyst import (
     BASE_URLS,
     LYST_COUNTRIES,
@@ -62,6 +63,7 @@ from helpers.runtime_paths import (
     OLX_ITEMS_DB_FILE as RUNTIME_OLX_DB_FILE,
     SHAFA_ITEMS_DB_FILE as RUNTIME_SHAFA_DB_FILE,
     LYST_RESUME_JSON_FILE,
+    LYST_CLOUDFLARE_BACKOFF_FILE,
     SHOE_DATA_JSON_FILE,
     EXCHANGE_RATES_JSON_FILE,
 )
@@ -211,6 +213,13 @@ LYST_HTTP_SEMAPHORE = asyncio.Semaphore(LYST_HTTP_CONCURRENCY)
 # transport boundary instead of recreating blocking request sessions per page fetch.
 LYST_HTTP_CLIENT = None
 LYST_STATUS_MANAGER = None
+# This runtime backoff is process-global by design: all concurrent country tasks
+# share one persisted view of which source/country pairs should cool down.
+LYST_CLOUDFLARE_BACKOFF = CloudflareBackoff(
+    LYST_CLOUDFLARE_BACKOFF_FILE,
+    base_cooldown_sec=LYST_CLOUDFLARE_BASE_COOLDOWN_SEC,
+    max_cooldown_sec=LYST_CLOUDFLARE_MAX_COOLDOWN_SEC,
+)
 
 # Statistics tracking
 max_wait_times = {'url_changes': 0, 'final_url_changes': 0}
@@ -1568,11 +1577,16 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
     if resume_active and entry.get("completed"):
         logger.info(f"Skipping {url_name} for {country} (completed in previous run)")
         return all_shoes
+    if _should_skip_lyst_source_for_backoff(url_name, country):
+        logger.warning(f"Skipping {url_name} for {country} due to active Cloudflare cooldown")
+        LYST_RESUME_ENTRY_OUTCOMES[key] = "cloudflare_cooldown"
+        return all_shoes
     page = entry.get("next_page", 1) if resume_active else 1
     started_from_resume_page = bool(resume_active and use_pagination and page > 1)
     last_scraped_page = entry.get("last_scraped_page", entry.get("last_success_page", 0))
     if use_pagination and page > 1:
         logger.info(f"Resuming {url_name} for {country} from page {page}")
+    completed_without_fetch_failure = False
     
     while True:
         if LYST_ABORT_EVENT.is_set():
@@ -1604,12 +1618,15 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
         )
         if status == "cloudflare":
             LYST_RESUME_ENTRY_OUTCOMES[key] = "cloudflare"
-            LYST_LAST_CLOUDFLARE_EVENT = {
-                "source_name": url_name,
-                "country": country,
-                "page": page,
-            }
             logger.error(f"Cloudflare challenge for {url_name} {country} page {page}")
+            decision = _record_lyst_cloudflare_failure(url_name, country, page)
+            logger.warning(
+                "Cloudflare cooldown for %s %s: failures=%s cooldown=%ss",
+                url_name,
+                country,
+                decision.failure_count,
+                decision.cooldown_sec,
+            )
             # Status tracking must record this as a failed run; otherwise the bot can
             # show a green last-run marker even though resume state says we aborted.
             _mark_lyst_issue("Cloudflare challenge")
@@ -1644,6 +1661,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             break
         if status == "terminal":
             logger.info(f"{url_name} for {country} reached terminal page {page} (HTTP 410)")
+            completed_without_fetch_failure = True
             if started_from_resume_page and not all_shoes:
                 LYST_RESUME_ENTRY_OUTCOMES[key] = "terminal_only_resume"
             else:
@@ -1658,7 +1676,8 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             break
         if not shoes:
             LYST_RESUME_ENTRY_OUTCOMES[key] = "empty"
-            if use_pagination and page < 3:
+            stopped_too_early = use_pagination and page < 3
+            if stopped_too_early:
                 logger.error(f"{url_name} for {country} Stopped too early. Please check for errors")
                 _mark_lyst_issue("Stopped too early")
                 now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
@@ -1683,6 +1702,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
                     return await scrape_all_pages(base_url, country, use_pagination=not use_pagination)
             
             logger.info(f"Total for {country} {url_name}: {len(all_shoes)}. Stopped on page {page}")
+            completed_without_fetch_failure = not stopped_too_early
             await _update_resume_with_url(
                 key,
                 url,
@@ -1715,6 +1735,8 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
             
         page += 1
         await asyncio.sleep(1) 
+    if completed_without_fetch_failure:
+        _record_lyst_source_success(url_name, country)
     return all_shoes
 
 # Price and currency conversions
@@ -2017,6 +2039,36 @@ def _build_lyst_run_outcome(
         return LystRunOutcome.failed(fallback_note or "failed")
     return LystRunOutcome.full_success(items_seen=items_seen, new_items=new_items)
 
+
+def _should_skip_lyst_source_for_backoff(source_name: str, country: str, backoff=LYST_CLOUDFLARE_BACKOFF) -> bool:
+    # Cooldown skips are deliberate: they reduce repeated Cloudflare hits without
+    # disabling the whole LYST run when only one source/country pair is blocked.
+    return not backoff.should_allow(source_name, country)
+
+
+def _record_lyst_cloudflare_failure(
+    source_name: str,
+    country: str,
+    page: int | None,
+    backoff=LYST_CLOUDFLARE_BACKOFF,
+):
+    global LYST_LAST_CLOUDFLARE_EVENT
+    # Keep the latest challenge context so final health state explains exactly
+    # which source/country/page made the run fail.
+    LYST_LAST_CLOUDFLARE_EVENT = {
+        "source_name": source_name,
+        "country": country,
+        "page": page,
+    }
+    return backoff.record_failure(source_name, country)
+
+
+def _record_lyst_source_success(source_name: str, country: str, backoff=LYST_CLOUDFLARE_BACKOFF) -> None:
+    # Clear only after a clean source/country completion so old penalties do not
+    # survive once LYST proves that pair can be fetched again.
+    backoff.record_success(source_name, country)
+
+
 async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManager | None = None):
     global LYST_LAST_PROGRESS_TS, LYST_ACTIVE_TASK, LYST_CYCLE_STARTED_IN_RESUME, LYST_RESUME_ENTRY_OUTCOMES, LYST_LAST_CLOUDFLARE_EVENT
     LYST_ACTIVE_TASK = asyncio.current_task()
@@ -2027,6 +2079,7 @@ async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManage
     started = time.perf_counter()
     if status_manager is not None:
         status_manager.begin_cycle()
+        status_manager.set_state_fields(lyst_cloudflare_backoff=LYST_CLOUDFLARE_BACKOFF.snapshot())
     _touch_lyst_progress("run_start")
     try:
         old_data = await load_shoe_data()

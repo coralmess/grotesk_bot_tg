@@ -70,6 +70,15 @@ class LystRuntimeTests(unittest.TestCase):
         self.assertEqual(outcome.phase, "failed_cloudflare")
         self.assertIn("Main brands", outcome.note)
 
+    def test_should_skip_lyst_source_when_cloudflare_backoff_blocks_it(self):
+        from GroteskBotTg import _should_skip_lyst_source_for_backoff
+
+        class Backoff:
+            def should_allow(self, source_name, country):
+                return False
+
+        self.assertTrue(_should_skip_lyst_source_for_backoff("Main brands", "US", Backoff()))
+
 
 if __name__ == "__main__":
     unittest.main()
