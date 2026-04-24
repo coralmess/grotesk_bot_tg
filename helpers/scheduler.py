@@ -1,6 +1,44 @@
 import asyncio
 import random
 import time
+from dataclasses import dataclass
+
+
+@dataclass(slots=True)
+class SchedulerRun:
+    name: str
+    run_id: int
+    started_ts: float
+
+
+class SchedulerRunAccountant:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self._next_run_id = 1
+        self.state = "idle"
+        self.last_outcome = ""
+        self.last_duration_sec: int | None = None
+        self._last_sleep_bucket: int | None = None
+
+    def start_run(self, *, now_ts: float) -> SchedulerRun:
+        run = SchedulerRun(self.name, self._next_run_id, now_ts)
+        self._next_run_id += 1
+        self.state = "running"
+        return run
+
+    def finish_run(self, run: SchedulerRun, outcome: str, *, now_ts: float) -> None:
+        self.state = "idle"
+        self.last_outcome = outcome
+        self.last_duration_sec = max(0, int(now_ts - run.started_ts))
+
+    def should_log_sleep(self, sleep_for: int) -> bool:
+        # Bucketed sleep logging keeps long-running service logs readable while
+        # still showing meaningful scheduler wake changes.
+        bucket = max(0, int(sleep_for // 60))
+        if self._last_sleep_bucket == bucket:
+            return False
+        self._last_sleep_bucket = bucket
+        return True
 
 
 def _sleep_interval_with_jitter(base_sec: int, jitter_sec: int) -> int:
@@ -225,14 +263,18 @@ async def run_lyst_scheduler(
     next_lyst_ts = time.time()
     lyst_task = None
     lyst_task_started_ts = None
+    accountant = SchedulerRunAccountant("lyst")
+    active_run = None
 
     while True:
         try:
             now_ts = time.time()
             if is_running_lyst() and now_ts >= next_lyst_ts:
                 if lyst_task is None or lyst_task.done():
-                    lyst_task = asyncio.create_task(run_lyst())
-                    lyst_task_started_ts = time.time()
+                    active_run = accountant.start_run(now_ts=time.time())
+                    logger.info("Starting LYST scheduler run #%s", active_run.run_id)
+                    lyst_task = asyncio.create_task(run_lyst(), name=f"lyst_run_{active_run.run_id}")
+                    lyst_task_started_ts = active_run.started_ts
                     next_lyst_ts = time.time() + _sleep_interval_with_jitter(check_interval_sec, check_jitter_sec)
             elif not is_running_lyst():
                 logger.info("Lyst scraping disabled (IsRunningLyst=false)")
@@ -255,6 +297,7 @@ async def run_lyst_scheduler(
                     next_lyst_ts = time.time() + _sleep_interval_with_jitter(check_interval_sec, check_jitter_sec)
 
             if lyst_task is not None and lyst_task.done():
+                exc = None
                 if lyst_task.cancelled():
                     logger.warning("Lyst task cancelled")
                 else:
@@ -264,6 +307,16 @@ async def run_lyst_scheduler(
                         exc = None
                     if exc:
                         logger.error(f"Lyst task crashed: {exc}")
+                outcome = "cancelled" if lyst_task.cancelled() else "failed" if exc else "success"
+                if active_run is not None:
+                    accountant.finish_run(active_run, outcome, now_ts=time.time())
+                    logger.info(
+                        "Finished LYST scheduler run #%s outcome=%s duration=%ss",
+                        active_run.run_id,
+                        outcome,
+                        accountant.last_duration_sec,
+                    )
+                    active_run = None
                 lyst_task = None
                 lyst_task_started_ts = None
 
@@ -272,7 +325,8 @@ async def run_lyst_scheduler(
             if lyst_task is not None and not lyst_task.done() and progress_ts:
                 next_wake = min(next_wake, progress_ts + lyst_stall_timeout_sec)
             sleep_for = max(5, int(next_wake - time.time()))
-            logger.info(f"Sleeping for {sleep_for} seconds before next Lyst check")
+            if accountant.should_log_sleep(sleep_for):
+                logger.info(f"Sleeping for {sleep_for} seconds before next Lyst check")
             await asyncio.sleep(sleep_for)
         except KeyboardInterrupt:
             logger.info("Lyst scheduler terminated by user")
