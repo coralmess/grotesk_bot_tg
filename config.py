@@ -35,6 +35,10 @@ LYST_HTTP_REQUEST_JITTER_SEC = float(os.getenv('LYST_HTTP_REQUEST_JITTER_SEC', '
 # short-lived challenge, but not enough to keep burning the IP after Cloudflare engages.
 LYST_CLOUDFLARE_RETRY_COUNT = int(os.getenv('LYST_CLOUDFLARE_RETRY_COUNT', '1'))
 LYST_CLOUDFLARE_RETRY_DELAY_SEC = float(os.getenv('LYST_CLOUDFLARE_RETRY_DELAY_SEC', '30'))
+# Persisted Cloudflare cooldowns stop the instance from immediately retrying the same
+# source/country pair after a challenge, which protects the free Oracle IP from loops.
+LYST_CLOUDFLARE_BASE_COOLDOWN_SEC = int(os.getenv('LYST_CLOUDFLARE_BASE_COOLDOWN_SEC', '900' if IS_INSTANCE else '60'))
+LYST_CLOUDFLARE_MAX_COOLDOWN_SEC = int(os.getenv('LYST_CLOUDFLARE_MAX_COOLDOWN_SEC', '7200' if IS_INSTANCE else '600'))
 
 # Concurrency tuning (lower on instance to reduce CPU spikes)
 LYST_MAX_BROWSERS = int(os.getenv('LYST_MAX_BROWSERS', '2' if IS_INSTANCE else '6'))
