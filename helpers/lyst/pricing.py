@@ -223,14 +223,15 @@ async def async_load_exchange_rates(*, exchange_rate_api_key: str, exchange_rate
     return {"EUR": 1, "USD": 1, "GBP": 1}
 
 
-def _load_cached_exchange_rates(exchange_rates_file: Path):
+def _load_cached_exchange_rates(exchange_rates_file: Path, *, now: datetime | None = None):
     with exchange_rates_file.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
     cached_rates = data.get("rates")
     last_update = data.get("last_update")
+    current_time = now or datetime.now()
     # The bot treats FX cache freshness as a calendar-day safeguard, not a strict
     # 24-hour SLA, so a previous-day cache is still acceptable before re-fetching.
-    is_fresh = bool(last_update) and (datetime.now() - datetime.fromisoformat(last_update)).days <= 1
+    is_fresh = bool(last_update) and (current_time - datetime.fromisoformat(last_update)).days <= 1
     return cached_rates, is_fresh
 
 

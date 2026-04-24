@@ -1,7 +1,9 @@
 import asyncio
+import json
 import logging
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -29,7 +31,15 @@ class LystPricingTests(unittest.TestCase):
     def test_load_exchange_rates_uses_fresh_cache_without_network(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rates.json"
-            path.write_text('{"last_update":"2026-04-21T10:00:00","rates":{"EUR":0.04,"USD":0.025,"GBP":0.03}}', encoding="utf-8")
+            path.write_text(
+                json.dumps(
+                    {
+                        "last_update": datetime.now().isoformat(),
+                        "rates": {"EUR": 0.04, "USD": 0.025, "GBP": 0.03},
+                    }
+                ),
+                encoding="utf-8",
+            )
             rates = pricing.load_exchange_rates(
                 exchange_rate_api_key="unused",
                 exchange_rates_file=path,
@@ -40,7 +50,15 @@ class LystPricingTests(unittest.TestCase):
     def test_async_load_exchange_rates_uses_fresh_cache_without_network(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rates.json"
-            path.write_text('{"last_update":"2026-04-21T10:00:00","rates":{"EUR":0.04,"USD":0.025,"GBP":0.03}}', encoding="utf-8")
+            path.write_text(
+                json.dumps(
+                    {
+                        "last_update": datetime.now().isoformat(),
+                        "rates": {"EUR": 0.04, "USD": 0.025, "GBP": 0.03},
+                    }
+                ),
+                encoding="utf-8",
+            )
             with mock.patch.object(pricing, "async_update_exchange_rates", side_effect=AssertionError("network not expected")):
                 rates = asyncio.run(
                     pricing.async_load_exchange_rates(
@@ -49,4 +67,20 @@ class LystPricingTests(unittest.TestCase):
                         logger=self.logger,
                     )
                 )
+        self.assertEqual(rates["USD"], 0.025)
+
+    def test_load_cached_exchange_rates_uses_injected_now_for_freshness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rates.json"
+            path.write_text(
+                '{"last_update":"2026-04-21T10:00:00","rates":{"EUR":0.04,"USD":0.025,"GBP":0.03}}',
+                encoding="utf-8",
+            )
+
+            rates, is_fresh = pricing._load_cached_exchange_rates(
+                path,
+                now=datetime.fromisoformat("2026-04-22T09:00:00"),
+            )
+
+        self.assertTrue(is_fresh)
         self.assertEqual(rates["USD"], 0.025)
