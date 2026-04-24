@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 import re
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -11,6 +11,34 @@ from helpers.auto_ria.models import AutoRiaListing, VinDecoderDetails
 
 AUTO_RIA_BASE_URL = "https://auto.ria.com"
 _USD_PRICE_RE = re.compile(r"(\d[\d\s]*)\s*\$")
+_SOLD_AVAILABILITY_RE = re.compile(r'"availability"\s*:\s*"https://schema\.org/SoldOut"', re.IGNORECASE)
+
+
+def normalize_auto_ria_search_url(url: str, *, limit: int = 100) -> str:
+    parsed = urlsplit(url)
+    # Auto RIA already exposes page size in query params, so one large first page
+    # covers the configured searches without extra browser pagination state.
+    normalized_limit = str(max(1, int(limit)))
+    query_pairs: list[tuple[str, str]] = []
+    saw_page = False
+    saw_limit = False
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key == "page":
+            if not saw_page:
+                query_pairs.append(("page", "0"))
+                saw_page = True
+            continue
+        if key == "limit":
+            if not saw_limit:
+                query_pairs.append(("limit", normalized_limit))
+                saw_limit = True
+            continue
+        query_pairs.append((key, value))
+    if not saw_page:
+        query_pairs.append(("page", "0"))
+    if not saw_limit:
+        query_pairs.append(("limit", normalized_limit))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query_pairs), parsed.fragment))
 
 
 def normalize_auto_ria_image_url(image_url: Optional[str]) -> Optional[str]:
@@ -86,6 +114,14 @@ def extract_vin_from_detail_html(html_text: str) -> Optional[str]:
     return vin or None
 
 
+def is_auto_ria_sold_detail_html(html_text: str) -> bool:
+    if not html_text:
+        return False
+    # Sold car pages still return HTTP 200, but their structured Offer metadata
+    # switches availability to SoldOut. This is more stable than visible text.
+    return bool(_SOLD_AVAILABILITY_RE.search(html_text))
+
+
 def parse_vin_decoder_html(html_text: str) -> VinDecoderDetails:
     soup = BeautifulSoup(html_text, "html.parser")
     trim: Optional[str] = None
@@ -142,17 +178,28 @@ def build_auto_ria_caption(
     # user jump straight into the listing from the most visually prominent line.
     lines = [f'<a href="{html.escape(listing.url, quote=True)}"><b>{html.escape(listing.title)}</b></a>']
     if listing.subtitle:
-        lines.append(html.escape(listing.subtitle))
+        # Italicizing secondary trim/engine text separates it from hard facts below while
+        # preserving the original Auto RIA wording for quick visual comparison.
+        lines.append(f"<i>{html.escape(listing.subtitle)}</i>")
     lines.append("")
     # The price line was explicitly requested above mileage because that is how the alert
     # should scan in Telegram when the user triages multiple car candidates quickly.
-    lines.append(f"Ціна: <b>{html.escape(listing.price_text)}</b>")
+    lines.append(f"<b>Ціна:</b> <b>{html.escape(listing.price_text)}</b>")
     if listing.mileage_text:
-        lines.append(f"Пробіг: {html.escape(listing.mileage_text)}")
+        lines.append(f"<b>Пробіг:</b> {html.escape(listing.mileage_text)}")
     if listing.fuel_engine_text:
-        lines.append(html.escape(listing.fuel_engine_text))
+        lines.append(f"<b>Двигун:</b> {html.escape(listing.fuel_engine_text)}")
     if transmission:
-        lines.append(f"Коробка: {html.escape(transmission)}")
+        lines.append(f"<b>Коробка:</b> {html.escape(transmission)}")
     if trim:
-        lines.append(f"Комплектація: {html.escape(trim)}")
+        lines.append(f"<b>Комплектація:</b> {html.escape(trim)}")
     return "\n".join(lines)
+
+
+def build_auto_ria_sold_caption(listing: AutoRiaListing, *, original_caption: str) -> str:
+    # Sold detection is asynchronous after the original alert, so the edit keeps the old
+    # caption intact and only adds an obvious status banner above it.
+    sold_line = "<b>Продано</b>"
+    if original_caption.startswith(sold_line):
+        return original_caption
+    return f"{sold_line}\n{original_caption}"

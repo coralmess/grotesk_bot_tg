@@ -1,15 +1,20 @@
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 
+from helpers.auto_ria.runtime import AutoRiaBotRuntime
 from helpers.auto_ria.parsing import (
     build_auto_ria_caption,
+    build_auto_ria_sold_caption,
     extract_vin_from_detail_html,
+    is_auto_ria_sold_detail_html,
     normalize_auto_ria_image_url,
+    normalize_auto_ria_search_url,
     parse_auto_ria_search_html,
     parse_nhtsa_vpic_payload,
 )
-from helpers.auto_ria.storage import AutoRiaStorage
+from helpers.auto_ria.storage import AutoRiaSentItem, AutoRiaStorage
 
 
 SEARCH_HTML = """
@@ -53,6 +58,12 @@ NHTSA_VPIC_PAYLOAD = {
     ]
 }
 
+SOLD_DETAIL_HTML = """
+<script type="application/ld+json">
+{"@type":"Offer","availability":"https://schema.org/SoldOut"}
+</script>
+"""
+
 
 class AutoRiaParsingTests(unittest.TestCase):
     def test_parse_search_html_extracts_listing_fields(self) -> None:
@@ -91,26 +102,112 @@ class AutoRiaParsingTests(unittest.TestCase):
         self.assertEqual(
             caption,
             '<a href="https://auto.ria.com/uk/auto_audi_a3_39769491.html"><b>Audi A3 2015</b></a>\n'
-            "8V  •  2.0T S-Tronic (220 к.с.) Quattro  •  Basis\n\n"
-            "Ціна: <b>10 490 $</b>\n"
-            "Пробіг: 109 тис. км\n"
-            "Бензин, 1.98 л\n"
-            "Коробка: Automatic\n"
-            "Комплектація: quattro Premium",
+            "<i>8V  •  2.0T S-Tronic (220 к.с.) Quattro  •  Basis</i>\n\n"
+            "<b>Ціна:</b> <b>10 490 $</b>\n"
+            "<b>Пробіг:</b> 109 тис. км\n"
+            "<b>Двигун:</b> Бензин, 1.98 л\n"
+            "<b>Коробка:</b> Automatic\n"
+            "<b>Комплектація:</b> quattro Premium",
         )
 
     def test_build_caption_omits_vin_fields_when_unavailable(self) -> None:
         listing = parse_auto_ria_search_html(SEARCH_HTML)[0]
         caption = build_auto_ria_caption(listing, transmission=None, trim=None)
-        self.assertNotIn("Коробка:", caption)
-        self.assertNotIn("Комплектація:", caption)
-        self.assertIn("Ціна: <b>10 490 $</b>", caption)
+        self.assertNotIn("<b>Коробка:</b>", caption)
+        self.assertNotIn("<b>Комплектація:</b>", caption)
+        self.assertIn("<b>Ціна:</b> <b>10 490 $</b>", caption)
 
     def test_normalize_auto_ria_image_url_switches_to_hd_variant(self) -> None:
         self.assertEqual(
             normalize_auto_ria_image_url("https://cdn1.riastatic.com/photosnew/auto/photo/_a3__638617591fx.jpg"),
             "https://cdn1.riastatic.com/photosnew/auto/photo/_a3__638617591fhd.jpg",
         )
+
+    def test_normalize_search_url_requests_one_large_first_page(self) -> None:
+        url = "https://auto.ria.com/uk/search/?search_type=1&page=2&limit=20&price[2]=13000"
+        self.assertEqual(
+            normalize_auto_ria_search_url(url),
+            "https://auto.ria.com/uk/search/?search_type=1&page=0&limit=100&price%5B2%5D=13000",
+        )
+
+    def test_sold_detail_detection_uses_schema_availability(self) -> None:
+        self.assertTrue(is_auto_ria_sold_detail_html(SOLD_DETAIL_HTML))
+        self.assertFalse(is_auto_ria_sold_detail_html(DETAIL_HTML))
+
+    def test_sold_caption_preserves_link_and_marks_listing_sold(self) -> None:
+        listing = parse_auto_ria_search_html(SEARCH_HTML)[0]
+        caption = build_auto_ria_sold_caption(
+            listing,
+            original_caption=build_auto_ria_caption(listing, transmission=None, trim=None),
+        )
+        self.assertIn("<b>Продано</b>", caption)
+        self.assertIn("https://auto.ria.com/uk/auto_audi_a3_39769491.html", caption)
+
+
+class FakeAutoRiaBot:
+    def __init__(self) -> None:
+        self.edited_captions: list[dict] = []
+
+    async def edit_message_caption(self, **kwargs):
+        self.edited_captions.append(kwargs)
+        return True
+
+
+class FakeAutoRiaSoldStorage:
+    def __init__(self) -> None:
+        self.sold_ids: list[str] = []
+
+    def fetch_active_sent_items(self) -> list[AutoRiaSentItem]:
+        return [
+            AutoRiaSentItem(
+                car_id="39769491",
+                title="Audi A3 2015",
+                url="https://auto.ria.com/uk/auto_audi_a3_39769491.html",
+                price_usd=10490,
+                message_id=123,
+                message_kind="photo",
+                caption="original caption",
+            )
+        ]
+
+    def mark_sold(self, *, car_id: str) -> None:
+        self.sold_ids.append(car_id)
+
+
+class AutoRiaRuntimeTests(unittest.TestCase):
+    def test_runtime_normalizes_configured_search_urls_to_large_first_page(self) -> None:
+        runtime = AutoRiaBotRuntime(
+            bot_token="123:abc",
+            chat_id=1,
+            sources=[{"url": "https://auto.ria.com/uk/search/?page=2&limit=20", "url_name": "cars"}],
+        )
+
+        self.assertEqual(runtime._sources[0].url, "https://auto.ria.com/uk/search/?page=0&limit=100")
+
+    def test_refresh_sold_status_edits_stored_photo_message(self) -> None:
+        async def run_test() -> tuple[FakeAutoRiaBot, FakeAutoRiaSoldStorage]:
+            runtime = AutoRiaBotRuntime(
+                bot_token="123:abc",
+                chat_id=1,
+                sources=[],
+            )
+            fake_bot = FakeAutoRiaBot()
+            fake_storage = FakeAutoRiaSoldStorage()
+            runtime._bot = fake_bot
+            runtime._storage = fake_storage
+
+            async def fake_fetch_text(url: str):
+                return SOLD_DETAIL_HTML
+
+            runtime._fetch_text = fake_fetch_text
+            await runtime._refresh_sold_statuses()
+            return fake_bot, fake_storage
+
+        fake_bot, fake_storage = asyncio.run(run_test())
+
+        self.assertEqual(fake_storage.sold_ids, ["39769491"])
+        self.assertEqual(fake_bot.edited_captions[0]["message_id"], 123)
+        self.assertIn("<b>Продано</b>", fake_bot.edited_captions[0]["caption"])
 
 
 class AutoRiaStorageTests(unittest.TestCase):
@@ -127,9 +224,20 @@ class AutoRiaStorageTests(unittest.TestCase):
                 title="Audi A3 2015",
                 url="https://auto.ria.com/uk/auto_audi_a3_39769491.html",
                 price_usd=10490,
+                message_id=123,
+                message_kind="photo",
+                caption="caption",
             )
 
             self.assertEqual(storage.fetch_seen_ids(["39769491", "other"]), {"39769491"})
+
+            records = storage.fetch_active_sent_items()
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].message_id, 123)
+            self.assertEqual(records[0].message_kind, "photo")
+            self.assertEqual(records[0].caption, "caption")
+            storage.mark_sold(car_id="39769491")
+            self.assertEqual(storage.fetch_active_sent_items(), [])
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
 import random
@@ -10,23 +11,24 @@ from typing import Iterable, Optional
 
 import requests
 from telegram import Bot
+from telegram.constants import ParseMode
 
 from config import RUN_ACCEPT_LANGUAGE, RUN_USER_AGENT
 from config_auto_ria_urls import AUTO_RIA_URLS
 from helpers.auto_ria.models import AutoRiaListing, VinDecoderDetails
 from helpers.auto_ria.parsing import (
     build_auto_ria_caption,
+    build_auto_ria_sold_caption,
     extract_vin_from_detail_html,
+    is_auto_ria_sold_detail_html,
+    normalize_auto_ria_search_url,
     parse_nhtsa_vpic_payload,
     parse_auto_ria_search_html,
 )
-from helpers.auto_ria.storage import AutoRiaStorage
+from helpers.auto_ria.storage import AutoRiaSentItem, AutoRiaStorage
+from helpers.image_pipeline import upscale_image_bytes_for_telegram_sync
 from helpers.auto_ria.vin import build_vin_decoder_url
-from helpers.marketplace_sender import (
-    build_media_sender,
-    build_message_sender,
-    build_photo_sender,
-)
+from helpers.marketplace_sender import async_retry
 from helpers.process_pool import run_cpu_bound
 from helpers.runtime_paths import AUTO_RIA_ITEMS_DB_FILE
 from helpers.service_health import build_service_health
@@ -36,6 +38,13 @@ from helpers.service_health import build_service_health
 class AutoRiaSource:
     url: str
     url_name: str
+
+
+@dataclass(frozen=True)
+class AutoRiaSendOutcome:
+    sent: bool
+    message_id: int | None = None
+    message_kind: str = "photo"
 
 
 class AutoRiaBotRuntime:
@@ -55,7 +64,9 @@ class AutoRiaBotRuntime:
         self._bot = Bot(token=bot_token)
         self._chat_id = str(chat_id)
         self._sources = [
-            AutoRiaSource(url=source["url"], url_name=source["url_name"])
+            # Auto RIA supports page size through URL parameters, so normalize once at
+            # startup instead of depending on a brittle UI pagination click flow.
+            AutoRiaSource(url=normalize_auto_ria_search_url(source["url"]), url_name=source["url_name"])
             for source in sources
             if source.get("url") and source.get("url_name")
         ]
@@ -70,17 +81,6 @@ class AutoRiaBotRuntime:
         self._http_semaphore = asyncio.Semaphore(max(2, connector_limit))
         self._send_semaphore = asyncio.Semaphore(2)
         self._connector_limit = max(4, int(connector_limit))
-
-        self._send_message = build_message_sender(send_semaphore=self._send_semaphore)
-        self._send_photo_by_bytes = build_photo_sender(send_semaphore=self._send_semaphore)
-        self._send_media = build_media_sender(
-            is_valid_image_url=self._is_valid_image_url,
-            download_bytes=self._download_image_bytes,
-            send_message=self._send_message,
-            send_photo_by_bytes=self._send_photo_by_bytes,
-            run_cpu_bound_fn=run_cpu_bound,
-            logger=self._logger,
-        )
 
     async def start(self) -> None:
         self._storage.create_tables()
@@ -118,6 +118,8 @@ class AutoRiaBotRuntime:
         sent_count = 0
         run_seen_ids: set[str] = set()
 
+        await self._refresh_sold_statuses()
+
         for source in self._sources:
             html_text = await self._fetch_text(source.url)
             if not html_text:
@@ -144,20 +146,122 @@ class AutoRiaBotRuntime:
             trim=vin_details.trim,
         )
 
-        sent = await self._send_media(
-            self._bot,
-            self._chat_id,
-            caption,
-            listing.image_url,
-        )
-        if sent:
+        sent = await self._send_listing_alert(caption, listing.image_url)
+        if sent.sent:
             self._storage.mark_sent(
                 car_id=listing.id,
                 title=listing.title,
                 url=listing.url,
                 price_usd=listing.price_usd,
+                message_id=sent.message_id,
+                message_kind=sent.message_kind,
+                caption=caption,
             )
-        return bool(sent)
+        return bool(sent.sent)
+
+    async def _refresh_sold_statuses(self) -> None:
+        for item in self._storage.fetch_active_sent_items():
+            if not item.message_id or not item.caption:
+                continue
+            html_text = await self._fetch_text(item.url)
+            if not is_auto_ria_sold_detail_html(html_text or ""):
+                continue
+            edited = await self._edit_sold_message(item)
+            if edited:
+                self._storage.mark_sold(car_id=item.car_id)
+
+    async def _edit_sold_message(self, item: AutoRiaSentItem) -> bool:
+        listing = AutoRiaListing(
+            id=item.car_id,
+            url=item.url,
+            title=item.title,
+            subtitle="",
+            price_usd=item.price_usd,
+            price_text="",
+            mileage_text="",
+            fuel_engine_text="",
+            image_url=None,
+        )
+        caption = build_auto_ria_sold_caption(listing, original_caption=item.caption)
+        try:
+            # Sold pages stay HTTP 200, so editing the existing alert is less noisy than
+            # sending a new "sold" message and keeps the original car context in place.
+            if item.message_kind == "text":
+                await self._bot.edit_message_text(
+                    chat_id=self._chat_id,
+                    message_id=item.message_id,
+                    text=caption,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=False,
+                )
+            else:
+                await self._bot.edit_message_caption(
+                    chat_id=self._chat_id,
+                    message_id=item.message_id,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                )
+            return True
+        except Exception as exc:
+            self._logger.warning("Failed to mark Auto RIA message as sold for %s: %s", item.url, exc)
+            return False
+
+    async def _send_listing_alert(self, caption: str, image_url: Optional[str]) -> AutoRiaSendOutcome:
+        if not self._is_valid_image_url(image_url):
+            return await self._coerce_send_outcome(await self._send_text_alert(caption), message_kind="text")
+
+        try:
+            raw = await self._download_image_bytes(image_url)
+        except Exception as exc:
+            self._logger.warning("Photo download failed; sending Auto RIA text alert: %s", exc)
+            raw = None
+        if not raw:
+            return await self._coerce_send_outcome(await self._send_text_alert(caption), message_kind="text")
+
+        photo_bytes = await run_cpu_bound(
+            upscale_image_bytes_for_telegram_sync,
+            raw,
+            logger=self._logger,
+        )
+        photo_bytes = photo_bytes or raw
+        result = await self._send_photo_alert(photo_bytes, caption)
+        outcome = await self._coerce_send_outcome(result, message_kind="photo")
+        if outcome.sent:
+            return outcome
+
+        self._logger.warning("Photo send failed; sending Auto RIA text alert")
+        return await self._coerce_send_outcome(await self._send_text_alert(caption), message_kind="text")
+
+    async def _coerce_send_outcome(self, result, *, message_kind: str) -> AutoRiaSendOutcome:
+        if isinstance(result, AutoRiaSendOutcome):
+            return result
+        # Telegram timeout may mean the message was delivered without a response; storing
+        # no message_id preserves duplicate suppression while sold edits remain unavailable.
+        if result is True:
+            return AutoRiaSendOutcome(sent=True, message_id=None, message_kind=message_kind)
+        return AutoRiaSendOutcome(sent=False, message_id=None, message_kind=message_kind)
+
+    @async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
+    async def _send_text_alert(self, caption: str):
+        async with self._send_semaphore:
+            message = await self._bot.send_message(
+                chat_id=self._chat_id,
+                text=caption,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=False,
+            )
+        return AutoRiaSendOutcome(sent=True, message_id=getattr(message, "message_id", None), message_kind="text")
+
+    @async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
+    async def _send_photo_alert(self, photo_bytes: bytes, caption: str):
+        async with self._send_semaphore:
+            message = await self._bot.send_photo(
+                chat_id=self._chat_id,
+                photo=io.BytesIO(photo_bytes),
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+            )
+        return AutoRiaSendOutcome(sent=True, message_id=getattr(message, "message_id", None), message_kind="photo")
 
     async def _fetch_vin_details_for_listing(self, listing: AutoRiaListing) -> VinDecoderDetails:
         detail_html = await self._fetch_text(listing.url)
