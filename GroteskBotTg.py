@@ -26,6 +26,7 @@ from helpers.lyst import pricing as lyst_pricing_helpers
 from helpers.lyst import processing as lyst_processing_helpers
 from helpers.lyst.http_client import AsyncLystHttpClient
 from helpers.lyst.models import FetchStatus
+from helpers.lyst.outcome import LystRunOutcome
 from helpers.lyst.status import LystStatusManager
 from helpers.lyst.browser import (
     BrowserPool,
@@ -140,6 +141,7 @@ LYST_RESUME_LOCK = asyncio.Lock()
 LYST_ABORT_EVENT = asyncio.Event()
 LYST_RUN_FAILED = False
 LYST_RUN_PROGRESS = {}
+LYST_LAST_CLOUDFLARE_EVENT = None
 # These two globals distinguish a real empty run from a stale resume pass that only
 # lands on terminal 410 pages. That case should clear resume state and rerun once
 # from page 1, not mark the catalog empty or deactivate old items.
@@ -1553,6 +1555,7 @@ async def scrape_page(url, country, max_scroll_attempts=None, url_name=None, pag
     return [data for card in shoe_cards if (data := extract_shoe_data(card, country, image_fallback_map))], content, "ok"
 
 async def scrape_all_pages(base_url, country, use_pagination=None):
+    global LYST_LAST_CLOUDFLARE_EVENT
     if use_pagination is None:
         use_pagination = PAGE_SCRAPE
     
@@ -1601,6 +1604,11 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
         )
         if status == "cloudflare":
             LYST_RESUME_ENTRY_OUTCOMES[key] = "cloudflare"
+            LYST_LAST_CLOUDFLARE_EVENT = {
+                "source_name": url_name,
+                "country": country,
+                "page": page,
+            }
             logger.error(f"Cloudflare challenge for {url_name} {country} page {page}")
             # Status tracking must record this as a failed run; otherwise the bot can
             # show a green last-run marker even though resume state says we aborted.
@@ -1977,9 +1985,42 @@ def _finalize_lyst_cycle(issue=None, error=None):
     if issue is not None:
         _mark_lyst_issue(issue)
 
+def _format_lyst_completion_message(outcome: LystRunOutcome) -> str:
+    if outcome.ok:
+        return (
+            f"LYST run {outcome.phase}: "
+            f"items_seen={outcome.items_seen}, new_items={outcome.new_items}"
+        )
+    return (
+        f"LYST run {outcome.phase}: {outcome.note}; "
+        f"items_seen={outcome.items_seen}, new_items={outcome.new_items}"
+    )
+
+
+def _build_lyst_run_outcome(
+    *,
+    run_failed: bool,
+    items_seen: int,
+    new_items: int,
+    cloudflare_event: dict | None,
+    fallback_note: str,
+) -> LystRunOutcome:
+    if cloudflare_event:
+        return LystRunOutcome.cloudflare_partial(
+            source_name=str(cloudflare_event.get("source_name") or ""),
+            country=str(cloudflare_event.get("country") or ""),
+            page=cloudflare_event.get("page"),
+            items_seen=items_seen,
+            new_items=new_items,
+        )
+    if run_failed:
+        return LystRunOutcome.failed(fallback_note or "failed")
+    return LystRunOutcome.full_success(items_seen=items_seen, new_items=new_items)
+
 async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManager | None = None):
-    global LYST_LAST_PROGRESS_TS, LYST_ACTIVE_TASK, LYST_CYCLE_STARTED_IN_RESUME, LYST_RESUME_ENTRY_OUTCOMES
+    global LYST_LAST_PROGRESS_TS, LYST_ACTIVE_TASK, LYST_CYCLE_STARTED_IN_RESUME, LYST_RESUME_ENTRY_OUTCOMES, LYST_LAST_CLOUDFLARE_EVENT
     LYST_ACTIVE_TASK = asyncio.current_task()
+    LYST_LAST_CLOUDFLARE_EVENT = None
     init_lyst_resume_state()
     SKIPPED_ITEMS.clear()
     reset_lyst_http_only_state()
@@ -2023,22 +2064,36 @@ async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManage
         await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
         await _finalize_lyst_resume_state()
         _touch_lyst_progress("finalize_run")
-        _finalize_lyst_cycle()
+        fallback_note = "; ".join(sorted(set(LYST_RESUME_ENTRY_OUTCOMES.values()))) if LYST_RUN_FAILED else ""
+        outcome = _build_lyst_run_outcome(
+            run_failed=LYST_RUN_FAILED,
+            items_seen=len(all_shoes),
+            new_items=0,
+            cloudflare_event=LYST_LAST_CLOUDFLARE_EVENT,
+            fallback_note=fallback_note,
+        )
+        _finalize_lyst_cycle(issue=outcome.note if not outcome.ok else None)
         if status_manager is not None:
-            status_manager.finish_success(duration_seconds=time.perf_counter() - started)
-        logger.info("LYST run completed")
+            status_manager.finish_outcome(outcome, duration_seconds=time.perf_counter() - started)
+        logger.info(_format_lyst_completion_message(outcome))
 
         print_statistics()
         print_link_statistics()
     except asyncio.CancelledError:
         _finalize_lyst_cycle(issue="stalled")
         if status_manager is not None:
-            status_manager.finish_failure("stalled", duration_seconds=time.perf_counter() - started)
+            status_manager.finish_outcome(
+                LystRunOutcome.failed("stalled"),
+                duration_seconds=time.perf_counter() - started,
+            )
         raise
     except Exception as exc:
         _finalize_lyst_cycle(issue="failed", error=exc)
         if status_manager is not None:
-            status_manager.finish_failure(exc, duration_seconds=time.perf_counter() - started)
+            status_manager.finish_outcome(
+                LystRunOutcome.failed(str(exc)),
+                duration_seconds=time.perf_counter() - started,
+            )
         raise
     finally:
         LYST_ACTIVE_TASK = None

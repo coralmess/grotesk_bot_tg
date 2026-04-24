@@ -38,6 +38,38 @@ class LystRuntimeTests(unittest.TestCase):
         self.assertNotIn("????", message)
         self.assertNotIn("?? ", message)
 
+    def test_format_lyst_completion_message_distinguishes_cloudflare_failure(self):
+        from GroteskBotTg import _format_lyst_completion_message
+        from helpers.lyst.outcome import LystRunOutcome
+
+        message = _format_lyst_completion_message(
+            LystRunOutcome.cloudflare_partial(
+                source_name="Main brands",
+                country="US",
+                page=3,
+                items_seen=120,
+                new_items=0,
+            )
+        )
+
+        self.assertIn("failed_cloudflare", message)
+        self.assertIn("Cloudflare challenge", message)
+        self.assertNotEqual(message, "LYST run completed")
+
+    def test_build_lyst_run_outcome_prefers_cloudflare_failure_event(self):
+        from GroteskBotTg import _build_lyst_run_outcome
+
+        outcome = _build_lyst_run_outcome(
+            run_failed=True,
+            items_seen=120,
+            new_items=0,
+            cloudflare_event={"source_name": "Main brands", "country": "US", "page": 3},
+            fallback_note="failed",
+        )
+
+        self.assertEqual(outcome.phase, "failed_cloudflare")
+        self.assertIn("Main brands", outcome.note)
+
 
 if __name__ == "__main__":
     unittest.main()
