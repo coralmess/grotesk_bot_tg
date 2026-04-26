@@ -59,6 +59,7 @@ AUTO_RIA_ITEMS_DB_FILE = runtime_file(RUNTIME_DB_DIR, "auto_ria_items.db")
 STATUS_MESSAGE_ID_FILE = runtime_file(RUNTIME_TEXT_DIR, "status_message_id.txt")
 
 LAST_RUNS_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "last_runs.json")
+SCRAPER_RUNS_JSONL_FILE = runtime_file(RUNTIME_JSON_DIR, "scraper_runs.jsonl")
 MARKET_OLX_RUN_STATUS_FILE = runtime_file(RUNTIME_STATUS_DIR, "market_olx_run.json")
 MARKET_SHAFA_RUN_STATUS_FILE = runtime_file(RUNTIME_STATUS_DIR, "market_shafa_run.json")
 LYST_RUN_STATUS_FILE = runtime_file(RUNTIME_STATUS_DIR, "lyst_run.json")

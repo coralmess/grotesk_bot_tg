@@ -25,8 +25,28 @@ class ItemDecision:
 
 @dataclass
 class PipelineStats:
+    total_seen: int = 0
     total_new: int = 0
     total_sent: int = 0
+    total_persisted_without_send: int = 0
+    total_unsubscribed: int = 0
+    total_duplicate_db: int = 0
+    total_duplicate_run: int = 0
+    total_notification_claim_skipped: int = 0
+    total_send_candidates: int = 0
+    total_send_failed: int = 0
+
+    def add(self, other: "PipelineStats") -> None:
+        self.total_seen += other.total_seen
+        self.total_new += other.total_new
+        self.total_sent += other.total_sent
+        self.total_persisted_without_send += other.total_persisted_without_send
+        self.total_unsubscribed += other.total_unsubscribed
+        self.total_duplicate_db += other.total_duplicate_db
+        self.total_duplicate_run += other.total_duplicate_run
+        self.total_notification_claim_skipped += other.total_notification_claim_skipped
+        self.total_send_candidates += other.total_send_candidates
+        self.total_send_failed += other.total_send_failed
 
 
 class MarketplaceRepository(Protocol[ItemT]):
@@ -88,7 +108,7 @@ async def process_marketplace_items(
 ) -> PipelineStats:
     # This shared pipeline was introduced to make OLX and SHAFA follow the exact same
     # unsubscribe, duplicate, claim, send, and persistence order after item parsing.
-    stats = PipelineStats()
+    stats = PipelineStats(total_seen=len(items))
     if not items:
         return stats
 
@@ -102,12 +122,14 @@ async def process_marketplace_items(
     for index, item in enumerate(items):
         previous = previous_items[index]
         if item.id in unsubscribed_item_ids:
+            stats.total_unsubscribed += 1
             if logger is not None:
                 logger.debug("Skipping unsubscribed %s item: %s", source_kind.upper(), item.id)
             continue
 
         item_duplicate_key = duplicate_key(item.name, item.price_int)
         if item_duplicate_key is not None and item_duplicate_key in duplicate_keys_in_db:
+            stats.total_duplicate_db += 1
             if logger is not None:
                 logger.debug(
                     "Skipping %s duplicate already in DB: %s | %s",
@@ -118,6 +140,7 @@ async def process_marketplace_items(
             continue
 
         if not await duplicate_tracker.claim(item):
+            stats.total_duplicate_run += 1
             if logger is not None:
                 logger.debug(
                     "Skipping %s duplicate in current run: %s | %s",
@@ -132,12 +155,14 @@ async def process_marketplace_items(
 
         decision = decide_item(item, previous)
         if decision.persist_without_send:
+            stats.total_persisted_without_send += 1
             persist_only_updates.append(ItemUpdate(item=item, touch_last_sent=False))
             continue
         if not decision.send_notification:
             continue
 
         if not await repository.claim_notification_key(item, source_name):
+            stats.total_notification_claim_skipped += 1
             if logger is not None:
                 logger.debug(
                     "Skipping %s duplicate already claimed/sent: %s | %s",
@@ -149,6 +174,7 @@ async def process_marketplace_items(
 
         if decision.is_new_item:
             stats.total_new += 1
+        stats.total_send_candidates += 1
         send_candidates.append((item, previous))
 
     if persist_only_updates:
@@ -181,4 +207,6 @@ async def process_marketplace_items(
     for result in results:
         if result is True:
             stats.total_sent += 1
+        else:
+            stats.total_send_failed += 1
     return stats

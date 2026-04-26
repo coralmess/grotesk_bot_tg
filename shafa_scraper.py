@@ -23,6 +23,7 @@ from helpers.marketplace_pipeline import (
     ItemDecision,
     ItemUpdate,
     MarketplaceRepository,
+    PipelineStats,
     RunDuplicateTracker,
     process_marketplace_items,
 )
@@ -37,7 +38,8 @@ from helpers.marketplace_sender import (
 )
 from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
-from helpers.runtime_paths import SHAFA_ITEMS_DB_FILE
+from helpers.runtime_paths import SCRAPER_RUNS_JSONL_FILE, SHAFA_ITEMS_DB_FILE
+from helpers.scraper_stats import RunStatsCollector
 from helpers.sqlite_runtime import apply_runtime_pragmas
 
 try:
@@ -819,6 +821,8 @@ async def run_shafa_scraper():
     total_scraped = 0
     total_sent = 0
     total_new = 0
+    pipeline_totals = PipelineStats()
+    run_stats = RunStatsCollector("shafa")
     errors: list[str] = []
 
     def _add_error(msg: str) -> None:
@@ -886,6 +890,7 @@ async def run_shafa_scraper():
         url = entry.get("url")
         source_name = entry.get("url_name") or "SHAFA"
         if not url or not default_chat:
+            run_stats.inc("sources_invalid")
             return
         if SHAFA_REQUEST_JITTER_SEC > 0:
             await asyncio.sleep(random.uniform(0, SHAFA_REQUEST_JITTER_SEC))
@@ -900,18 +905,26 @@ async def run_shafa_scraper():
                 source_stats.streak,
             )
             await repository.update_source_stats(url, source_decision.next_streak, source_decision.next_cycle_count)
+            run_stats.inc("sources_skipped_by_backoff")
+            run_stats.record_source(source_name, status="skipped_by_backoff", url=url)
             return
 
         try:
+            run_stats.inc("sources_attempted")
             items = await scrape_shafa_url(url)
             if items is None:
+                run_stats.inc("sources_failed")
+                run_stats.record_source(source_name, status="scrape_failed", url=url)
                 return
             next_streak, next_cycle = finished_source_decision(source_stats.streak, len(items))
             await repository.update_source_stats(url, next_streak, next_cycle)
             if not items:
+                run_stats.inc("sources_empty")
+                run_stats.record_source(source_name, status="empty", url=url, items_scraped=0)
                 return
 
             total_scraped += len(items)
+            run_stats.inc("items_scraped", len(items))
             pipeline_stats = await process_marketplace_items(
                 source_kind="shafa",
                 source_name=source_name,
@@ -926,12 +939,32 @@ async def run_shafa_scraper():
             )
             total_new += pipeline_stats.total_new
             total_sent += pipeline_stats.total_sent
+            pipeline_totals.add(pipeline_stats)
+            run_stats.inc("sources_with_items")
+            run_stats.record_source(
+                source_name,
+                status="ok",
+                url=url,
+                items_scraped=len(items),
+                new_items=pipeline_stats.total_new,
+                sent_items=pipeline_stats.total_sent,
+                skipped_items=(
+                    pipeline_stats.total_unsubscribed
+                    + pipeline_stats.total_duplicate_db
+                    + pipeline_stats.total_duplicate_run
+                    + pipeline_stats.total_notification_claim_skipped
+                ),
+            )
         except aiohttp.ClientError as exc:
             logger.error("Network error: %s", exc)
             _add_error("Network error")
+            run_stats.inc("sources_failed")
+            run_stats.record_source(source_name, status="network_error", url=url)
         except Exception as exc:
             logger.error("Processing error: %s", exc)
             _add_error(f"Processing error: {exc}")
+            run_stats.inc("sources_failed")
+            run_stats.record_source(source_name, status="error", url=url, error=str(exc)[:120])
 
     try:
         sem = asyncio.Semaphore(SHAFA_TASK_CONCURRENCY)
@@ -941,13 +974,44 @@ async def run_shafa_scraper():
                 await _process_entry(entry)
 
         sources = merge_sources(SHAFA_URLS or [], load_dynamic_urls("shafa"))
+        run_stats.set_field("sources_total", len(sources))
         if tasks := [_guarded_process(entry) for entry in sources]:
             logger.info("Sources: %s", len(tasks))
             await asyncio.gather(*tasks, return_exceptions=True)
         else:
             logger.warning("No URLs configured")
         logger.info("Completed")
+        logger.info("TOTAL SCRAPED: %s items", total_scraped)
         logger.info("New: %s | Sent: %s", total_new, total_sent)
+        # SHAFA often has healthy zero-new runs. These counters separate "nothing new"
+        # from hidden drops such as duplicate filtering, unsubscribes, or send failures.
+        logger.info(
+            "SHAFA pipeline: SEEN=%s | NEW=%s | SENT=%s | PERSIST_ONLY=%s | UNSUB=%s | "
+            "DUP_DB=%s | DUP_RUN=%s | CLAIM_SKIP=%s | SEND_FAILED=%s",
+            pipeline_totals.total_seen,
+            pipeline_totals.total_new,
+            pipeline_totals.total_sent,
+            pipeline_totals.total_persisted_without_send,
+            pipeline_totals.total_unsubscribed,
+            pipeline_totals.total_duplicate_db,
+            pipeline_totals.total_duplicate_run,
+            pipeline_totals.total_notification_claim_skipped,
+            pipeline_totals.total_send_failed,
+        )
+        for field in (
+            "total_seen",
+            "total_new",
+            "total_sent",
+            "total_persisted_without_send",
+            "total_unsubscribed",
+            "total_duplicate_db",
+            "total_duplicate_run",
+            "total_notification_claim_skipped",
+            "total_send_candidates",
+            "total_send_failed",
+        ):
+            run_stats.set_field(field, getattr(pipeline_totals, field))
+        run_stats.write_jsonl(SCRAPER_RUNS_JSONL_FILE, run_stats.finish(outcome="error" if errors else "success"))
         if total_scraped > 0:
             logger.info("Success rate: %.1f%%", (total_sent / total_scraped * 100))
     finally:

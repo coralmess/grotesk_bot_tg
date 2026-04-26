@@ -163,4 +163,56 @@ class MarketplacePipelineTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(stats.total_sent, 0)
+        self.assertEqual(stats.total_seen, 1)
+        self.assertEqual(stats.total_unsubscribed, 1)
         self.assertEqual(repository.persisted, [])
+
+    async def test_process_marketplace_items_reports_skip_and_delivery_counters(self) -> None:
+        repository = DummyRepository()
+        repository.existing = {
+            "known": {"id": "known", "price_int": 100, "name": "Known"},
+            "persist": {"id": "persist", "price_int": 100, "name": "Persist"},
+            "send-fail": {"id": "send-fail", "price_int": 100, "name": "Send Fail"},
+            "claim-skip": {"id": "claim-skip", "price_int": 100, "name": "Claim Skip"},
+        }
+        repository.duplicate_keys = {("db dup", 100)}
+        repository.claim_results = {"claim-skip": False}
+        duplicate_tracker = RunDuplicateTracker[DummyItem]()
+
+        items = [
+            DummyItem(id="db-dup", name="DB Dup", link="https://example.com/1", price_text="100 грн", price_int=100),
+            DummyItem(id="run-a", name="Run Dup", link="https://example.com/2", price_text="101 грн", price_int=101),
+            DummyItem(id="run-b", name="Run Dup", link="https://example.com/3", price_text="101 грн", price_int=101),
+            DummyItem(id="persist", name="Persist", link="https://example.com/4", price_text="102 грн", price_int=102),
+            DummyItem(id="claim-skip", name="Claim Skip", link="https://example.com/5", price_text="103 грн", price_int=103),
+            DummyItem(id="send-fail", name="Send Fail", link="https://example.com/6", price_text="104 грн", price_int=104),
+        ]
+
+        def _decide_item(current, previous):
+            if current.id == "persist":
+                return ItemDecision(persist_without_send=True)
+            return ItemDecision(send_notification=True, is_new_item=previous is None)
+
+        async def _send_item(item, text, source_name):
+            return False
+
+        stats = await process_marketplace_items(
+            source_kind="olx",
+            source_name="OLX",
+            items=items,
+            repository=repository,
+            duplicate_tracker=duplicate_tracker,
+            decide_item=_decide_item,
+            build_message=lambda current, previous, source_name: "message",
+            send_item=_send_item,
+        )
+
+        self.assertEqual(stats.total_seen, 6)
+        self.assertEqual(stats.total_duplicate_db, 1)
+        self.assertEqual(stats.total_duplicate_run, 1)
+        self.assertEqual(stats.total_persisted_without_send, 1)
+        self.assertEqual(stats.total_notification_claim_skipped, 1)
+        self.assertEqual(stats.total_send_candidates, 2)
+        self.assertEqual(stats.total_send_failed, 2)
+        self.assertEqual(stats.total_sent, 0)
+        self.assertEqual(stats.total_new, 1)

@@ -3,7 +3,14 @@ from __future__ import annotations
 import asyncio
 import traceback
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class LystProcessingStats:
+    new_total: int = 0
+    removed_total: int = 0
 
 
 def merge_base_url_into_shoes(result, base_url, country, *, logger):
@@ -246,3 +253,6 @@ async def process_all_shoes(
                 await asyncio.sleep(0)
 
     touch_progress("process_shoes_done", removed_total=len(removed_shoes), new_total=new_shoe_count)
+    # Returning stats keeps the final run status truthful; otherwise a healthy run that
+    # found new shoes looked like it found zero new items in machine-readable status.
+    return LystProcessingStats(new_total=new_shoe_count, removed_total=len(removed_shoes))

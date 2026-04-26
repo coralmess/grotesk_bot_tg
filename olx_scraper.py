@@ -22,6 +22,7 @@ from helpers.marketplace_pipeline import (
     ItemDecision,
     ItemUpdate,
     MarketplaceRepository,
+    PipelineStats,
     RunDuplicateTracker,
     process_marketplace_items,
 )
@@ -35,7 +36,8 @@ from helpers.marketplace_sender import (
 )
 from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
-from helpers.runtime_paths import OLX_ITEMS_DB_FILE
+from helpers.runtime_paths import OLX_ITEMS_DB_FILE, SCRAPER_RUNS_JSONL_FILE
+from helpers.scraper_stats import RunStatsCollector
 from helpers.sqlite_runtime import RUNTIME_DB_PRAGMA_STATEMENTS, apply_runtime_pragmas
 try:
     import lxml  # noqa: F401
@@ -1050,6 +1052,8 @@ async def run_olx_scraper():
     duplicate_tracker = RunDuplicateTracker[OlxItem]()
     total_scraped = 0
     total_without_images = 0
+    pipeline_totals = PipelineStats()
+    run_stats = RunStatsCollector("olx")
 
     async def _send_item(item: OlxItem, text: str, source_name: str) -> bool:
         nonlocal total_without_images
@@ -1082,6 +1086,7 @@ async def run_olx_scraper():
         url = entry.get("url")
         source_name = entry.get("url_name") or "OLX"
         if not url or not default_chat:
+            run_stats.inc("sources_invalid")
             return
         if OLX_REQUEST_JITTER_SEC > 0:
             await asyncio.sleep(random.uniform(0, OLX_REQUEST_JITTER_SEC))
@@ -1098,20 +1103,28 @@ async def run_olx_scraper():
                 source_decision.divisor,
             )
             await repository.update_source_stats(url, source_decision.next_streak, source_decision.next_cycle_count)
+            run_stats.inc("sources_skipped_by_backoff")
+            run_stats.record_source(source_name, status="skipped_by_backoff", url=url)
             return
 
         try:
+            run_stats.inc("sources_attempted")
             items = await scrape_olx_url(url)
             if items is None:
+                run_stats.inc("sources_failed")
+                run_stats.record_source(source_name, status="scrape_failed", url=url)
                 return
 
             next_streak, next_cycle = finished_source_decision(source_stats.streak, len(items))
             await repository.update_source_stats(url, next_streak, next_cycle)
             if not items:
+                run_stats.inc("sources_empty")
+                run_stats.record_source(source_name, status="empty", url=url, items_scraped=0)
                 return
 
             total_scraped += len(items)
-            await process_marketplace_items(
+            run_stats.inc("items_scraped", len(items))
+            pipeline_stats = await process_marketplace_items(
                 source_kind="olx",
                 source_name=source_name,
                 items=items,
@@ -1122,12 +1135,32 @@ async def run_olx_scraper():
                 send_item=_send_item,
                 logger=logger,
             )
+            pipeline_totals.add(pipeline_stats)
+            run_stats.inc("sources_with_items")
+            run_stats.record_source(
+                source_name,
+                status="ok",
+                url=url,
+                items_scraped=len(items),
+                new_items=pipeline_stats.total_new,
+                sent_items=pipeline_stats.total_sent,
+                skipped_items=(
+                    pipeline_stats.total_unsubscribed
+                    + pipeline_stats.total_duplicate_db
+                    + pipeline_stats.total_duplicate_run
+                    + pipeline_stats.total_notification_claim_skipped
+                ),
+            )
         except aiohttp.ClientError as exc:
             logger.error("Network error processing %s: %s", source_name, exc)
             _add_error(f"{source_name}: network error")
+            run_stats.inc("sources_failed")
+            run_stats.record_source(source_name, status="network_error", url=url)
         except Exception as exc:
             logger.error("Failed to process %s: %s", source_name, exc)
             _add_error(f"{source_name}: {exc}")
+            run_stats.inc("sources_failed")
+            run_stats.record_source(source_name, status="error", url=url, error=str(exc)[:120])
 
     try:
         sem = asyncio.Semaphore(OLX_TASK_CONCURRENCY)
@@ -1137,6 +1170,7 @@ async def run_olx_scraper():
                 await _process_entry(entry)
 
         sources = merge_sources(OLX_URLS or [], load_dynamic_urls("olx"))
+        run_stats.set_field("sources_total", len(sources))
         if tasks := [_guarded_process(entry) for entry in sources]:
             logger.info("Processing %s OLX source(s)...", len(tasks))
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -1150,6 +1184,36 @@ async def run_olx_scraper():
             total_without_images,
             (total_without_images / total_scraped * 100) if total_scraped > 0 else 0.0,
         )
+        # These counters explain why scraped items did not become Telegram messages:
+        # already known, unsubscribed, duplicated, claim-collided, or delivery failed.
+        logger.info(
+            "OLX pipeline: SEEN=%s | NEW=%s | SENT=%s | PERSIST_ONLY=%s | UNSUB=%s | "
+            "DUP_DB=%s | DUP_RUN=%s | CLAIM_SKIP=%s | SEND_FAILED=%s",
+            pipeline_totals.total_seen,
+            pipeline_totals.total_new,
+            pipeline_totals.total_sent,
+            pipeline_totals.total_persisted_without_send,
+            pipeline_totals.total_unsubscribed,
+            pipeline_totals.total_duplicate_db,
+            pipeline_totals.total_duplicate_run,
+            pipeline_totals.total_notification_claim_skipped,
+            pipeline_totals.total_send_failed,
+        )
+        run_stats.set_field("without_images", total_without_images)
+        for field in (
+            "total_seen",
+            "total_new",
+            "total_sent",
+            "total_persisted_without_send",
+            "total_unsubscribed",
+            "total_duplicate_db",
+            "total_duplicate_run",
+            "total_notification_claim_skipped",
+            "total_send_candidates",
+            "total_send_failed",
+        ):
+            run_stats.set_field(field, getattr(pipeline_totals, field))
+        run_stats.write_jsonl(SCRAPER_RUNS_JSONL_FILE, run_stats.finish(outcome="error" if errors else "success"))
         if errors:
             uniq: list[str] = []
             for item in errors:

@@ -1,7 +1,7 @@
 import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, threading, hashlib, os, random
 from pathlib import Path
 from telegram.constants import ParseMode
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
@@ -66,9 +66,11 @@ from helpers.runtime_paths import (
     SHAFA_ITEMS_DB_FILE as RUNTIME_SHAFA_DB_FILE,
     LYST_RESUME_JSON_FILE,
     LYST_CLOUDFLARE_BACKOFF_FILE,
+    SCRAPER_RUNS_JSONL_FILE,
     SHOE_DATA_JSON_FILE,
     EXCHANGE_RATES_JSON_FILE,
 )
+from helpers.scraper_stats import RunStatsCollector
 from helpers.sqlite_runtime import run_runtime_db_maintenance
 try:
     import cv2
@@ -1362,7 +1364,7 @@ async def process_shoe(shoe, old_data, message_queue, exchange_rates):
     )
 
 async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
-    await lyst_processing_helpers.process_all_shoes(
+    return await lyst_processing_helpers.process_all_shoes(
         all_shoes,
         old_data,
         message_queue,
@@ -1561,6 +1563,7 @@ async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManage
     SKIPPED_ITEMS.clear()
     reset_lyst_http_only_state()
     started = time.perf_counter()
+    run_stats = RunStatsCollector("lyst")
     if status_manager is not None:
         status_manager.begin_cycle()
         status_manager.set_state_fields(lyst_cloudflare_backoff=LYST_CLOUDFLARE_BACKOFF.snapshot())
@@ -1598,17 +1601,26 @@ async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManage
         # Even when a later page aborts the run, keep already-scraped items. That is
         # the whole point of the fail-fast Cloudflare flow: stop new requests, but do
         # not throw away data we already paid to scrape successfully.
-        await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
+        processing_stats = await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
         await _finalize_lyst_resume_state()
         _touch_lyst_progress("finalize_run")
         fallback_note = "; ".join(sorted(set(LYST_RESUME_ENTRY_OUTCOMES.values()))) if LYST_RUN_FAILED else ""
         outcome = _build_lyst_run_outcome(
             run_failed=LYST_RUN_FAILED,
             items_seen=len(all_shoes),
-            new_items=0,
+            new_items=processing_stats.new_total,
             cloudflare_event=LYST_LAST_CLOUDFLARE_EVENT,
             fallback_note=fallback_note,
         )
+        # The JSONL summary mirrors the service status but also preserves source-level
+        # resume outcomes, which makes Cloudflare/terminal-page behavior auditable later.
+        run_stats.set_field("items_seen", len(all_shoes))
+        run_stats.set_field("new_items", processing_stats.new_total)
+        run_stats.set_field("removed_items", processing_stats.removed_total)
+        run_stats.set_field("resume_outcomes", dict(Counter(LYST_RESUME_ENTRY_OUTCOMES.values())))
+        if LYST_LAST_CLOUDFLARE_EVENT:
+            run_stats.set_field("cloudflare_event", dict(LYST_LAST_CLOUDFLARE_EVENT))
+        run_stats.write_jsonl(SCRAPER_RUNS_JSONL_FILE, run_stats.finish(outcome=outcome.state.value))
         _finalize_lyst_cycle(issue=outcome.note if not outcome.ok else None)
         if status_manager is not None:
             status_manager.finish_outcome(outcome, duration_seconds=time.perf_counter() - started)
@@ -1618,6 +1630,8 @@ async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManage
         print_link_statistics()
     except asyncio.CancelledError:
         _finalize_lyst_cycle(issue="stalled")
+        run_stats.set_field("error", "stalled")
+        run_stats.write_jsonl(SCRAPER_RUNS_JSONL_FILE, run_stats.finish(outcome="failed_stalled"))
         if status_manager is not None:
             status_manager.finish_outcome(
                 LystRunOutcome.failed("stalled"),
@@ -1626,6 +1640,8 @@ async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManage
         raise
     except Exception as exc:
         _finalize_lyst_cycle(issue="failed", error=exc)
+        run_stats.set_field("error", str(exc)[:200])
+        run_stats.write_jsonl(SCRAPER_RUNS_JSONL_FILE, run_stats.finish(outcome="failed"))
         if status_manager is not None:
             status_manager.finish_outcome(
                 LystRunOutcome.failed(str(exc)),
