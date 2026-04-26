@@ -23,6 +23,7 @@ from helpers.lyst import notify as lyst_notify_helpers
 from helpers.lyst import cycle as lyst_cycle_helpers
 from helpers.lyst import parsing as lyst_parsing_helpers
 from helpers.lyst import page_scraper as lyst_page_scraper
+from helpers.lyst import page_runner as lyst_page_runner
 from helpers.lyst import pricing as lyst_pricing_helpers
 from helpers.lyst import processing as lyst_processing_helpers
 from helpers.lyst.cloudflare_backoff import CloudflareBackoff
@@ -1183,180 +1184,44 @@ async def scrape_page(url, country, max_scroll_attempts=None, url_name=None, pag
     )
 
 async def scrape_all_pages(base_url, country, use_pagination=None):
-    global LYST_LAST_CLOUDFLARE_EVENT
-    if use_pagination is None:
-        use_pagination = PAGE_SCRAPE
-    
-    max_scroll_attempts = LYST_MAX_SCROLL_ATTEMPTS
-    all_shoes = []
-    url_name = base_url['url_name']
-    key = _resume_key(base_url, country)
-    resume_active = LYST_RESUME_STATE.get("resume_active", False)
-    entry = LYST_RESUME_STATE.get("entries", {}).get(key, {})
-    if resume_active and entry.get("completed"):
-        logger.info(f"Skipping {url_name} for {country} (completed in previous run)")
-        return all_shoes
-    if _should_skip_lyst_source_for_backoff(url_name, country):
-        logger.warning(f"Skipping {url_name} for {country} due to active Cloudflare cooldown")
-        LYST_RESUME_ENTRY_OUTCOMES[key] = "cloudflare_cooldown"
-        return all_shoes
-    page = entry.get("next_page", 1) if resume_active else 1
-    started_from_resume_page = bool(resume_active and use_pagination and page > 1)
-    last_scraped_page = entry.get("last_scraped_page", entry.get("last_success_page", 0))
-    if use_pagination and page > 1:
-        logger.info(f"Resuming {url_name} for {country} from page {page}")
-    completed_without_fetch_failure = False
-    
-    while True:
-        if LYST_ABORT_EVENT.is_set():
-            break
-        _touch_lyst_progress(
-            "scrape_page_start",
-            url_name=url_name,
-            country=country,
-            page_num=page,
-        )
-        url = _scrape_target_url(base_url, page, use_pagination)
-        _log_scrape_target(url_name, country, page, use_pagination)
-
-        shoes, content, status = await scrape_page(
-            url,
-            country,
-            max_scroll_attempts=max_scroll_attempts,
-            url_name=url_name,
-            page_num=page if use_pagination else None,
-            use_pagination=use_pagination,
-        )
-        _touch_lyst_progress(
-            "scrape_page_end",
-            url=url,
-            url_name=url_name,
-            country=country,
-            page_num=page,
-            status=status,
-        )
-        if status == "cloudflare":
-            LYST_RESUME_ENTRY_OUTCOMES[key] = "cloudflare"
-            logger.error(f"Cloudflare challenge for {url_name} {country} page {page}")
-            decision = _record_lyst_cloudflare_failure(url_name, country, page)
-            logger.warning(
-                "Cloudflare cooldown for %s %s: failures=%s cooldown=%ss",
-                url_name,
-                country,
-                decision.failure_count,
-                decision.cooldown_sec,
-            )
-            # Status tracking must record this as a failed run; otherwise the bot can
-            # show a green last-run marker even though resume state says we aborted.
-            _mark_lyst_issue("Cloudflare challenge")
-            await _update_resume_with_url(
-                key,
-                url,
-                next_page=page,
-                last_scraped_page=last_scraped_page,
-                completed=False,
-                failure_reason="Cloudflare challenge",
-            )
-            await mark_lyst_run_failed("Cloudflare challenge")
-            log_lyst_run_progress_summary()
-            break
-        if status == "aborted":
-            LYST_RESUME_ENTRY_OUTCOMES[key] = "aborted"
-            logger.info(f"Aborting {url_name} for {country} after Lyst run abort signal")
-            break
-        if status == "failed":
-            LYST_RESUME_ENTRY_OUTCOMES[key] = "failed"
-            logger.error(f"Failed to fetch page for {url_name} {country} page {page}")
-            await _update_resume_with_url(
-                key,
-                url,
-                next_page=page,
-                last_scraped_page=last_scraped_page,
-                completed=False,
-                failure_reason="Failed to get soup",
-            )
-            await mark_lyst_run_failed("Failed to get soup")
-            log_lyst_run_progress_summary()
-            break
-        if status == "terminal":
-            logger.info(f"{url_name} for {country} reached terminal page {page} (HTTP 410)")
-            completed_without_fetch_failure = True
-            if started_from_resume_page and not all_shoes:
-                LYST_RESUME_ENTRY_OUTCOMES[key] = "terminal_only_resume"
-            else:
-                LYST_RESUME_ENTRY_OUTCOMES[key] = "terminal"
-            await _update_resume_with_url(
-                key,
-                url,
-                scrape_complete=True,
-                final_page=last_scraped_page,
-                completed=False,
-            )
-            break
-        if not shoes:
-            LYST_RESUME_ENTRY_OUTCOMES[key] = "empty"
-            stopped_too_early = use_pagination and page < 3
-            if stopped_too_early:
-                logger.error(f"{url_name} for {country} Stopped too early. Please check for errors")
-                _mark_lyst_issue("Stopped too early")
-                now_kyiv = datetime.now(KYIV_TZ).strftime('%Y-%m-%d %H:%M:%S')
-                log_lines = tail_log_lines(BOT_LOG_FILE, line_count=200)
-                context_lines = build_lyst_context_lines(
-                    max_scroll_attempts=max_scroll_attempts,
-                    use_pagination=use_pagination,
-                )
-                write_stop_too_early_dump(
-                    reason="Stopped too early",
-                    url=url,
-                    country=country,
-                    url_name=url_name,
-                    page_num=page,
-                    content=content,
-                    now_kyiv=now_kyiv,
-                    log_lines=log_lines,
-                    context_lines=context_lines,
-                )
-                if use_pagination == PAGE_SCRAPE:
-                    logger.info(f"Retrying {url_name} for {country} with PAGE_SCRAPE={not use_pagination}")
-                    return await scrape_all_pages(base_url, country, use_pagination=not use_pagination)
-            
-            logger.info(f"Total for {country} {url_name}: {len(all_shoes)}. Stopped on page {page}")
-            completed_without_fetch_failure = not stopped_too_early
-            await _update_resume_with_url(
-                key,
-                url,
-                scrape_complete=True,
-                final_page=last_scraped_page,
-                completed=False,
-            )
-            break
-        all_shoes.extend(shoes)
-        LYST_RESUME_ENTRY_OUTCOMES[key] = "scraped"
-        LYST_RUN_PROGRESS[key] = page
-        last_scraped_page = page
-        await _update_resume_with_url(
-            key,
-            url,
-            last_scraped_page=page,
-            completed=False if use_pagination else True,
-        )
-        
-        if not use_pagination:
-            await _update_resume_with_url(
-                key,
-                url,
-                last_scraped_page=page,
-                scrape_complete=True,
-                final_page=page,
-                completed=False,
-            )
-            break
-            
-        page += 1
-        await asyncio.sleep(1) 
-    if completed_without_fetch_failure:
-        _record_lyst_source_success(url_name, country)
-    return all_shoes
+    # Pagination mutates resume/progress globals, so GroteskBotTg keeps the public
+    # wrapper and injects those runtime hooks into the isolated page runner.
+    config = lyst_page_runner.PageRunConfig(
+        page_scrape=PAGE_SCRAPE,
+        max_scroll_attempts=LYST_MAX_SCROLL_ATTEMPTS,
+        log_tail_lines=200,
+    )
+    hooks = lyst_page_runner.PageRunHooks(
+        logger=logger,
+        scrape_page=scrape_page,
+        resume_key=_resume_key,
+        should_skip_source_for_backoff=_should_skip_lyst_source_for_backoff,
+        touch_progress=_touch_lyst_progress,
+        scrape_target_url=_scrape_target_url,
+        log_scrape_target=_log_scrape_target,
+        update_resume_with_url=_update_resume_with_url,
+        record_cloudflare_failure=_record_lyst_cloudflare_failure,
+        mark_issue=_mark_lyst_issue,
+        mark_run_failed=mark_lyst_run_failed,
+        log_run_progress_summary=log_lyst_run_progress_summary,
+        build_context_lines=build_lyst_context_lines,
+        tail_log_lines=lambda line_count: tail_log_lines(BOT_LOG_FILE, line_count=line_count),
+        write_stop_too_early_dump=write_stop_too_early_dump,
+        now_kyiv=_now_kyiv_str,
+        record_source_success=_record_lyst_source_success,
+        sleep=asyncio.sleep,
+    )
+    return await lyst_page_runner.scrape_all_pages(
+        base_url,
+        country,
+        config=config,
+        hooks=hooks,
+        resume_state=LYST_RESUME_STATE,
+        resume_entry_outcomes=LYST_RESUME_ENTRY_OUTCOMES,
+        run_progress=LYST_RUN_PROGRESS,
+        abort_event=LYST_ABORT_EVENT,
+        use_pagination=use_pagination,
+    )
 
 # Price and currency conversions
 def calculate_sale_percentage(original_price, sale_price, country):

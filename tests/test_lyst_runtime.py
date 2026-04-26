@@ -166,6 +166,36 @@ class LystRuntimeTests(unittest.TestCase):
         self.assertEqual(kwargs["page_num"], 2)
         self.assertTrue(kwargs["use_pagination"])
 
+    def test_scrape_all_pages_wrapper_delegates_runtime_dependencies(self):
+        import GroteskBotTg
+
+        async def run_case():
+            expected = [{"name": "Delegated Shoe"}]
+            with mock.patch.object(
+                GroteskBotTg.lyst_page_runner,
+                "scrape_all_pages",
+                new=mock.AsyncMock(return_value=expected),
+            ) as helper:
+                result = await GroteskBotTg.scrape_all_pages(
+                    {"url": "https://www.lyst.com/shop", "url_name": "Main"},
+                    "US",
+                    use_pagination=False,
+                )
+            return expected, result, helper
+
+        expected, result, helper = asyncio.run(run_case())
+        self.assertEqual(result, expected)
+        helper.assert_awaited_once()
+        args, kwargs = helper.await_args
+        self.assertEqual(args, ({"url": "https://www.lyst.com/shop", "url_name": "Main"}, "US"))
+        self.assertIsInstance(kwargs["config"], GroteskBotTg.lyst_page_runner.PageRunConfig)
+        self.assertIsInstance(kwargs["hooks"], GroteskBotTg.lyst_page_runner.PageRunHooks)
+        self.assertIs(kwargs["resume_state"], GroteskBotTg.LYST_RESUME_STATE)
+        self.assertIs(kwargs["resume_entry_outcomes"], GroteskBotTg.LYST_RESUME_ENTRY_OUTCOMES)
+        self.assertIs(kwargs["run_progress"], GroteskBotTg.LYST_RUN_PROGRESS)
+        self.assertIs(kwargs["abort_event"], GroteskBotTg.LYST_ABORT_EVENT)
+        self.assertFalse(kwargs["use_pagination"])
+
 
 if __name__ == "__main__":
     unittest.main()
