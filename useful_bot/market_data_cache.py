@@ -58,7 +58,9 @@ def _load_dataframe_from_cache(path: Path, *, ttl_seconds: int):
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         fetched_at = float(payload["fetched_at"])
-        if (time.time() - fetched_at) > ttl_seconds:
+        # A zero-second TTL is used by tests and manual refresh paths to force a
+        # refetch; use an inclusive boundary so same-clock-tick reads still expire.
+        if (time.time() - fetched_at) >= ttl_seconds:
             return None
         frame_payload = payload["frame"]
         frame = pd.read_json(io.StringIO(frame_payload), orient="split")
