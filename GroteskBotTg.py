@@ -414,44 +414,6 @@ async def finalize_lyst_resume_after_processing(*, preserve_resume: bool = False
         preserve_resume=preserve_resume,
     )
 
-def load_font(font_size, prefer_heavy=False):
-    return lyst_media_helpers.load_font(
-        font_size,
-        fonts_dir=Path(__file__).with_name("fonts"),
-        prefer_heavy=prefer_heavy,
-    )
-
-def _ensure_edsr_weights():
-    return lyst_media_helpers.ensure_edsr_weights(
-        model_path=EDSR_MODEL_PATH,
-        model_url=EDSR_MODEL_URL,
-        logger=logger,
-    )
-
-def _get_edsr_superres():
-    return lyst_media_helpers.get_edsr_superres(
-        cv2_module=cv2,
-        model_path=EDSR_MODEL_PATH,
-        model_url=EDSR_MODEL_URL,
-        logger=logger,
-    )
-
-def _upscale_with_edsr(pil_img):
-    return lyst_media_helpers.upscale_with_edsr(
-        pil_img,
-        cv2_module=cv2,
-        np_module=np,
-        model_path=EDSR_MODEL_PATH,
-        model_url=EDSR_MODEL_URL,
-        logger=logger,
-    )
-
-def _fetch_image_bytes(image_url: str) -> bytes:
-    return lyst_media_helpers.fetch_image_bytes(
-        image_url,
-        image_url_candidates_fn=_image_url_candidates,
-    )
-
 def process_image(image_url, uah_price, sale_percentage):
     # Image rendering now sits behind helpers/lyst/media.py so Telegram sending
     # does not own compression, font, or upscaling decisions directly.
