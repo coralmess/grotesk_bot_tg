@@ -5,6 +5,11 @@ OLX_URLS = [
         "url": "https://www.olx.ua/uk/list/q-razer-pro-click-mini/?search%5Bfilter_float_price:from%5D=700&search%5Bfilter_float_price:to%5D=3000",
         "url_name": "Razer Pro Click Mini"
     },
+    # Keep this grail watch in OLX config, not SHAFA, so source-stat tables stay marketplace-specific.
+    {
+        "url": "https://www.olx.ua/uk/dom-i-sad/q-Signoria-Firenze/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Signoria Firenze"
+    },
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/q-Haat/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Haat"

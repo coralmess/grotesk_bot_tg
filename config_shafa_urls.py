@@ -702,10 +702,6 @@ SHAFA_URLS = [
         "url_name": "CDLP"
     },
     {
-        "url": "https://www.olx.ua/uk/dom-i-sad/q-Signoria-Firenze/?currency=UAH&search%5Border%5D=created_at:desc",
-        "url_name": "Signoria Firenze"
-    },
-    {
         "url": "https://shafa.ua/uk/men/shtany-i-shorty/bryuki?search_text=NEAT&sort=4",
         "url_name": "NEAT"
     },
