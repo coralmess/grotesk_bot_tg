@@ -38,6 +38,7 @@ from helpers.lyst.browser import (
     launch_browser as lyst_launch_browser,
 )
 from helpers.lyst.resume import LystResumeController
+from helpers.lyst.service import LystRuntimeState
 from helpers.lyst.storage import LystStorage
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC, LYST_CLOUDFLARE_BASE_COOLDOWN_SEC, LYST_CLOUDFLARE_MAX_COOLDOWN_SEC
 from config_lyst import (
@@ -217,6 +218,7 @@ LYST_HTTP_SEMAPHORE = asyncio.Semaphore(LYST_HTTP_CONCURRENCY)
 # transport boundary instead of recreating blocking request sessions per page fetch.
 LYST_HTTP_CLIENT = None
 LYST_STATUS_MANAGER = None
+LYST_RUNTIME_STATE = LystRuntimeState(abort_event=LYST_ABORT_EVENT)
 # This runtime backoff is process-global by design: all concurrent country tasks
 # share one persisted view of which source/country pairs should cool down.
 LYST_CLOUDFLARE_BACKOFF = CloudflareBackoff(
@@ -382,15 +384,20 @@ def init_lyst_resume_state():
     # The controller now owns resume-state rules so GroteskBotTg only coordinates
     # run-level globals while the package owns persistence transitions.
     LYST_RESUME_STATE = resume_controller.init_run(loaded_state)
-    LYST_RUN_FAILED = False
-    LYST_RUN_PROGRESS = {}
-    LYST_CYCLE_STARTED_IN_RESUME = bool(LYST_RESUME_STATE.get("resume_active", False))
-    LYST_RESUME_ENTRY_OUTCOMES = {}
+    LYST_RUNTIME_STATE.begin_cycle(resume_active=bool(LYST_RESUME_STATE.get("resume_active", False)))
+    # Keep compatibility globals as aliases while new code migrates toward the
+    # runtime-state object. Dicts are shared intentionally so existing hooks keep working.
+    LYST_RUN_FAILED = LYST_RUNTIME_STATE.run_failed
+    LYST_RUN_PROGRESS = LYST_RUNTIME_STATE.run_progress
+    LYST_CYCLE_STARTED_IN_RESUME = LYST_RUNTIME_STATE.cycle_started_in_resume
+    LYST_RESUME_ENTRY_OUTCOMES = LYST_RUNTIME_STATE.resume_entry_outcomes
 
 async def mark_lyst_run_failed(reason: str):
     global LYST_RUN_FAILED
     resume_controller.state = LYST_RESUME_STATE
     LYST_RUN_FAILED = await resume_controller.mark_run_failed(reason, LYST_RUN_PROGRESS)
+    if LYST_RUN_FAILED:
+        LYST_RUNTIME_STATE.mark_failed()
 
 def log_lyst_run_progress_summary():
     resume_controller.log_run_progress_summary(LYST_RUN_PROGRESS)
@@ -1440,11 +1447,7 @@ def _collect_successful_lyst_results(url_results):
 
 
 def _should_restart_after_terminal_resume(all_shoes):
-    return resume_controller.should_restart_after_terminal_resume(
-        all_shoes=all_shoes,
-        cycle_started_in_resume=LYST_CYCLE_STARTED_IN_RESUME,
-        entry_outcomes=LYST_RESUME_ENTRY_OUTCOMES,
-    )
+    return LYST_RUNTIME_STATE.should_restart_after_terminal_resume(all_shoes)
 
 async def _clear_lyst_resume_state():
     global LYST_RESUME_STATE
@@ -1567,11 +1570,8 @@ def _record_lyst_cloudflare_failure(
     global LYST_LAST_CLOUDFLARE_EVENT
     # Keep the latest challenge context so final health state explains exactly
     # which source/country/page made the run fail.
-    LYST_LAST_CLOUDFLARE_EVENT = {
-        "source_name": source_name,
-        "country": country,
-        "page": page,
-    }
+    LYST_RUNTIME_STATE.record_cloudflare_event(source_name=source_name, country=country, page=page)
+    LYST_LAST_CLOUDFLARE_EVENT = LYST_RUNTIME_STATE.last_cloudflare_event
     return backoff.record_failure(source_name, country)
 
 
@@ -1584,8 +1584,8 @@ def _record_lyst_source_success(source_name: str, country: str, backoff=LYST_CLO
 async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManager | None = None):
     global LYST_LAST_PROGRESS_TS, LYST_ACTIVE_TASK, LYST_CYCLE_STARTED_IN_RESUME, LYST_RESUME_ENTRY_OUTCOMES, LYST_LAST_CLOUDFLARE_EVENT
     LYST_ACTIVE_TASK = asyncio.current_task()
-    LYST_LAST_CLOUDFLARE_EVENT = None
     init_lyst_resume_state()
+    LYST_LAST_CLOUDFLARE_EVENT = LYST_RUNTIME_STATE.last_cloudflare_event
     SKIPPED_ITEMS.clear()
     reset_lyst_http_only_state()
     started = time.perf_counter()
@@ -1619,7 +1619,9 @@ async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManage
             await _clear_lyst_resume_state()
             LYST_RUN_PROGRESS.clear()
             LYST_CYCLE_STARTED_IN_RESUME = False
-            LYST_RESUME_ENTRY_OUTCOMES = {}
+            LYST_RUNTIME_STATE.cycle_started_in_resume = False
+            LYST_RUNTIME_STATE.resume_entry_outcomes.clear()
+            LYST_RESUME_ENTRY_OUTCOMES = LYST_RUNTIME_STATE.resume_entry_outcomes
             all_shoes = await _run_lyst_url_batch()
 
         all_shoes = _log_lyst_collection_stats(all_shoes, exchange_rates)
