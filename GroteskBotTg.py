@@ -1,7 +1,7 @@
 import json, time, asyncio, logging, colorama, subprocess, shutil, traceback, urllib.parse, re, html, io, threading, hashlib, os, random
 from pathlib import Path
 from telegram.constants import ParseMode
-from collections import Counter, defaultdict, deque
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
@@ -43,7 +43,7 @@ from helpers.lyst.browser import (
     launch_browser as lyst_launch_browser,
 )
 from helpers.lyst.resume import LystResumeController
-from helpers.lyst.service import LystRuntimeState
+from helpers.lyst.service import LystCycleHooks, LystCycleRunner, LystRuntimeState
 from helpers.lyst.storage import LystStorage
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DANYLO_DEFAULT_CHAT_ID, EXCHANGERATE_API_KEY, IS_RUNNING_LYST, CHECK_INTERVAL_SEC, CHECK_JITTER_SEC, MAINTENANCE_INTERVAL_SEC, DB_VACUUM, OLX_RETENTION_DAYS, SHAFA_RETENTION_DAYS, LYST_MAX_BROWSERS, LYST_SHOE_CONCURRENCY, LYST_COUNTRY_CONCURRENCY, UPSCALE_IMAGES, UPSCALE_METHOD, LYST_HTTP_ONLY, LYST_HTTP_TIMEOUT_SEC, LYST_HTTP_CONCURRENCY, LYST_HTTP_REQUEST_JITTER_SEC, LYST_CLOUDFLARE_RETRY_COUNT, LYST_CLOUDFLARE_RETRY_DELAY_SEC, LYST_CLOUDFLARE_BASE_COOLDOWN_SEC, LYST_CLOUDFLARE_MAX_COOLDOWN_SEC
 from config_lyst import (
@@ -1556,105 +1556,79 @@ def _record_lyst_source_success(source_name: str, country: str, backoff=LYST_CLO
     backoff.record_success(source_name, country)
 
 
-async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManager | None = None):
-    global LYST_LAST_PROGRESS_TS, LYST_ACTIVE_TASK, LYST_CYCLE_STARTED_IN_RESUME, LYST_RESUME_ENTRY_OUTCOMES, LYST_LAST_CLOUDFLARE_EVENT
-    LYST_ACTIVE_TASK = asyncio.current_task()
-    init_lyst_resume_state()
+def _set_lyst_active_task(task):
+    global LYST_ACTIVE_TASK
+    LYST_ACTIVE_TASK = task
+
+
+def _sync_lyst_cycle_state_globals():
+    global LYST_RUN_FAILED, LYST_RUN_PROGRESS, LYST_CYCLE_STARTED_IN_RESUME, LYST_RESUME_ENTRY_OUTCOMES, LYST_LAST_CLOUDFLARE_EVENT
+    # Compatibility layer: legacy callbacks still read module globals, while new
+    # orchestration owns the run state through LystRuntimeState.
+    LYST_RUN_FAILED = LYST_RUNTIME_STATE.run_failed
+    LYST_RUN_PROGRESS = LYST_RUNTIME_STATE.run_progress
+    LYST_CYCLE_STARTED_IN_RESUME = LYST_RUNTIME_STATE.cycle_started_in_resume
+    LYST_RESUME_ENTRY_OUTCOMES = LYST_RUNTIME_STATE.resume_entry_outcomes
     LYST_LAST_CLOUDFLARE_EVENT = LYST_RUNTIME_STATE.last_cloudflare_event
-    SKIPPED_ITEMS.clear()
-    reset_lyst_http_only_state()
-    started = time.perf_counter()
-    run_stats = RunStatsCollector("lyst")
-    if status_manager is not None:
-        status_manager.begin_cycle()
-        status_manager.set_state_fields(lyst_cloudflare_backoff=LYST_CLOUDFLARE_BACKOFF.snapshot())
-    _touch_lyst_progress("run_start")
-    try:
-        old_data = await load_shoe_data()
-        exchange_rates = await async_load_exchange_rates()
-
-        async def _run_lyst_url_batch():
-            url_tasks = [
-                asyncio.wait_for(process_url(base_url, COUNTRIES, exchange_rates), timeout=LYST_URL_TIMEOUT_SEC)
-                for base_url in BASE_URLS
-            ]
-            url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
-            return _collect_successful_lyst_results(url_results)
-
-        all_shoes = await _run_lyst_url_batch()
-        # When a stale resume state points only at already-finished pages, every URL
-        # can cleanly return HTTP 410 with 0 items. That is resume cleanup, not a real
-        # empty-catalog run. Clear resume state and immediately rerun once from page 1
-        # before any "0 items" status or inactive-item marking can fire.
-        if _should_restart_after_terminal_resume(all_shoes):
-            logger.warning(
-                "LYST resume pass reached only terminal pages with 0 items; "
-                "clearing resume state and restarting once from page 1"
-            )
-            await _clear_lyst_resume_state()
-            LYST_RUN_PROGRESS.clear()
-            LYST_CYCLE_STARTED_IN_RESUME = False
-            LYST_RUNTIME_STATE.cycle_started_in_resume = False
-            LYST_RUNTIME_STATE.resume_entry_outcomes.clear()
-            LYST_RESUME_ENTRY_OUTCOMES = LYST_RUNTIME_STATE.resume_entry_outcomes
-            all_shoes = await _run_lyst_url_batch()
-
-        all_shoes = _log_lyst_collection_stats(all_shoes, exchange_rates)
-
-        # Even when a later page aborts the run, keep already-scraped items. That is
-        # the whole point of the fail-fast Cloudflare flow: stop new requests, but do
-        # not throw away data we already paid to scrape successfully.
-        processing_stats = await process_all_shoes(all_shoes, old_data, message_queue, exchange_rates)
-        await _finalize_lyst_resume_state()
-        _touch_lyst_progress("finalize_run")
-        fallback_note = "; ".join(sorted(set(LYST_RESUME_ENTRY_OUTCOMES.values()))) if LYST_RUN_FAILED else ""
-        outcome = _build_lyst_run_outcome(
-            run_failed=LYST_RUN_FAILED,
-            items_seen=len(all_shoes),
-            new_items=processing_stats.new_total,
-            cloudflare_event=LYST_LAST_CLOUDFLARE_EVENT,
-            fallback_note=fallback_note,
-        )
-        # The JSONL summary mirrors the service status but also preserves source-level
-        # resume outcomes, which makes Cloudflare/terminal-page behavior auditable later.
-        run_stats.set_field("items_seen", len(all_shoes))
-        run_stats.set_field("new_items", processing_stats.new_total)
-        run_stats.set_field("removed_items", processing_stats.removed_total)
-        run_stats.set_field("resume_outcomes", dict(Counter(LYST_RESUME_ENTRY_OUTCOMES.values())))
-        if LYST_LAST_CLOUDFLARE_EVENT:
-            run_stats.set_field("cloudflare_event", dict(LYST_LAST_CLOUDFLARE_EVENT))
-        run_stats.write_jsonl(SCRAPER_RUNS_JSONL_FILE, run_stats.finish(outcome=outcome.state.value))
-        _finalize_lyst_cycle(issue=outcome.note if not outcome.ok else None)
-        if status_manager is not None:
-            status_manager.finish_outcome(outcome, duration_seconds=time.perf_counter() - started)
-        logger.info(_format_lyst_completion_message(outcome))
-
-        print_statistics()
-        print_link_statistics()
-    except asyncio.CancelledError:
-        _finalize_lyst_cycle(issue="stalled")
-        run_stats.set_field("error", "stalled")
-        run_stats.write_jsonl(SCRAPER_RUNS_JSONL_FILE, run_stats.finish(outcome="failed_stalled"))
-        if status_manager is not None:
-            status_manager.finish_outcome(
-                LystRunOutcome.failed("stalled"),
-                duration_seconds=time.perf_counter() - started,
-            )
-        raise
-    except Exception as exc:
-        _finalize_lyst_cycle(issue="failed", error=exc)
-        run_stats.set_field("error", str(exc)[:200])
-        run_stats.write_jsonl(SCRAPER_RUNS_JSONL_FILE, run_stats.finish(outcome="failed"))
-        if status_manager is not None:
-            status_manager.finish_outcome(
-                LystRunOutcome.failed(str(exc)),
-                duration_seconds=time.perf_counter() - started,
-            )
-        raise
-    finally:
-        LYST_ACTIVE_TASK = None
 
 
+def _create_lyst_run_stats():
+    return RunStatsCollector("lyst")
+
+
+async def _run_lyst_url_batch(exchange_rates):
+    url_tasks = [
+        asyncio.wait_for(process_url(base_url, COUNTRIES, exchange_rates), timeout=LYST_URL_TIMEOUT_SEC)
+        for base_url in BASE_URLS
+    ]
+    url_results = await asyncio.gather(*url_tasks, return_exceptions=True)
+    return _collect_successful_lyst_results(url_results)
+
+
+async def _restart_lyst_after_terminal_resume():
+    global LYST_CYCLE_STARTED_IN_RESUME, LYST_RESUME_ENTRY_OUTCOMES
+    await _clear_lyst_resume_state()
+    LYST_RUN_PROGRESS.clear()
+    LYST_CYCLE_STARTED_IN_RESUME = False
+    LYST_RUNTIME_STATE.cycle_started_in_resume = False
+    LYST_RUNTIME_STATE.resume_entry_outcomes.clear()
+    LYST_RESUME_ENTRY_OUTCOMES = LYST_RUNTIME_STATE.resume_entry_outcomes
+
+
+def _build_lyst_cycle_hooks():
+    return LystCycleHooks(
+        set_active_task=_set_lyst_active_task,
+        init_cycle=init_lyst_resume_state,
+        sync_cycle_state=_sync_lyst_cycle_state_globals,
+        clear_skipped_items=SKIPPED_ITEMS.clear,
+        reset_http_only_state=reset_lyst_http_only_state,
+        create_run_stats=_create_lyst_run_stats,
+        cloudflare_backoff_snapshot=LYST_CLOUDFLARE_BACKOFF.snapshot,
+        touch_progress=_touch_lyst_progress,
+        load_old_data=load_shoe_data,
+        load_exchange_rates=async_load_exchange_rates,
+        run_url_batch=_run_lyst_url_batch,
+        should_restart_after_terminal_resume=_should_restart_after_terminal_resume,
+        restart_after_terminal_resume=_restart_lyst_after_terminal_resume,
+        log_collection_stats=_log_lyst_collection_stats,
+        process_all_shoes=process_all_shoes,
+        finalize_resume_state=_finalize_lyst_resume_state,
+        get_run_failed=lambda: LYST_RUN_FAILED,
+        get_resume_outcomes=lambda: LYST_RESUME_ENTRY_OUTCOMES,
+        get_cloudflare_event=lambda: LYST_LAST_CLOUDFLARE_EVENT,
+        build_outcome=_build_lyst_run_outcome,
+        scraper_runs_file=SCRAPER_RUNS_JSONL_FILE,
+        finalize_cycle=_finalize_lyst_cycle,
+        format_completion_message=_format_lyst_completion_message,
+        print_statistics=print_statistics,
+        print_link_statistics=print_link_statistics,
+        logger=logger,
+    )
+
+
+async def run_lyst_cycle_impl(message_queue, *, status_manager: LystStatusManager | None = None):
+    runner = LystCycleRunner(_build_lyst_cycle_hooks())
+    await runner.run(message_queue, status_manager=status_manager)
 
 def _run_db_retention_cleanup(conn, db_path):
     if db_path == OLX_DB_FILE and OLX_RETENTION_DAYS > 0:
