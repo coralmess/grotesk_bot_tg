@@ -112,3 +112,69 @@ class LystRunOutcome:
             "lyst_failure_country": self.country,
             "lyst_failure_page": self.page,
         }
+
+
+def build_lyst_run_outcome(
+    *,
+    run_failed: bool,
+    items_seen: int,
+    new_items: int,
+    cloudflare_event: dict | None,
+    fallback_note: str,
+) -> LystRunOutcome:
+    """Convert low-level cycle flags into the single status model used by logs and Telegram.
+
+    Lyst can fail after already scraping useful items. Keeping this decision in one
+    helper avoids future edits accidentally marking a partial Cloudflare run as a
+    clean success or a hard failure with no item counts.
+    """
+    if cloudflare_event:
+        if not run_failed and items_seen > 0:
+            return LystRunOutcome.cloudflare_partial_success(
+                source_name=str(cloudflare_event.get("source_name") or ""),
+                country=str(cloudflare_event.get("country") or ""),
+                page=cloudflare_event.get("page"),
+                items_seen=items_seen,
+                new_items=new_items,
+            )
+        return LystRunOutcome.cloudflare_partial(
+            source_name=str(cloudflare_event.get("source_name") or ""),
+            country=str(cloudflare_event.get("country") or ""),
+            page=cloudflare_event.get("page"),
+            items_seen=items_seen,
+            new_items=new_items,
+        )
+    if run_failed:
+        return LystRunOutcome.failed(fallback_note or "failed")
+    return LystRunOutcome.full_success(items_seen=items_seen, new_items=new_items)
+
+
+def format_lyst_completion_message(outcome: LystRunOutcome) -> str:
+    """Return a compact operational log line for the end of a Lyst cycle."""
+    if outcome.ok:
+        if outcome.note:
+            return (
+                f"LYST run {outcome.phase}: {outcome.note}; "
+                f"items_seen={outcome.items_seen}, new_items={outcome.new_items}"
+            )
+        return (
+            f"LYST run {outcome.phase}: "
+            f"items_seen={outcome.items_seen}, new_items={outcome.new_items}"
+        )
+    return (
+        f"LYST run {outcome.phase}: {outcome.note}; "
+        f"items_seen={outcome.items_seen}, new_items={outcome.new_items}"
+    )
+
+
+def has_pending_lyst_resume_outcome(entry_outcomes: dict[str, str]) -> bool:
+    """Tell resume finalization whether source-level failures must remain resumable.
+
+    Local Cloudflare/cancel outcomes may still leave useful already-scraped items.
+    We keep resume state for those sources instead of clearing it with the rest of a
+    partial-but-processed run.
+    """
+    return any(
+        outcome in {"cloudflare", "cloudflare_cooldown", "failed", "aborted"}
+        for outcome in entry_outcomes.values()
+    )

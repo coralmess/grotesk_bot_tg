@@ -29,7 +29,12 @@ from helpers.lyst import processing as lyst_processing_helpers
 from helpers.lyst.cloudflare_backoff import CloudflareBackoff
 from helpers.lyst.http_client import AsyncLystHttpClient
 from helpers.lyst.models import FetchStatus
-from helpers.lyst.outcome import LystRunOutcome
+from helpers.lyst.outcome import (
+    LystRunOutcome,
+    build_lyst_run_outcome,
+    format_lyst_completion_message,
+    has_pending_lyst_resume_outcome,
+)
 from helpers.lyst.status import LystStatusManager
 from helpers.lyst.browser import (
     BrowserPool,
@@ -1501,20 +1506,7 @@ def _finalize_lyst_cycle(issue=None, error=None):
         _mark_lyst_issue(issue)
 
 def _format_lyst_completion_message(outcome: LystRunOutcome) -> str:
-    if outcome.ok:
-        if outcome.note:
-            return (
-                f"LYST run {outcome.phase}: {outcome.note}; "
-                f"items_seen={outcome.items_seen}, new_items={outcome.new_items}"
-            )
-        return (
-            f"LYST run {outcome.phase}: "
-            f"items_seen={outcome.items_seen}, new_items={outcome.new_items}"
-        )
-    return (
-        f"LYST run {outcome.phase}: {outcome.note}; "
-        f"items_seen={outcome.items_seen}, new_items={outcome.new_items}"
-    )
+    return format_lyst_completion_message(outcome)
 
 
 def _build_lyst_run_outcome(
@@ -1525,34 +1517,17 @@ def _build_lyst_run_outcome(
     cloudflare_event: dict | None,
     fallback_note: str,
 ) -> LystRunOutcome:
-    if cloudflare_event:
-        if not run_failed and items_seen > 0:
-            return LystRunOutcome.cloudflare_partial_success(
-                source_name=str(cloudflare_event.get("source_name") or ""),
-                country=str(cloudflare_event.get("country") or ""),
-                page=cloudflare_event.get("page"),
-                items_seen=items_seen,
-                new_items=new_items,
-            )
-        return LystRunOutcome.cloudflare_partial(
-            source_name=str(cloudflare_event.get("source_name") or ""),
-            country=str(cloudflare_event.get("country") or ""),
-            page=cloudflare_event.get("page"),
-            items_seen=items_seen,
-            new_items=new_items,
-        )
-    if run_failed:
-        return LystRunOutcome.failed(fallback_note or "failed")
-    return LystRunOutcome.full_success(items_seen=items_seen, new_items=new_items)
+    return build_lyst_run_outcome(
+        run_failed=run_failed,
+        items_seen=items_seen,
+        new_items=new_items,
+        cloudflare_event=cloudflare_event,
+        fallback_note=fallback_note,
+    )
 
 
 def _has_pending_lyst_resume_outcome(entry_outcomes: dict[str, str]) -> bool:
-    # Local Cloudflare/cancel outcomes need resume state kept even when the run
-    # produced usable results and should not trigger the global abort path.
-    return any(
-        outcome in {"cloudflare", "cloudflare_cooldown", "failed", "aborted"}
-        for outcome in entry_outcomes.values()
-    )
+    return has_pending_lyst_resume_outcome(entry_outcomes)
 
 
 def _should_skip_lyst_source_for_backoff(source_name: str, country: str, backoff=LYST_CLOUDFLARE_BACKOFF) -> bool:
