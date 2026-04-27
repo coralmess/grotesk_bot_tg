@@ -58,6 +58,24 @@ class LystRuntimeTests(unittest.TestCase):
         self.assertIn("Cloudflare challenge", message)
         self.assertNotEqual(message, "LYST run completed")
 
+    def test_format_lyst_completion_message_includes_partial_success_note(self):
+        from GroteskBotTg import _format_lyst_completion_message
+        from helpers.lyst.outcome import LystRunOutcome
+
+        message = _format_lyst_completion_message(
+            LystRunOutcome.cloudflare_partial_success(
+                source_name="Main brands",
+                country="US",
+                page=3,
+                items_seen=120,
+                new_items=2,
+            )
+        )
+
+        self.assertIn("succeeded_partial", message)
+        self.assertIn("Cloudflare challenge", message)
+        self.assertIn("Main brands", message)
+
     def test_build_lyst_run_outcome_prefers_cloudflare_failure_event(self):
         from GroteskBotTg import _build_lyst_run_outcome
 
@@ -71,6 +89,43 @@ class LystRuntimeTests(unittest.TestCase):
 
         self.assertEqual(outcome.phase, "failed_cloudflare")
         self.assertIn("Main brands", outcome.note)
+
+    def test_build_lyst_run_outcome_marks_cloudflare_with_items_as_partial_success(self):
+        from GroteskBotTg import _build_lyst_run_outcome
+
+        outcome = _build_lyst_run_outcome(
+            run_failed=False,
+            items_seen=120,
+            new_items=2,
+            cloudflare_event={"source_name": "Main brands", "country": "US", "page": 3},
+            fallback_note="",
+        )
+
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.phase, "succeeded_partial")
+        self.assertIn("Cloudflare challenge", outcome.note)
+        self.assertEqual(outcome.source_name, "Main brands")
+
+    def test_build_lyst_run_outcome_keeps_zero_item_cloudflare_failed(self):
+        from GroteskBotTg import _build_lyst_run_outcome
+
+        outcome = _build_lyst_run_outcome(
+            run_failed=False,
+            items_seen=0,
+            new_items=0,
+            cloudflare_event={"source_name": "Main brands", "country": "US", "page": 3},
+            fallback_note="",
+        )
+
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.phase, "failed_cloudflare")
+
+    def test_pending_resume_outcome_detects_local_cloudflare(self):
+        from GroteskBotTg import _has_pending_lyst_resume_outcome
+
+        self.assertTrue(_has_pending_lyst_resume_outcome({"Main:US": "cloudflare"}))
+        self.assertTrue(_has_pending_lyst_resume_outcome({"Main:US": "cloudflare_cooldown"}))
+        self.assertFalse(_has_pending_lyst_resume_outcome({"Main:US": "terminal"}))
 
     def test_should_skip_lyst_source_when_cloudflare_backoff_blocks_it(self):
         from GroteskBotTg import _should_skip_lyst_source_for_backoff

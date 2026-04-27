@@ -80,6 +80,36 @@ class LystResumeControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(us_entry["next_page"], 1)
         self.assertTrue(us_entry["completed"])
 
+    async def test_finalize_after_processing_preserves_resume_without_treating_clean_entries_as_failed(self) -> None:
+        self.controller.state = {
+            "resume_active": True,
+            "entries": {
+                "blocked::IT": {
+                    "last_scraped_page": 0,
+                    "next_page": 1,
+                    "completed": False,
+                    "failure_reason": "Cloudflare challenge",
+                },
+                "clean::US": {
+                    "last_scraped_page": 2,
+                    "scrape_complete": True,
+                    "next_page": 1,
+                    "completed": False,
+                },
+            },
+        }
+
+        await self.controller.finalize_after_processing(run_failed=False, preserve_resume=True)
+
+        blocked_entry = self.controller.state["entries"]["blocked::IT"]
+        clean_entry = self.controller.state["entries"]["clean::US"]
+        self.assertTrue(self.controller.state["resume_active"])
+        self.assertEqual(blocked_entry["next_page"], 1)
+        self.assertFalse(blocked_entry["completed"])
+        self.assertEqual(clean_entry["last_success_page"], 2)
+        self.assertEqual(clean_entry["next_page"], 1)
+        self.assertTrue(clean_entry["completed"])
+
     async def test_should_restart_after_terminal_resume_requires_empty_resume_only_outcomes(self) -> None:
         self.assertTrue(
             self.controller.should_restart_after_terminal_resume(

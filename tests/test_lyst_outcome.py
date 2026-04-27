@@ -28,6 +28,22 @@ class LystOutcomeTests(unittest.TestCase):
         self.assertIn("Main brands", outcome.note)
         self.assertEqual(outcome.service_state_fields()["lyst_cycle_phase"], "failed_cloudflare")
 
+    def test_cloudflare_partial_success_keeps_run_ok_but_records_blocked_location(self):
+        outcome = LystRunOutcome.cloudflare_partial_success(
+            source_name="Main brands",
+            country="US",
+            page=3,
+            items_seen=120,
+            new_items=2,
+        )
+
+        self.assertEqual(outcome.state, LystRunState.SUCCESS_PARTIAL)
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.phase, "succeeded_partial")
+        self.assertIn("Cloudflare challenge", outcome.note)
+        self.assertEqual(outcome.source_name, "Main brands")
+        self.assertEqual(outcome.service_state_fields()["lyst_failure_page"], 3)
+
     def test_stalled_outcome_is_not_ok(self):
         outcome = LystRunOutcome.failed("stalled")
 

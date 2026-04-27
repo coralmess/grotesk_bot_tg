@@ -85,11 +85,12 @@ class LystResumeController:
             logger=self.logger,
         )
 
-    async def finalize_after_processing(self, *, run_failed: bool) -> None:
+    async def finalize_after_processing(self, *, run_failed: bool, preserve_resume: bool = False) -> None:
         await lyst_state_helpers.finalize_resume_after_processing(
             resume_lock=self.resume_lock,
             resume_state=self.state,
             run_failed=run_failed,
+            preserve_resume=preserve_resume,
             save_state_fn=self.save_state,
         )
 

@@ -167,6 +167,7 @@ async def finalize_resume_after_processing(
     resume_lock: asyncio.Lock,
     resume_state: dict,
     run_failed: bool,
+    preserve_resume: bool = False,
     save_state_fn: Callable[[dict], None],
 ):
     async with resume_lock:
@@ -182,7 +183,9 @@ async def finalize_resume_after_processing(
             else:
                 entry["completed"] = False
                 entry["next_page"] = (last_scraped + 1) if last_scraped else entry.get("next_page", 1)
-        if run_failed:
+        # Localized Cloudflare should keep resume active for the blocked pair,
+        # but clean completed pairs are still allowed to become completed above.
+        if run_failed or preserve_resume:
             resume_state["resume_active"] = True
         save_state_fn(resume_state)
 
@@ -294,4 +297,3 @@ def describe_task_wait_chain(task, max_depth=6):
             break
         depth += 1
     return lines
-

@@ -77,20 +77,21 @@ async def finalize_resume_state(
     finalize_resume_after_processing,
     clear_resume_state,
     run_failed,
+    preserve_resume=False,
     touch_progress,
     mark_issue,
     logger,
 ):
     await run_resume_step(
         progress_name="finalize_resume",
-        operation=finalize_resume_after_processing,
+        operation=lambda: finalize_resume_after_processing(preserve_resume=preserve_resume),
         touch_progress=touch_progress,
         mark_issue=mark_issue,
         logger=logger,
         timeout_issue="resume finalize timeout",
         timeout_log="LYST finalize resume timed out; continuing without resume update",
     )
-    if run_failed:
+    if run_failed or preserve_resume:
         return
     await run_resume_step(
         progress_name="finalize_clear",

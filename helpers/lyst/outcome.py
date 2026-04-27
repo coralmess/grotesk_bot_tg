@@ -13,6 +13,11 @@ class LystRunState(str, Enum):
     SKIPPED_DISABLED = "skipped_disabled"
 
 
+def _cloudflare_note(*, source_name: str, country: str, page: int | None) -> str:
+    location = " ".join(part for part in (source_name, country, f"page {page}" if page else "") if part)
+    return f"Cloudflare challenge: {location}" if location else "Cloudflare challenge"
+
+
 @dataclass(slots=True)
 class LystRunOutcome:
     state: LystRunState
@@ -59,10 +64,30 @@ class LystRunOutcome:
         items_seen: int,
         new_items: int,
     ) -> "LystRunOutcome":
-        location = " ".join(part for part in (source_name, country, f"page {page}" if page else "") if part)
-        note = f"Cloudflare challenge: {location}" if location else "Cloudflare challenge"
+        note = _cloudflare_note(source_name=source_name, country=country, page=page)
         return cls(
             LystRunState.FAILED_CLOUDFLARE,
+            note=note,
+            items_seen=items_seen,
+            new_items=new_items,
+            source_name=source_name,
+            country=country,
+            page=page,
+        )
+
+    @classmethod
+    def cloudflare_partial_success(
+        cls,
+        *,
+        source_name: str,
+        country: str,
+        page: int | None,
+        items_seen: int,
+        new_items: int,
+    ) -> "LystRunOutcome":
+        note = _cloudflare_note(source_name=source_name, country=country, page=page)
+        return cls(
+            LystRunState.SUCCESS_PARTIAL,
             note=note,
             items_seen=items_seen,
             new_items=new_items,

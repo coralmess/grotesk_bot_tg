@@ -172,7 +172,7 @@ class LystPageRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.outcomes["Main:US"], "cloudflare_cooldown")
         self.assertEqual(harness.scrape_calls, [])
 
-    async def test_cloudflare_status_records_failure_and_resume_page(self):
+    async def test_cloudflare_status_records_local_cooldown_without_global_abort(self):
         base_url = {"url": "https://www.lyst.com/shop", "url_name": "Main"}
         harness, config, hooks = make_harness(page_results=[([], "challenge", "cloudflare")])
 
@@ -191,7 +191,7 @@ class LystPageRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.outcomes["Main:US"], "cloudflare")
         self.assertEqual(harness.cloudflare_failures, [("Main", "US", 1)])
         self.assertEqual(harness.issues, ["Cloudflare challenge"])
-        self.assertEqual(harness.failed_runs, ["Cloudflare challenge"])
+        self.assertEqual(harness.failed_runs, [])
         self.assertEqual(harness.resume_updates[0][2]["next_page"], 1)
         self.assertEqual(harness.resume_updates[0][2]["failure_reason"], "Cloudflare challenge")
 

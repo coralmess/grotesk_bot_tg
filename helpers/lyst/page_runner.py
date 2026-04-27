@@ -103,8 +103,8 @@ async def scrape_all_pages(
                 decision.failure_count,
                 decision.cooldown_sec,
             )
-            # Preserve failure semantics across the module boundary: Cloudflare
-            # must remain a failed run, not just an empty page.
+            # Keep Cloudflare local to this source/country. The cooldown and
+            # resume entry preserve retry safety without aborting independent work.
             hooks.mark_issue("Cloudflare challenge")
             await hooks.update_resume_with_url(
                 key,
@@ -114,7 +114,6 @@ async def scrape_all_pages(
                 completed=False,
                 failure_reason="Cloudflare challenge",
             )
-            await hooks.mark_run_failed("Cloudflare challenge")
             hooks.log_run_progress_summary()
             break
         if status == "aborted":
