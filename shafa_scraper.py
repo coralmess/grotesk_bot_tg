@@ -8,7 +8,22 @@ import asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
 from functools import lru_cache
 from urllib.parse import urljoin, urlsplit, urlunsplit
-from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, SHAFA_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, SHAFA_TASK_CONCURRENCY, SHAFA_HTTP_CONCURRENCY, SHAFA_SEND_CONCURRENCY, SHAFA_UPSCALE_CONCURRENCY, SHAFA_PLAYWRIGHT_CONCURRENCY, SHAFA_HTTP_CONNECTOR_LIMIT
+from config import (
+    TELEGRAM_OLX_BOT_TOKEN,
+    DANYLO_DEFAULT_CHAT_ID,
+    SHAFA_REQUEST_JITTER_SEC,
+    RUN_USER_AGENT,
+    RUN_ACCEPT_LANGUAGE,
+    SHAFA_TASK_CONCURRENCY,
+    SHAFA_HTTP_CONCURRENCY,
+    SHAFA_SEND_CONCURRENCY,
+    SHAFA_UPSCALE_CONCURRENCY,
+    SHAFA_PLAYWRIGHT_CONCURRENCY,
+    SHAFA_HTTP_CONNECTOR_LIMIT,
+    MARKET_IMAGE_UPSCALE_MIN_DIM,
+    MARKET_IMAGE_UPSCALE_MAX_DIM,
+    MARKET_IMAGE_UPSCALE_FACTORS,
+)
 from config_shafa_urls import SHAFA_URLS
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
 from helpers.marketplace_core import (
@@ -489,6 +504,9 @@ send_photo_with_upscale = build_media_sender(
     send_photo_by_bytes=_send_photo_by_bytes,
     run_cpu_bound_fn=run_cpu_bound,
     logger=logger,
+    min_upscale_dim=MARKET_IMAGE_UPSCALE_MIN_DIM,
+    max_dim=MARKET_IMAGE_UPSCALE_MAX_DIM,
+    upscale_factors=MARKET_IMAGE_UPSCALE_FACTORS,
 )
 
 DB_FILE = SHAFA_ITEMS_DB_FILE

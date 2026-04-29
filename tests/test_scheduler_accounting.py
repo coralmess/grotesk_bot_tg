@@ -1,6 +1,6 @@
 import unittest
 
-from helpers.scheduler import SchedulerRunAccountant
+from helpers.scheduler import SchedulerRunAccountant, _select_due_market_job
 
 
 class SchedulerRunAccountantTests(unittest.TestCase):
@@ -21,6 +21,21 @@ class SchedulerRunAccountantTests(unittest.TestCase):
         self.assertTrue(accountant.should_log_sleep(100))
         self.assertFalse(accountant.should_log_sleep(95))
         self.assertTrue(accountant.should_log_sleep(30))
+
+    def test_market_scheduler_selects_only_one_due_feed(self):
+        selected = _select_due_market_job(now_ts=100, next_olx_ts=90, next_shafa_ts=95)
+
+        self.assertEqual(selected, "olx")
+
+    def test_market_scheduler_keeps_waiting_feed_due(self):
+        selected = _select_due_market_job(now_ts=100, next_olx_ts=120, next_shafa_ts=95)
+
+        self.assertEqual(selected, "shafa")
+
+    def test_market_scheduler_returns_none_when_nothing_due(self):
+        selected = _select_due_market_job(now_ts=100, next_olx_ts=120, next_shafa_ts=130)
+
+        self.assertIsNone(selected)
 
 
 if __name__ == "__main__":

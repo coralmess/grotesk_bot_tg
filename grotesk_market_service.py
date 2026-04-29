@@ -19,6 +19,10 @@ from config import (
     DB_VACUUM,
     OLX_RETENTION_DAYS,
     SHAFA_RETENTION_DAYS,
+    MARKET_OLX_MIN_SEC,
+    MARKET_OLX_MAX_SEC,
+    MARKET_SHAFA_MIN_SEC,
+    MARKET_SHAFA_MAX_SEC,
 )
 from helpers.dynamic_sources import add_dynamic_url
 from helpers import scraper_unsubscribes as scraper_unsubscribes_helpers
@@ -165,6 +169,10 @@ async def main():
             logger=logger,
             last_olx_run_exists=statuses["olx"]["last_run_end_utc"] is not None,
             last_shafa_run_exists=statuses["shafa"]["last_run_end_utc"] is not None,
+            olx_min_sec=MARKET_OLX_MIN_SEC,
+            olx_max_sec=MARKET_OLX_MAX_SEC,
+            shafa_min_sec=MARKET_SHAFA_MIN_SEC,
+            shafa_max_sec=MARKET_SHAFA_MAX_SEC,
         )
     finally:
         SERVICE_HEALTH.mark_stopping("market service stopping")

@@ -57,6 +57,32 @@ def _schedule_next_run(min_sec: int, max_sec: int) -> float:
     return time.time() + random.randint(min_sec, max_sec)
 
 
+def _select_due_market_job(*, now_ts: float, next_olx_ts: float, next_shafa_ts: float) -> str | None:
+    due_jobs = []
+    if now_ts >= next_olx_ts:
+        due_jobs.append(("olx", next_olx_ts))
+    if now_ts >= next_shafa_ts:
+        due_jobs.append(("shafa", next_shafa_ts))
+    if not due_jobs:
+        return None
+    # When both feeds are due, run the older due timestamp first and leave the
+    # other timestamp untouched. That serializes OLX/SHAFA without silently
+    # skipping a delayed run.
+    due_jobs.sort(key=lambda item: (item[1], item[0]))
+    return due_jobs[0][0]
+
+
+async def _sleep_or_wait_for_task(active_task, sleep_for: int) -> None:
+    if active_task is not None:
+        if active_task.done():
+            return
+        done, _ = await asyncio.wait({active_task}, timeout=sleep_for)
+        if done:
+            return
+    else:
+        await asyncio.sleep(sleep_for)
+
+
 async def run_scheduler(
     *,
     run_olx,
@@ -201,46 +227,43 @@ async def run_market_scheduler(
     if not last_shafa_run_exists:
         next_shafa_ts = time.time()
 
-    olx_task = None
-    shafa_task = None
+    active_task = None
+    active_name = None
 
     while True:
         try:
             now_ts = time.time()
-            if now_ts >= next_olx_ts and (olx_task is None or olx_task.done()):
-                next_olx_ts = _schedule_next_run(olx_min_sec, olx_max_sec)
-                olx_task = asyncio.create_task(asyncio.wait_for(run_olx(), timeout=olx_timeout_sec))
-            if now_ts >= next_shafa_ts and (shafa_task is None or shafa_task.done()):
-                next_shafa_ts = _schedule_next_run(shafa_min_sec, shafa_max_sec)
-                shafa_task = asyncio.create_task(asyncio.wait_for(run_shafa(), timeout=shafa_timeout_sec))
+            if active_task is not None and active_task.done():
+                task_label = (active_name or "market").upper()
+                if active_task.cancelled():
+                    logger.warning("%s task cancelled", task_label)
+                else:
+                    try:
+                        exc = active_task.exception()
+                    except asyncio.CancelledError:
+                        exc = None
+                    if exc:
+                        logger.error("%s task crashed: %s", task_label, exc)
+                active_task = None
+                active_name = None
 
-            if olx_task is not None and olx_task.done():
-                if olx_task.cancelled():
-                    logger.warning("OLX task cancelled")
-                else:
-                    try:
-                        exc = olx_task.exception()
-                    except asyncio.CancelledError:
-                        exc = None
-                    if exc:
-                        logger.error(f"OLX task crashed: {exc}")
-                olx_task = None
-            if shafa_task is not None and shafa_task.done():
-                if shafa_task.cancelled():
-                    logger.warning("SHAFA task cancelled")
-                else:
-                    try:
-                        exc = shafa_task.exception()
-                    except asyncio.CancelledError:
-                        exc = None
-                    if exc:
-                        logger.error(f"SHAFA task crashed: {exc}")
-                shafa_task = None
+            if active_task is None:
+                due_job = _select_due_market_job(now_ts=now_ts, next_olx_ts=next_olx_ts, next_shafa_ts=next_shafa_ts)
+                if due_job == "olx":
+                    # Reschedule only after the run really starts. If SHAFA is running
+                    # or both feeds are due, delayed work stays due instead of being lost.
+                    next_olx_ts = _schedule_next_run(olx_min_sec, olx_max_sec)
+                    active_task = asyncio.create_task(asyncio.wait_for(run_olx(), timeout=olx_timeout_sec))
+                    active_name = "olx"
+                elif due_job == "shafa":
+                    next_shafa_ts = _schedule_next_run(shafa_min_sec, shafa_max_sec)
+                    active_task = asyncio.create_task(asyncio.wait_for(run_shafa(), timeout=shafa_timeout_sec))
+                    active_name = "shafa"
 
             next_wake = min(next_olx_ts, next_shafa_ts)
             sleep_for = max(5, int(next_wake - time.time()))
             logger.info(f"Sleeping for {sleep_for} seconds before next market check")
-            await asyncio.sleep(sleep_for)
+            await _sleep_or_wait_for_task(active_task, sleep_for)
         except KeyboardInterrupt:
             logger.info("Market scheduler terminated by user")
             break

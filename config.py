@@ -4,6 +4,23 @@ import random
 
 load_dotenv()
 
+
+def _float_tuple_env(name: str, default: tuple[float, ...]) -> tuple[float, ...]:
+    raw = os.getenv(name, "")
+    values: list[float] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            value = float(part)
+        except ValueError:
+            return default
+        if value > 0:
+            values.append(value)
+    return tuple(values) or default
+
+
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 EXCHANGERATE_API_KEY = os.getenv('EXCHANGERATE_API_KEY')
@@ -16,12 +33,23 @@ CHECK_INTERVAL_SEC = int(os.getenv('CHECK_INTERVAL_SEC', '3600'))
 CHECK_JITTER_SEC = int(os.getenv('CHECK_JITTER_SEC', '300'))
 OLX_REQUEST_JITTER_SEC = float(os.getenv('OLX_REQUEST_JITTER_SEC', '2.0'))
 SHAFA_REQUEST_JITTER_SEC = float(os.getenv('SHAFA_REQUEST_JITTER_SEC', '2.0'))
+# Marketplace scrapers are serialized by the market service, so these shorter
+# windows make each feed more frequent without letting OLX and SHAFA overlap.
+MARKET_OLX_MIN_SEC = int(os.getenv('MARKET_OLX_MIN_SEC', '900'))
+MARKET_OLX_MAX_SEC = int(os.getenv('MARKET_OLX_MAX_SEC', '1800'))
+MARKET_SHAFA_MIN_SEC = int(os.getenv('MARKET_SHAFA_MIN_SEC', '900'))
+MARKET_SHAFA_MAX_SEC = int(os.getenv('MARKET_SHAFA_MAX_SEC', '1800'))
 MAINTENANCE_INTERVAL_SEC = int(os.getenv('MAINTENANCE_INTERVAL_SEC', '21600'))
 DB_VACUUM = os.getenv('DB_VACUUM', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 OLX_RETENTION_DAYS = int(os.getenv('OLX_RETENTION_DAYS', '0'))
 SHAFA_RETENTION_DAYS = int(os.getenv('SHAFA_RETENTION_DAYS', '0'))
 UPSCALE_IMAGES = os.getenv('UPSCALE_IMAGES', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 UPSCALE_METHOD = os.getenv('UPSCALE_METHOD', 'lanczos').strip().lower()
+MARKET_IMAGE_UPSCALE_MIN_DIM = int(os.getenv('MARKET_IMAGE_UPSCALE_MIN_DIM', '1280'))
+MARKET_IMAGE_UPSCALE_MAX_DIM = int(os.getenv('MARKET_IMAGE_UPSCALE_MAX_DIM', '5000'))
+# Try larger Lanczos outputs first, but keep this configurable because Telegram's
+# accepted geometry and source image sizes vary by marketplace.
+MARKET_IMAGE_UPSCALE_FACTORS = _float_tuple_env('MARKET_IMAGE_UPSCALE_FACTORS', (3.0, 2.5, 2.0))
 BLOCK_RESOURCES = os.getenv('BLOCK_RESOURCES', 'true' if IS_INSTANCE else 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 # Lyst now prefers the HTTP parser first. It is cheaper, returns images via LD-JSON,
 # and only falls back to Playwright when HTTP truly fails.
@@ -48,14 +76,19 @@ LYST_COUNTRY_CONCURRENCY = int(os.getenv('LYST_COUNTRY_CONCURRENCY', '1' if IS_I
 OLX_TASK_CONCURRENCY = int(os.getenv('OLX_TASK_CONCURRENCY', '3' if IS_INSTANCE else '3'))
 OLX_HTTP_HTML_CONCURRENCY = int(os.getenv('OLX_HTTP_HTML_CONCURRENCY', '8' if IS_INSTANCE else '10'))
 OLX_HTTP_IMAGE_CONCURRENCY = int(os.getenv('OLX_HTTP_IMAGE_CONCURRENCY', '4' if IS_INSTANCE else '6'))
-OLX_UPSCALE_CONCURRENCY = int(os.getenv('OLX_UPSCALE_CONCURRENCY', '2' if IS_INSTANCE else '2'))
+OLX_UPSCALE_CONCURRENCY = int(os.getenv('OLX_UPSCALE_CONCURRENCY', '1' if IS_INSTANCE else '2'))
 OLX_SEND_CONCURRENCY = int(os.getenv('OLX_SEND_CONCURRENCY', '3' if IS_INSTANCE else '3'))
 OLX_HTTP_CONNECTOR_LIMIT = int(os.getenv('OLX_HTTP_CONNECTOR_LIMIT', '16' if IS_INSTANCE else '20'))
+# OLX has many more sources than SHAFA. Chunking spreads site requests and image
+# work across time instead of creating one short CPU/network burst.
+OLX_SOURCE_CHUNK_SIZE = int(os.getenv('OLX_SOURCE_CHUNK_SIZE', '40'))
+OLX_SOURCE_CHUNK_PAUSE_MIN_SEC = float(os.getenv('OLX_SOURCE_CHUNK_PAUSE_MIN_SEC', '20'))
+OLX_SOURCE_CHUNK_PAUSE_MAX_SEC = float(os.getenv('OLX_SOURCE_CHUNK_PAUSE_MAX_SEC', '45'))
 
 SHAFA_TASK_CONCURRENCY = int(os.getenv('SHAFA_TASK_CONCURRENCY', '3' if IS_INSTANCE else '3'))
 SHAFA_HTTP_CONCURRENCY = int(os.getenv('SHAFA_HTTP_CONCURRENCY', '8' if IS_INSTANCE else '10'))
 SHAFA_SEND_CONCURRENCY = int(os.getenv('SHAFA_SEND_CONCURRENCY', '3' if IS_INSTANCE else '3'))
-SHAFA_UPSCALE_CONCURRENCY = int(os.getenv('SHAFA_UPSCALE_CONCURRENCY', '2' if IS_INSTANCE else '2'))
+SHAFA_UPSCALE_CONCURRENCY = int(os.getenv('SHAFA_UPSCALE_CONCURRENCY', '1' if IS_INSTANCE else '2'))
 SHAFA_PLAYWRIGHT_CONCURRENCY = int(os.getenv('SHAFA_PLAYWRIGHT_CONCURRENCY', '2' if IS_INSTANCE else '2'))
 SHAFA_HTTP_CONNECTOR_LIMIT = int(os.getenv('SHAFA_HTTP_CONNECTOR_LIMIT', '16' if IS_INSTANCE else '20'))
 

@@ -7,7 +7,25 @@ from telegram.error import RetryAfter, TimedOut
 import asyncio, re, sqlite3, aiohttp, random, logging
 import aiosqlite
 from html import escape
-from config import TELEGRAM_OLX_BOT_TOKEN, DANYLO_DEFAULT_CHAT_ID, OLX_REQUEST_JITTER_SEC, RUN_USER_AGENT, RUN_ACCEPT_LANGUAGE, OLX_TASK_CONCURRENCY, OLX_HTTP_HTML_CONCURRENCY, OLX_HTTP_IMAGE_CONCURRENCY, OLX_UPSCALE_CONCURRENCY, OLX_SEND_CONCURRENCY, OLX_HTTP_CONNECTOR_LIMIT
+from config import (
+    TELEGRAM_OLX_BOT_TOKEN,
+    DANYLO_DEFAULT_CHAT_ID,
+    OLX_REQUEST_JITTER_SEC,
+    RUN_USER_AGENT,
+    RUN_ACCEPT_LANGUAGE,
+    OLX_TASK_CONCURRENCY,
+    OLX_HTTP_HTML_CONCURRENCY,
+    OLX_HTTP_IMAGE_CONCURRENCY,
+    OLX_UPSCALE_CONCURRENCY,
+    OLX_SEND_CONCURRENCY,
+    OLX_HTTP_CONNECTOR_LIMIT,
+    OLX_SOURCE_CHUNK_SIZE,
+    OLX_SOURCE_CHUNK_PAUSE_MIN_SEC,
+    OLX_SOURCE_CHUNK_PAUSE_MAX_SEC,
+    MARKET_IMAGE_UPSCALE_MIN_DIM,
+    MARKET_IMAGE_UPSCALE_MAX_DIM,
+    MARKET_IMAGE_UPSCALE_FACTORS,
+)
 from config_olx_urls import OLX_URLS
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
 from helpers.marketplace_core import (
@@ -82,6 +100,17 @@ OLX_RESULT_BOUNDARY_CLASSES = {
     "css-wsrviy",  # OLX separator class used before April 2026.
     "css-133tiyu",  # OLX separator class observed after recommendation layout update.
 }
+
+
+def _source_chunks(sources: List[Dict[str, Any]], chunk_size: int) -> List[List[Dict[str, Any]]]:
+    size = max(1, int(chunk_size or 1))
+    return [sources[index : index + size] for index in range(0, len(sources), size)]
+
+
+def _next_chunk_pause(min_sec: float, max_sec: float) -> float:
+    low = max(0.0, float(min_sec or 0.0))
+    high = max(low, float(max_sec or 0.0))
+    return random.uniform(low, high) if high > 0 else 0.0
 
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
@@ -438,6 +467,9 @@ send_photo_with_upscale = build_media_sender(
     send_photo_by_bytes=_send_photo_by_bytes,
     run_cpu_bound_fn=run_cpu_bound,
     logger=logger,
+    min_upscale_dim=MARKET_IMAGE_UPSCALE_MIN_DIM,
+    max_dim=MARKET_IMAGE_UPSCALE_MAX_DIM,
+    upscale_factors=MARKET_IMAGE_UPSCALE_FACTORS,
 )
 
 DB_FILE = OLX_ITEMS_DB_FILE
@@ -1201,9 +1233,33 @@ async def run_olx_scraper():
 
         sources = merge_sources(OLX_URLS or [], load_dynamic_urls("olx"))
         run_stats.set_field("sources_total", len(sources))
-        if tasks := [_guarded_process(entry) for entry in sources]:
-            logger.info("Processing %s OLX source(s)...", len(tasks))
-            await asyncio.gather(*tasks, return_exceptions=True)
+        source_chunks = _source_chunks(sources, OLX_SOURCE_CHUNK_SIZE)
+        run_stats.set_field("source_chunk_size", max(1, int(OLX_SOURCE_CHUNK_SIZE or 1)))
+        run_stats.set_field("source_chunks_total", len(source_chunks))
+        if source_chunks:
+            logger.info(
+                "Processing %s OLX source(s) in %s chunk(s) of up to %s...",
+                len(sources),
+                len(source_chunks),
+                max(1, int(OLX_SOURCE_CHUNK_SIZE or 1)),
+            )
+            for chunk_index, source_chunk in enumerate(source_chunks, start=1):
+                # Chunking deliberately spreads OLX load over time. The scraper still
+                # keeps per-source concurrency inside a chunk, but avoids one huge burst
+                # competing with SHAFA, Telegram image work, and site-side rate limits.
+                logger.info(
+                    "Processing OLX chunk %s/%s (%s source(s))",
+                    chunk_index,
+                    len(source_chunks),
+                    len(source_chunk),
+                )
+                await asyncio.gather(*[_guarded_process(entry) for entry in source_chunk], return_exceptions=True)
+                if chunk_index < len(source_chunks):
+                    pause_s = _next_chunk_pause(OLX_SOURCE_CHUNK_PAUSE_MIN_SEC, OLX_SOURCE_CHUNK_PAUSE_MAX_SEC)
+                    run_stats.inc("source_chunk_pauses")
+                    logger.info("OLX chunk %s/%s complete; sleeping %.1fs", chunk_index, len(source_chunks), pause_s)
+                    if pause_s > 0:
+                        await asyncio.sleep(pause_s)
         else:
             logger.warning("No OLX URLs configured")
 

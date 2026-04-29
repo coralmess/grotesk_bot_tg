@@ -342,6 +342,7 @@ async def send_remote_photo_with_fallback(
     logger,
     min_upscale_dim: int = 1280,
     max_dim: int = 5000,
+    upscale_factors: Iterable[float] = (3.0, 2.5, 2.0),
 ) -> bool:
     # OLX and SHAFA ended up with almost identical send flows: download remote image,
     # optionally upscale it for Telegram, then fall back to plain text on failure.
@@ -361,6 +362,7 @@ async def send_remote_photo_with_fallback(
         raw,
         max_dim=max_dim,
         min_upscale_dim=min_upscale_dim,
+        upscale_factors=upscale_factors,
         logger=logger,
     )
     photo_bytes = photo_bytes or raw

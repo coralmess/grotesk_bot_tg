@@ -4,7 +4,7 @@ import asyncio
 import io
 import random
 from functools import wraps
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Iterable, Optional
 
 import aiohttp
 from telegram.constants import ParseMode
@@ -122,6 +122,9 @@ def build_media_sender(
     send_photo_by_bytes: Callable[[object, str, bytes, str], Awaitable[bool]],
     run_cpu_bound_fn: Callable[..., Awaitable[Optional[bytes]]],
     logger,
+    min_upscale_dim: int = 1280,
+    max_dim: int = 5000,
+    upscale_factors: Iterable[float] = (3.0, 2.5, 2.0),
 ):
     async def send_photo_with_upscale(bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
         # The image pipeline stays centralized so marketplace send behavior stays identical
@@ -137,6 +140,9 @@ def build_media_sender(
             send_photo_by_bytes=send_photo_by_bytes,
             run_cpu_bound_fn=run_cpu_bound_fn,
             logger=logger,
+            min_upscale_dim=min_upscale_dim,
+            max_dim=max_dim,
+            upscale_factors=upscale_factors,
         )
 
     return send_photo_with_upscale
