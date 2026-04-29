@@ -91,7 +91,7 @@ OLX_URLS = [
         "url_name": "John Smedley"
     },
     {
-        "url": "https://www.olx.ua/uk/list/q-Agnona/?search%5Border%5D=created_at:desc",
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Agnona/?search%5Border%5D=created_at%3Adesc",
         "url_name": "Agnona"
     },
     {
