@@ -29,6 +29,16 @@ class ScraperParserFixtureTests(unittest.TestCase):
         self.assertEqual(item.price_int, 10220)
         self.assertEqual(item.first_image_url, "https://img.olx.ua/images/high.jpg")
 
+    def test_olx_fixture_stops_before_recommendation_boundary(self) -> None:
+        soup = _fixture_soup("olx_listing_recommendation_boundary.html")
+        cards = olx_scraper.collect_cards_with_stop(soup)
+
+        self.assertEqual(len(cards), 1)
+        item = olx_scraper.parse_card(cards[0])
+        self.assertIsNotNone(item)
+        self.assertEqual(item.name, "Real search item")
+        self.assertNotIn("Recommended unrelated item", cards[0].get_text(" ", strip=True))
+
     def test_shafa_fixture_uses_current_sale_price_and_same_anchor_image(self) -> None:
         soup = _fixture_soup("shafa_sale_card.html")
         cards = shafa_scraper.collect_cards(soup)

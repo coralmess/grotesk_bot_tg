@@ -68,6 +68,20 @@ NO_LISTINGS_PATTERNS = (
 )
 _PARSER = "lxml" if _LXML_AVAILABLE else "html.parser"
 NO_LISTINGS_TEXT = NO_LISTINGS_UA_TEXT
+OLX_RESULT_BOUNDARY_PHRASES = (
+    "Більше результатів",
+    "Ми знайшли результати для схожих запитів",
+    "Ми нічого не знайшли",
+    "Немає оголошень",
+    "Показано результати для",
+    "More results",
+    "No listings",
+    "Showing results for",
+)
+OLX_RESULT_BOUNDARY_CLASSES = {
+    "css-wsrviy",  # OLX separator class used before April 2026.
+    "css-133tiyu",  # OLX separator class observed after recommendation layout update.
+}
 
 def _get_http_session() -> aiohttp.ClientSession:
     global _http_session
@@ -231,12 +245,28 @@ def parse_card(card) -> Optional[OlxItem]:
         return None
 
 
+def _is_olx_results_boundary(el) -> bool:
+    classes = el.get("class") or []
+    classes = [classes] if isinstance(classes, str) else classes
+    if any(class_name in OLX_RESULT_BOUNDARY_CLASSES for class_name in classes):
+        return True
+
+    # OLX class names are generated and changed from css-wsrviy to css-133tiyu.
+    # The stable part is the small separator text rendered before recommendation
+    # cards, so use it as a fallback but only on compact elements to avoid
+    # matching the whole page container before the real listings are visited.
+    if el.name not in {"div", "p", "section"}:
+        return False
+    text = el.get_text(" ", strip=True)
+    if not text or len(text) > 300:
+        return False
+    return any(phrase in text for phrase in OLX_RESULT_BOUNDARY_PHRASES)
+
+
 def collect_cards_with_stop(soup: BeautifulSoup) -> List:
     cards = []
     for el in soup.find_all(True, recursive=True):
-        classes = el.get("class") or []
-        classes = [classes] if isinstance(classes, str) else classes
-        if "css-wsrviy" in classes:
+        if _is_olx_results_boundary(el):
             break
         if el.name == "div" and (el.get("data-cy") == "l-card" or el.get("data-testid") == "l-card"):
             cards.append(el)
