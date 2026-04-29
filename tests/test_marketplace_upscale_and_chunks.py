@@ -30,20 +30,29 @@ class MarketplaceImageUpscaleTests(unittest.TestCase):
         return out.getvalue()
 
     def test_large_images_are_not_upscaled(self):
-        data = self._image_bytes(1280, 1280)
+        data = self._image_bytes(1500, 1500)
 
-        result = upscale_image_bytes_for_telegram_sync(data, min_upscale_dim=1280, upscale_factors=(2.0,))
+        result = upscale_image_bytes_for_telegram_sync(data, min_upscale_dim=1500, upscale_factors=(2.0,))
 
         self.assertIsNone(result)
 
-    def test_small_images_are_upscaled_with_largest_safe_factor(self):
+    def test_small_images_are_upscaled_with_lanczos_x2_enhancement(self):
         data = self._image_bytes(100, 80)
 
-        result = upscale_image_bytes_for_telegram_sync(data, min_upscale_dim=1280, upscale_factors=(3.0, 2.0))
+        result = upscale_image_bytes_for_telegram_sync(data, min_upscale_dim=1500, upscale_factors=(2.0,))
 
         self.assertIsNotNone(result)
         with Image.open(io.BytesIO(result)) as im:
-            self.assertEqual(im.size, (300, 240))
+            self.assertEqual(im.size, (200, 160))
+
+    def test_medium_marketplace_images_under_1500_short_side_are_upscaled(self):
+        data = self._image_bytes(770, 577)
+
+        result = upscale_image_bytes_for_telegram_sync(data, min_upscale_dim=1500, upscale_factors=(2.0,))
+
+        self.assertIsNotNone(result)
+        with Image.open(io.BytesIO(result)) as im:
+            self.assertEqual(im.size, (1540, 1154))
 
 
 if __name__ == "__main__":

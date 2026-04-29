@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Iterable, Optional
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 _EDSR_LOCK = threading.Lock()
 _EDSR_SUPERRES = None
@@ -277,12 +277,20 @@ def encode_jpeg_for_telegram(image: Image.Image) -> Optional[bytes]:
     return None
 
 
+def enhance_marketplace_upscale(image: Image.Image) -> Image.Image:
+    # Instance tests on real OLX/SHAFA photos showed Lanczos x2 followed by a mild
+    # unsharp mask gave the best visual result among CPU-safe options. Keep this
+    # conservative so compression artifacts are not amplified too aggressively.
+    sharpened = image.filter(ImageFilter.UnsharpMask(radius=1.2, percent=80, threshold=3))
+    return ImageEnhance.Contrast(sharpened).enhance(1.04)
+
+
 def upscale_image_bytes_for_telegram_sync(
     img_bytes: bytes,
     *,
     max_dim: int = 5000,
-    min_upscale_dim: int = 1280,
-    upscale_factors: Iterable[float] = (3.0, 2.5, 2.0),
+    min_upscale_dim: int = 1500,
+    upscale_factors: Iterable[float] = (2.0,),
     logger=None,
 ) -> Optional[bytes]:
     try:
@@ -305,6 +313,7 @@ def upscale_image_bytes_for_telegram_sync(
                 continue
 
             im_up = im.resize((new_w, new_h), resample=Image.Resampling.LANCZOS)
+            im_up = enhance_marketplace_upscale(im_up)
             data = encode_jpeg_for_telegram(im_up)
             if data is not None:
                 return data
@@ -340,9 +349,9 @@ async def send_remote_photo_with_fallback(
     send_photo_by_bytes: Callable[[object, str, bytes, str], Awaitable[bool]],
     run_cpu_bound_fn: Callable[..., Awaitable[Optional[bytes]]],
     logger,
-    min_upscale_dim: int = 1280,
+    min_upscale_dim: int = 1500,
     max_dim: int = 5000,
-    upscale_factors: Iterable[float] = (3.0, 2.5, 2.0),
+    upscale_factors: Iterable[float] = (2.0,),
 ) -> bool:
     # OLX and SHAFA ended up with almost identical send flows: download remote image,
     # optionally upscale it for Telegram, then fall back to plain text on failure.

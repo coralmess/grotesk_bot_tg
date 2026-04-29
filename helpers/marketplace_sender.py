@@ -122,9 +122,9 @@ def build_media_sender(
     send_photo_by_bytes: Callable[[object, str, bytes, str], Awaitable[bool]],
     run_cpu_bound_fn: Callable[..., Awaitable[Optional[bytes]]],
     logger,
-    min_upscale_dim: int = 1280,
+    min_upscale_dim: int = 1500,
     max_dim: int = 5000,
-    upscale_factors: Iterable[float] = (3.0, 2.5, 2.0),
+    upscale_factors: Iterable[float] = (2.0,),
 ):
     async def send_photo_with_upscale(bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
         # The image pipeline stays centralized so marketplace send behavior stays identical

@@ -45,11 +45,11 @@ OLX_RETENTION_DAYS = int(os.getenv('OLX_RETENTION_DAYS', '0'))
 SHAFA_RETENTION_DAYS = int(os.getenv('SHAFA_RETENTION_DAYS', '0'))
 UPSCALE_IMAGES = os.getenv('UPSCALE_IMAGES', 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 UPSCALE_METHOD = os.getenv('UPSCALE_METHOD', 'lanczos').strip().lower()
-MARKET_IMAGE_UPSCALE_MIN_DIM = int(os.getenv('MARKET_IMAGE_UPSCALE_MIN_DIM', '1280'))
+MARKET_IMAGE_UPSCALE_MIN_DIM = int(os.getenv('MARKET_IMAGE_UPSCALE_MIN_DIM', '1500'))
 MARKET_IMAGE_UPSCALE_MAX_DIM = int(os.getenv('MARKET_IMAGE_UPSCALE_MAX_DIM', '5000'))
 # Try larger Lanczos outputs first, but keep this configurable because Telegram's
 # accepted geometry and source image sizes vary by marketplace.
-MARKET_IMAGE_UPSCALE_FACTORS = _float_tuple_env('MARKET_IMAGE_UPSCALE_FACTORS', (3.0, 2.5, 2.0))
+MARKET_IMAGE_UPSCALE_FACTORS = _float_tuple_env('MARKET_IMAGE_UPSCALE_FACTORS', (2.0,))
 BLOCK_RESOURCES = os.getenv('BLOCK_RESOURCES', 'true' if IS_INSTANCE else 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 # Lyst now prefers the HTTP parser first. It is cheaper, returns images via LD-JSON,
 # and only falls back to Playwright when HTTP truly fails.
