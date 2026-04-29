@@ -76,7 +76,7 @@ class LystRuntimeTests(unittest.TestCase):
         self.assertIn("Cloudflare challenge", message)
         self.assertIn("Main brands", message)
 
-    def test_build_lyst_run_outcome_prefers_cloudflare_failure_event(self):
+    def test_build_lyst_run_outcome_treats_cloudflare_with_items_as_partial_success(self):
         from GroteskBotTg import _build_lyst_run_outcome
 
         outcome = _build_lyst_run_outcome(
@@ -85,9 +85,10 @@ class LystRuntimeTests(unittest.TestCase):
             new_items=0,
             cloudflare_event={"source_name": "Main brands", "country": "US", "page": 3},
             fallback_note="failed",
+            resume_outcomes={},
         )
 
-        self.assertEqual(outcome.phase, "failed_cloudflare")
+        self.assertEqual(outcome.phase, "succeeded_partial")
         self.assertIn("Main brands", outcome.note)
 
     def test_build_lyst_run_outcome_marks_cloudflare_with_items_as_partial_success(self):
@@ -99,6 +100,7 @@ class LystRuntimeTests(unittest.TestCase):
             new_items=2,
             cloudflare_event={"source_name": "Main brands", "country": "US", "page": 3},
             fallback_note="",
+            resume_outcomes={},
         )
 
         self.assertTrue(outcome.ok)
@@ -115,10 +117,27 @@ class LystRuntimeTests(unittest.TestCase):
             new_items=0,
             cloudflare_event={"source_name": "Main brands", "country": "US", "page": 3},
             fallback_note="",
+            resume_outcomes={},
         )
 
         self.assertFalse(outcome.ok)
         self.assertEqual(outcome.phase, "failed_cloudflare")
+
+    def test_build_lyst_run_outcome_marks_failed_run_with_scraped_items_as_partial(self):
+        from GroteskBotTg import _build_lyst_run_outcome
+
+        outcome = _build_lyst_run_outcome(
+            run_failed=True,
+            items_seen=112,
+            new_items=0,
+            cloudflare_event={"source_name": "Main brands [3]", "country": "GB", "page": 3},
+            fallback_note="failed",
+            resume_outcomes={"Main brands [3]::GB": "cloudflare", "Grotesk Shoes::US": "scraped"},
+        )
+
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.phase, "succeeded_partial")
+        self.assertEqual(outcome.service_state_fields()["lyst_blocked_reason"], "cloudflare")
 
     def test_pending_resume_outcome_detects_local_cloudflare(self):
         from GroteskBotTg import _has_pending_lyst_resume_outcome

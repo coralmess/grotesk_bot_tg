@@ -152,6 +152,7 @@ class LystCycleRunner:
                 new_items=processing_stats.new_total,
                 cloudflare_event=hooks.get_cloudflare_event(),
                 fallback_note=fallback_note,
+                resume_outcomes=hooks.get_resume_outcomes(),
             )
             # JSONL run summaries are the durable audit trail for diagnosing
             # Cloudflare, resume, and terminal-page behavior after the fact.

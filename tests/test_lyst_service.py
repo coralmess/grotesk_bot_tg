@@ -97,7 +97,7 @@ class LystRuntimeStateTests(unittest.TestCase):
 
 
 class LystCycleRunnerTests(unittest.IsolatedAsyncioTestCase):
-    def _hooks(self, *, run_failed=False, terminal_restart=False):
+    def _hooks(self, *, run_failed=False, terminal_restart=False, resume_outcomes=None):
         events = []
         run_stats = FakeRunStats()
         logger = FakeLogger()
@@ -131,7 +131,11 @@ class LystCycleRunnerTests(unittest.IsolatedAsyncioTestCase):
             process_all_shoes=process_all_shoes,
             finalize_resume_state=lambda: _async_event(events, ("finalize_resume", None)),
             get_run_failed=lambda: run_failed,
-            get_resume_outcomes=lambda: {"Main:US": "cloudflare"} if run_failed else {},
+            get_resume_outcomes=lambda: (
+                resume_outcomes
+                if resume_outcomes is not None
+                else ({"Main:US": "cloudflare"} if run_failed else {})
+            ),
             get_cloudflare_event=lambda: None,
             build_outcome=lambda **kwargs: LystRunOutcome.full_success(
                 items_seen=kwargs["items_seen"],
@@ -172,6 +176,30 @@ class LystCycleRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(url_batch_calls["count"], 2)
         self.assertIn(("restart", None), events)
         self.assertIn(("process", 1), events)
+
+    async def test_runner_passes_resume_outcomes_to_outcome_builder(self) -> None:
+        captured = {}
+
+        def build_outcome(**kwargs):
+            captured.update(kwargs)
+            return LystRunOutcome.partial_success(
+                note="Partial coverage: cloudflare",
+                items_seen=kwargs["items_seen"],
+                new_items=kwargs["new_items"],
+            )
+
+        hooks, _events, _run_stats, _logger, _url_batch_calls = self._hooks(
+            run_failed=True,
+            resume_outcomes={"Main:US": "cloudflare", "Shoes:GB": "scraped"},
+        )
+        hooks.build_outcome = build_outcome
+
+        await LystCycleRunner(hooks).run(object())
+
+        self.assertEqual(
+            captured["resume_outcomes"],
+            {"Main:US": "cloudflare", "Shoes:GB": "scraped"},
+        )
 
 
 async def _async_value(value):

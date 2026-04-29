@@ -27,6 +27,7 @@ class LystRunOutcome:
     source_name: str = ""
     country: str = ""
     page: int | None = None
+    blocked_reason: str = ""
 
     @property
     def ok(self) -> bool:
@@ -55,6 +56,32 @@ class LystRunOutcome:
         return cls(LystRunState.SUCCESS_PARTIAL, note=note, items_seen=items_seen, new_items=new_items)
 
     @classmethod
+    def blocked_partial_success(
+        cls,
+        *,
+        reason: str,
+        items_seen: int,
+        new_items: int,
+        source_name: str = "",
+        country: str = "",
+        page: int | None = None,
+    ) -> "LystRunOutcome":
+        if reason == "cloudflare":
+            note = _cloudflare_note(source_name=source_name, country=country, page=page)
+        else:
+            note = f"Partial coverage: {reason or 'blocked'}"
+        return cls(
+            LystRunState.SUCCESS_PARTIAL,
+            note=note,
+            items_seen=items_seen,
+            new_items=new_items,
+            source_name=source_name,
+            country=country,
+            page=page,
+            blocked_reason=reason,
+        )
+
+    @classmethod
     def cloudflare_partial(
         cls,
         *,
@@ -73,6 +100,7 @@ class LystRunOutcome:
             source_name=source_name,
             country=country,
             page=page,
+            blocked_reason="cloudflare",
         )
 
     @classmethod
@@ -94,6 +122,7 @@ class LystRunOutcome:
             source_name=source_name,
             country=country,
             page=page,
+            blocked_reason="cloudflare",
         )
 
     @classmethod
@@ -111,7 +140,17 @@ class LystRunOutcome:
             "lyst_failure_source": self.source_name,
             "lyst_failure_country": self.country,
             "lyst_failure_page": self.page,
+            "lyst_blocked_reason": self.blocked_reason,
         }
+
+
+def _blocked_reason_from_resume_outcomes(resume_outcomes: dict[str, str]) -> str:
+    blocked_order = ("cloudflare", "failed", "aborted", "cloudflare_cooldown")
+    values = set(resume_outcomes.values())
+    for outcome in blocked_order:
+        if outcome in values:
+            return "cloudflare" if outcome == "cloudflare_cooldown" else outcome
+    return ""
 
 
 def build_lyst_run_outcome(
@@ -121,22 +160,38 @@ def build_lyst_run_outcome(
     new_items: int,
     cloudflare_event: dict | None,
     fallback_note: str,
+    resume_outcomes: dict[str, str] | None = None,
 ) -> LystRunOutcome:
     """Convert low-level cycle flags into the single status model used by logs and Telegram.
 
-    Lyst can fail after already scraping useful items. Keeping this decision in one
-    helper avoids future edits accidentally marking a partial Cloudflare run as a
-    clean success or a hard failure with no item counts.
+    Lyst can hit Cloudflare or page fetch failures after already scraping useful
+    items. Keeping this decision in one helper avoids future edits accidentally
+    marking partial coverage as either a clean full success or a hard failure.
     """
-    if cloudflare_event:
-        if not run_failed and items_seen > 0:
-            return LystRunOutcome.cloudflare_partial_success(
+    resume_outcomes = resume_outcomes or {}
+    blocked_reason = "cloudflare" if cloudflare_event else _blocked_reason_from_resume_outcomes(resume_outcomes)
+    # A later blocked source should not erase useful pages already collected; this
+    # keeps status honest without pretending the whole LYST catalog completed.
+    has_usable_coverage = items_seen > 0
+    stalled = (fallback_note or "").strip() == "stalled"
+
+    if blocked_reason and has_usable_coverage and not stalled:
+        if cloudflare_event:
+            return LystRunOutcome.blocked_partial_success(
+                reason="cloudflare",
                 source_name=str(cloudflare_event.get("source_name") or ""),
                 country=str(cloudflare_event.get("country") or ""),
                 page=cloudflare_event.get("page"),
                 items_seen=items_seen,
                 new_items=new_items,
             )
+        return LystRunOutcome.blocked_partial_success(
+            reason=blocked_reason,
+            items_seen=items_seen,
+            new_items=new_items,
+        )
+
+    if cloudflare_event:
         return LystRunOutcome.cloudflare_partial(
             source_name=str(cloudflare_event.get("source_name") or ""),
             country=str(cloudflare_event.get("country") or ""),

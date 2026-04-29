@@ -1478,6 +1478,7 @@ def _build_lyst_run_outcome(
     new_items: int,
     cloudflare_event: dict | None,
     fallback_note: str,
+    resume_outcomes: dict[str, str] | None = None,
 ) -> LystRunOutcome:
     return build_lyst_run_outcome(
         run_failed=run_failed,
@@ -1485,6 +1486,7 @@ def _build_lyst_run_outcome(
         new_items=new_items,
         cloudflare_event=cloudflare_event,
         fallback_note=fallback_note,
+        resume_outcomes=resume_outcomes,
     )
 
 
