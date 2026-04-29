@@ -5,7 +5,9 @@ LYST_COUNTRIES = ["IT", "PL", "US", "GB"]
 LYST_PAGE_SCRAPE = True
 LYST_URL_TIMEOUT_SEC = 1800
 LYST_STALL_TIMEOUT_SEC = 1800
-LYST_PAGE_TIMEOUT_SEC = 120
+# LYST is Cloudflare-sensitive on the instance, so prefer extra patience on a
+# single page over more concurrent browser/page work.
+LYST_PAGE_TIMEOUT_SEC = int(os.getenv('LYST_PAGE_TIMEOUT_SEC', '180'))
 LYST_MAX_SCROLL_ATTEMPTS = int(os.getenv('LYST_MAX_SCROLL_ATTEMPTS', '0'))
 
 BASE_URLS = [
