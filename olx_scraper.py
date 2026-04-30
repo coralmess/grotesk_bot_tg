@@ -77,6 +77,7 @@ NOTIFICATION_CLAIM_STALE_MINUTES = 120
 # Precompiled patterns reduce overhead in tight parsing loops.
 PRICE_FRAGMENT_RE = re.compile(r"(\d[\d\s.,]*)")
 SRCSET_PART_RE = re.compile(r"^\s*(\S+)(?:\s+([\d.]+[wx]))?\s*$", re.IGNORECASE)
+OLX_IMAGE_SIZE_RE = re.compile(r"[?;&]s=(\d+)x(\d+)", re.IGNORECASE)
 NO_LISTINGS_UA_TEXT = "\u041c\u0438 \u0437\u043d\u0430\u0439\u0448\u043b\u0438 0 \u043e\u0433\u043e\u043b\u043e\u0448\u0435\u043d\u044c"
 NO_LISTINGS_PATTERNS = (
     NO_LISTINGS_UA_TEXT.lower(),
@@ -222,29 +223,79 @@ def _is_valid_image_url(url: Optional[str]) -> bool:
     return not any(p in url.lower() for p in ["no_thumbnail", "placeholder", "no-image", "noimage", ".svg"]) and not url.startswith("data:")
 
 
+def _image_url_score(url: str, descriptor: str = "", order: int = 0) -> Tuple[float, float, int]:
+    # OLX often puts the highest quality image in `src` while `srcset` contains a
+    # slightly smaller crop. Score the explicit `;s=WIDTHxHEIGHT` transform first
+    # so the scraper picks the largest real image, not just the largest srcset label.
+    if match := OLX_IMAGE_SIZE_RE.search(url or ""):
+        width, height = int(match.group(1)), int(match.group(2))
+        return float(width * height), float(max(width, height)), order
+
+    descriptor = (descriptor or "").lower()
+    try:
+        if descriptor.endswith("w"):
+            width = float(descriptor[:-1])
+            return width * width, width, order
+        if descriptor.endswith("x"):
+            density = float(descriptor[:-1])
+            return density * 1_000_000.0, density, order
+    except ValueError:
+        pass
+    return 1.0, 1.0, order
+
+
+def _iter_srcset_candidates(srcset: str, start_order: int = 0) -> List[Tuple[str, str, int]]:
+    candidates: List[Tuple[str, str, int]] = []
+    for offset, part in enumerate((srcset or "").split(",")):
+        part = part.strip()
+        if not part:
+            continue
+        m = SRCSET_PART_RE.match(part)
+        if m:
+            url = m.group(1)
+            descriptor = m.group(2) or ""
+        else:
+            tokens = part.split()
+            if not tokens:
+                continue
+            url = tokens[0]
+            descriptor = tokens[1] if len(tokens) > 1 else ""
+        candidates.append((url, descriptor, start_order + offset))
+    return candidates
+
+
+def _select_best_image_url(candidates: List[Tuple[str, str, int]]) -> Optional[str]:
+    best: Optional[Tuple[Tuple[float, float, int], str]] = None
+    for url, descriptor, order in candidates:
+        if not _is_valid_image_url(url):
+            continue
+        score = _image_url_score(url, descriptor, order)
+        if best is None or score >= best[0]:
+            best = (score, url)
+    return best[1] if best else None
+
+
+def _extract_best_image_from_img_tag(img) -> Optional[str]:
+    candidates: List[Tuple[str, str, int]] = []
+    order = 0
+    for attr in ("src", "data-src", "data-lazy-src"):
+        if url := img.get(attr):
+            candidates.append((url, "", order))
+            order += 1
+    candidates.extend(_iter_srcset_candidates(img.get("srcset") or "", order))
+    return _select_best_image_url(candidates)
+
+
 def _extract_first_image_from_card(card) -> Optional[str]:
-    """Extract first image URL from card element - prioritizes highest quality from srcset."""
+    """Extract first image URL from card element, preferring the largest OLX image transform."""
     if not (img := card.find("img")):
         logger.debug("No img tag found in card")
         return None
-    
-    for attr in ["data-src", "data-lazy-src"]:
-        if (url := img.get(attr)) and _is_valid_image_url(url):
-            logger.debug(f"Extracted image from {attr}: {url[:80]}...")
-            return url
-    
-    if (srcset := img.get("srcset")) and (best := _parse_highest_from_srcset(srcset)):
-        if _is_valid_image_url(best):
-            logger.debug(f"Extracted image from srcset: {best[:80]}...")
-            return best
-        logger.debug(f"Invalid image URL from srcset: {best[:100]}")
-    
-    if (src := img.get("src")):
-        if _is_valid_image_url(src):
-            logger.debug(f"Extracted image from src: {src[:80]}...")
-            return src
-        logger.debug(f"Invalid image URL from src: {src[:100]}")
-    
+
+    if best := _extract_best_image_from_img_tag(img):
+        logger.debug(f"Extracted best OLX image: {best[:80]}...")
+        return best
+
     logger.debug("No valid image URL found in card, will fetch from detail page")
     return None
 
@@ -372,40 +423,7 @@ def build_message(item: OlxItem, prev: Optional[Dict[str, Any]], source_name: st
 def _parse_highest_from_srcset(srcset: str) -> Optional[str]:
     if not srcset:
         return None
-    best_url = None
-    best_score = -1.0
-    # Supports both width descriptors (320w) and density descriptors (2x).
-    for part in srcset.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        m = SRCSET_PART_RE.match(part)
-        if m:
-            url = m.group(1)
-            descriptor = (m.group(2) or "").lower()
-        else:
-            tokens = part.split()
-            if not tokens:
-                continue
-            url = tokens[0]
-            descriptor = (tokens[1].lower() if len(tokens) > 1 else "")
-
-        score = 1.0
-        if descriptor.endswith("w"):
-            try:
-                score = float(descriptor[:-1])
-            except Exception:
-                score = 1.0
-        elif descriptor.endswith("x"):
-            try:
-                score = float(descriptor[:-1]) * 1000.0
-            except Exception:
-                score = 1.0
-
-        if score >= best_score:
-            best_score = score
-            best_url = url
-    return best_url
+    return _select_best_image_url(_iter_srcset_candidates(srcset))
 
 
 async def fetch_item_images(item_url: str, max_images: int = 3) -> List[str]:
@@ -419,7 +437,7 @@ async def fetch_item_images(item_url: str, max_images: int = 3) -> List[str]:
         imgs = []
         for slide in wrapper.find_all(["div", "img"], recursive=True):
             img = slide if slide.name == "img" else slide.find("img")
-            if img and (best := (_parse_highest_from_srcset(img.get("srcset")) if img.get("srcset") else img.get("src"))) and best not in imgs:
+            if img and (best := _extract_best_image_from_img_tag(img)) and best not in imgs:
                 imgs.append(best)
                 if len(imgs) >= max_images:
                     break
@@ -445,7 +463,7 @@ async def fetch_first_image_best(item_url: str) -> Optional[str]:
                 break
         if not img_tag:
             return None
-        return _parse_highest_from_srcset(img_tag.get("srcset")) if img_tag.get("srcset") else img_tag.get("src")
+        return _extract_best_image_from_img_tag(img_tag)
     except Exception as e:
         logger.debug(f"Failed to fetch first image from {item_url}: {e}")
         return None

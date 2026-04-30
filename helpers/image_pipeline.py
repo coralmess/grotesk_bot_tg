@@ -266,14 +266,14 @@ def fits_telegram_photo(width: int, height: int) -> bool:
 
 def encode_jpeg_for_telegram(image: Image.Image) -> Optional[bytes]:
     max_bytes = 10 * 1024 * 1024
-    # Step quality down gradually so we keep as much detail as possible while still
-    # satisfying Telegram's photo upload size limit.
-    for quality in (98, 95, 92, 88, 84, 80):
-        out = io.BytesIO()
-        image.save(out, format="JPEG", quality=quality, subsampling=0, optimize=False)
-        data = out.getvalue()
-        if len(data) <= max_bytes:
-            return data
+    # OLX/SHAFA photos are already lossy marketplace images, and Telegram applies
+    # another photo recompression step. Keep JPEG quality fixed at 98 and let the
+    # caller reduce dimensions if needed instead of silently lowering quality.
+    out = io.BytesIO()
+    image.save(out, format="JPEG", quality=98, subsampling=0, optimize=False)
+    data = out.getvalue()
+    if len(data) <= max_bytes:
+        return data
     return None
 
 
