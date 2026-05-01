@@ -30,7 +30,8 @@ from helpers.image_pipeline import upscale_image_bytes_for_telegram_sync
 from helpers.auto_ria.vin import build_vin_decoder_url
 from helpers.marketplace_sender import async_retry
 from helpers.process_pool import run_cpu_bound
-from helpers.runtime_paths import AUTO_RIA_ITEMS_DB_FILE
+from helpers.runtime_paths import AUTO_RIA_ITEMS_DB_FILE, SCRAPER_RUNS_JSONL_FILE
+from helpers.scraper_stats import RunStatsCollector, utc_now_iso
 from helpers.service_health import build_service_health
 
 
@@ -117,25 +118,71 @@ class AutoRiaBotRuntime:
     async def run_once(self) -> int:
         sent_count = 0
         run_seen_ids: set[str] = set()
+        run_stats = RunStatsCollector("auto_ria")
+        run_stats.set_deploy_metadata(sources_total=len(self._sources))
 
         await self._refresh_sold_statuses()
 
         for source in self._sources:
+            run_stats.inc("sources_attempted")
             html_text = await self._fetch_text(source.url)
             if not html_text:
+                run_stats.inc("sources_failed")
+                run_stats.record_source(source.url_name, status="fetch_failed", url=source.url)
+                run_stats.record_error("fetch_failed", source=source.url_name)
                 continue
 
             listings = parse_auto_ria_search_html(html_text)
+            run_stats.inc("items_seen", len(listings))
             known_ids = self._storage.fetch_seen_ids([listing.id for listing in listings])
+            if not listings:
+                run_stats.inc("sources_empty")
+                run_stats.record_source(source.url_name, status="empty", url=source.url, items_seen=0)
+            else:
+                run_stats.inc("sources_with_items")
 
+            source_sent_count = 0
             for listing in listings:
                 if listing.id in run_seen_ids or listing.id in known_ids:
+                    run_stats.inc("items_skipped_known")
                     continue
                 sent = await self._process_listing(listing)
                 run_seen_ids.add(listing.id)
                 if sent:
                     sent_count += 1
+                    source_sent_count += 1
+                    run_stats.inc("items_sent")
+                else:
+                    run_stats.inc("send_failed")
+            if listings:
+                run_stats.record_source(
+                    source.url_name,
+                    status="ok",
+                    url=source.url,
+                    items_seen=len(listings),
+                    sent_items=source_sent_count,
+                )
 
+        run_stats.set_coverage(
+            expected=len(self._sources),
+            attempted=run_stats.counters.get("sources_attempted", 0),
+            completed=run_stats.counters.get("sources_with_items", 0) + run_stats.counters.get("sources_empty", 0),
+            blocked=run_stats.counters.get("sources_failed", 0),
+        )
+        run_stats.set_notification_funnel(
+            seen=run_stats.counters.get("items_seen", 0),
+            candidates=run_stats.counters.get("items_sent", 0) + run_stats.counters.get("send_failed", 0),
+            new=run_stats.counters.get("items_sent", 0),
+            sent=run_stats.counters.get("items_sent", 0),
+            failed=run_stats.counters.get("send_failed", 0),
+            skipped=run_stats.counters.get("items_skipped_known", 0),
+        )
+        run_stats.set_data_freshness(latest_source_check_utc=utc_now_iso())
+        run_stats.set_resource_snapshot()
+        run_stats.write_jsonl(
+            SCRAPER_RUNS_JSONL_FILE,
+            run_stats.finish(outcome="error" if run_stats.counters.get("sources_failed", 0) else "success"),
+        )
         return sent_count
 
     async def _process_listing(self, listing: AutoRiaListing) -> bool:

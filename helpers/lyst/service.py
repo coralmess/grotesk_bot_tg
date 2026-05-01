@@ -158,14 +158,56 @@ class LystCycleRunner:
             # Cloudflare, resume, and terminal-page behavior after the fact.
             run_stats.set_field("items_seen", len(all_shoes))
             run_stats.set_field("new_items", processing_stats.new_total)
+            run_stats.set_field("notifications_queued", processing_stats.new_total)
             run_stats.set_field("removed_items", processing_stats.removed_total)
+            run_stats.set_field("cleanup_skipped", getattr(processing_stats, "cleanup_skipped", False))
+            run_stats.set_field("cleanup_skip_reason", getattr(processing_stats, "cleanup_skip_reason", ""))
+            run_stats.set_field("active_before_cleanup", getattr(processing_stats, "active_before_cleanup", 0))
+            run_stats.set_field("current_seen_keys", getattr(processing_stats, "current_seen_keys", len(all_shoes)))
             run_stats.set_field(
                 "resume_outcomes",
                 dict(Counter(hooks.get_resume_outcomes().values())),
             )
+            if hasattr(run_stats, "set_notification_funnel"):
+                run_stats.set_notification_funnel(
+                    seen=len(all_shoes),
+                    candidates=processing_stats.new_total,
+                    new=processing_stats.new_total,
+                    sent=0,
+                    failed=0,
+                    skipped=max(0, len(all_shoes) - processing_stats.new_total),
+                )
+            if hasattr(run_stats, "set_coverage"):
+                resume_counter = Counter(hooks.get_resume_outcomes().values())
+                expected_pairs = int(getattr(run_stats, "fields", {}).get("source_country_pairs_expected") or 0)
+                blocked = sum(
+                    resume_counter.get(value, 0)
+                    for value in ("cloudflare", "cloudflare_cooldown", "failed", "aborted")
+                )
+                completed = sum(
+                    resume_counter.get(value, 0)
+                    for value in ("scraped", "terminal", "empty", "terminal_only_resume")
+                )
+                attempted = max(completed + blocked, sum(resume_counter.values()))
+                run_stats.set_coverage(
+                    expected=expected_pairs,
+                    attempted=attempted,
+                    completed=completed,
+                    blocked=blocked,
+                    skipped=max(0, expected_pairs - attempted),
+                )
             cloudflare_event = hooks.get_cloudflare_event()
             if cloudflare_event:
                 run_stats.set_field("cloudflare_event", dict(cloudflare_event))
+                if hasattr(run_stats, "record_error"):
+                    run_stats.record_error(
+                        "cloudflare",
+                        source=str(cloudflare_event.get("source_name") or ""),
+                        country=cloudflare_event.get("country"),
+                        page=cloudflare_event.get("page"),
+                    )
+            if hasattr(run_stats, "set_resource_snapshot"):
+                run_stats.set_resource_snapshot()
             run_stats.write_jsonl(
                 hooks.scraper_runs_file,
                 run_stats.finish(outcome=outcome.state.value),
@@ -182,6 +224,10 @@ class LystCycleRunner:
         except asyncio.CancelledError:
             hooks.finalize_cycle(issue="stalled")
             run_stats.set_field("error", "stalled")
+            if hasattr(run_stats, "record_error"):
+                run_stats.record_error("stalled", message="cycle cancelled")
+            if hasattr(run_stats, "set_resource_snapshot"):
+                run_stats.set_resource_snapshot()
             run_stats.write_jsonl(
                 hooks.scraper_runs_file,
                 run_stats.finish(outcome="failed_stalled"),
@@ -195,6 +241,10 @@ class LystCycleRunner:
         except Exception as exc:
             hooks.finalize_cycle(issue="failed", error=exc)
             run_stats.set_field("error", str(exc)[:200])
+            if hasattr(run_stats, "record_error"):
+                run_stats.record_error(type(exc).__name__, message=str(exc))
+            if hasattr(run_stats, "set_resource_snapshot"):
+                run_stats.set_resource_snapshot()
             run_stats.write_jsonl(
                 hooks.scraper_runs_file,
                 run_stats.finish(outcome="failed"),

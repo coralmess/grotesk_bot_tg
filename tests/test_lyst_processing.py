@@ -102,3 +102,86 @@ class LystProcessAllShoesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("New_1", old_data)
         self.assertFalse(old_data["Old_9"]["active"])
+
+    async def test_process_all_shoes_skips_cleanup_when_seen_coverage_is_too_small(self):
+        saved_batches = []
+
+        class Queue:
+            async def add_message(self, *args):
+                pass
+
+        class Logger:
+            def __init__(self):
+                self.warnings = []
+
+            def info(self, *args, **kwargs):
+                pass
+
+            def warning(self, *args, **kwargs):
+                self.warnings.append(args)
+
+            def error(self, *args, **kwargs):
+                raise AssertionError(args)
+
+        logger = Logger()
+
+        async def is_shoe_processed(key):
+            return False
+
+        async def mark_shoe_processed(key):
+            return None
+
+        async def save_shoe_data_bulk(batch):
+            saved_batches.append(batch)
+
+        old_data = {
+            f"Old_{index}": {
+                "name": "Old",
+                "unique_id": str(index),
+                "country": "US",
+                "active": True,
+                "sale_price": "$100",
+                "lowest_price": "$100",
+                "lowest_price_uah": 4000,
+                "uah_price": 4000,
+            }
+            for index in range(100)
+        }
+        all_shoes = [
+            {
+                "name": "New",
+                "unique_id": "1",
+                "country": "US",
+                "original_price": "$100",
+                "sale_price": "$50",
+                "image_url": "https://example.com/new.jpg",
+                "shoe_link": "https://example.com/new",
+                "base_url": {"telegram_chat_id": "chat", "min_sale": 10},
+            }
+        ]
+
+        stats = await processing.process_all_shoes(
+            all_shoes,
+            old_data,
+            Queue(),
+            {},
+            shoe_concurrency=1,
+            resolve_redirects=False,
+            run_failed=False,
+            logger=logger,
+            touch_progress=lambda *args, **kwargs: None,
+            calculate_sale_percentage=lambda original, sale, country: 50,
+            convert_to_uah=lambda *args: type("Rate", (), {"exchange_rate": 40, "uah_amount": 2000, "currency_symbol": "$"})(),
+            build_shoe_message=lambda *args: "message",
+            is_shoe_processed=is_shoe_processed,
+            mark_shoe_processed=mark_shoe_processed,
+            save_shoe_data_bulk=save_shoe_data_bulk,
+            get_final_clear_link=lambda *args: "unused",
+            inactive_cleanup_min_seen=50,
+            inactive_cleanup_min_active_ratio=0.5,
+        )
+
+        self.assertTrue(stats.cleanup_skipped)
+        self.assertIn("items_seen_below_min", stats.cleanup_skip_reason)
+        self.assertEqual(stats.removed_total, 0)
+        self.assertTrue(all(shoe["active"] for key, shoe in old_data.items() if key.startswith("Old_")))

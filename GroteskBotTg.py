@@ -54,6 +54,8 @@ from config_lyst import (
     LYST_STALL_TIMEOUT_SEC as LYST_STALL_TIMEOUT_DEFAULT,
     LYST_PAGE_TIMEOUT_SEC,
     LYST_MAX_SCROLL_ATTEMPTS,
+    LYST_INACTIVE_CLEANUP_MIN_ITEMS_SEEN,
+    LYST_INACTIVE_CLEANUP_MIN_ACTIVE_RATIO,
 )
 from helpers.lyst_debug import (
     attach_lyst_debug_listeners,
@@ -1358,6 +1360,8 @@ async def process_all_shoes(all_shoes, old_data, message_queue, exchange_rates):
         mark_shoe_processed=mark_shoe_processed,
         save_shoe_data_bulk=save_shoe_data_bulk,
         get_final_clear_link=get_final_clear_link,
+        inactive_cleanup_min_seen=LYST_INACTIVE_CLEANUP_MIN_ITEMS_SEEN,
+        inactive_cleanup_min_active_ratio=LYST_INACTIVE_CLEANUP_MIN_ACTIVE_RATIO,
     )
 
 def _scrape_target_url(base_url, page, use_pagination):
@@ -1537,7 +1541,17 @@ def _sync_lyst_cycle_state_globals():
 
 
 def _create_lyst_run_stats():
-    return RunStatsCollector("lyst")
+    collector = RunStatsCollector("lyst")
+    # Capture the source/country matrix before the run starts so partial LYST coverage
+    # can be analyzed later without reconstructing config from a different deploy.
+    collector.set_field("source_country_pairs_expected", len(BASE_URLS) * len(COUNTRIES))
+    collector.set_field("sources_total", len(BASE_URLS))
+    collector.set_field("countries_total", len(COUNTRIES))
+    collector.set_field("page_scrape", bool(PAGE_SCRAPE))
+    collector.set_field("inactive_cleanup_min_items_seen", LYST_INACTIVE_CLEANUP_MIN_ITEMS_SEEN)
+    collector.set_field("inactive_cleanup_min_active_ratio", LYST_INACTIVE_CLEANUP_MIN_ACTIVE_RATIO)
+    collector.set_deploy_metadata()
+    return collector
 
 
 async def _run_lyst_url_batch(exchange_rates):

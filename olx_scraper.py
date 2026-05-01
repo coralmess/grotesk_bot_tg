@@ -55,7 +55,7 @@ from helpers.marketplace_sender import (
 from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import OLX_ITEMS_DB_FILE, SCRAPER_RUNS_JSONL_FILE
-from helpers.scraper_stats import RunStatsCollector
+from helpers.scraper_stats import RunStatsCollector, utc_now_iso
 from helpers.sqlite_runtime import RUNTIME_DB_PRAGMA_STATEMENTS, apply_runtime_pragmas
 try:
     import lxml  # noqa: F401
@@ -1106,10 +1106,13 @@ async def _legacy_run_olx_scraper():
 async def run_olx_scraper():
     logger.info("OLX Scraper started")
     errors: list[str] = []
+    run_stats = RunStatsCollector("olx")
+    run_stats.set_deploy_metadata()
 
     def _add_error(msg: str) -> None:
         if msg:
             errors.append(str(msg)[:200])
+            run_stats.record_error("runtime", message=str(msg)[:200])
 
     token = _clean_token(TELEGRAM_OLX_BOT_TOKEN)
     default_chat = _clean_token(DANYLO_DEFAULT_CHAT_ID)
@@ -1133,7 +1136,6 @@ async def run_olx_scraper():
     total_scraped = 0
     total_without_images = 0
     pipeline_totals = PipelineStats()
-    run_stats = RunStatsCollector("olx")
 
     async def _send_item(item: OlxItem, text: str, source_name: str) -> bool:
         nonlocal total_without_images
@@ -1193,6 +1195,7 @@ async def run_olx_scraper():
             if items is None:
                 run_stats.inc("sources_failed")
                 run_stats.record_source(source_name, status="scrape_failed", url=url)
+                run_stats.record_error("scrape_failed", source=source_name)
                 return
 
             next_streak, next_cycle = finished_source_decision(source_stats.streak, len(items))
@@ -1236,11 +1239,13 @@ async def run_olx_scraper():
             _add_error(f"{source_name}: network error")
             run_stats.inc("sources_failed")
             run_stats.record_source(source_name, status="network_error", url=url)
+            run_stats.record_error("network", source=source_name, message=str(exc)[:200])
         except Exception as exc:
             logger.error("Failed to process %s: %s", source_name, exc)
             _add_error(f"{source_name}: {exc}")
             run_stats.inc("sources_failed")
             run_stats.record_source(source_name, status="error", url=url, error=str(exc)[:120])
+            run_stats.record_error(type(exc).__name__, source=source_name, message=str(exc)[:200])
 
     try:
         sem = asyncio.Semaphore(OLX_TASK_CONCURRENCY)
@@ -1317,6 +1322,33 @@ async def run_olx_scraper():
             "total_send_failed",
         ):
             run_stats.set_field(field, getattr(pipeline_totals, field))
+        run_stats.set_coverage(
+            expected=len(sources),
+            attempted=run_stats.counters.get("sources_attempted", 0),
+            completed=run_stats.counters.get("sources_with_items", 0) + run_stats.counters.get("sources_empty", 0),
+            blocked=run_stats.counters.get("sources_failed", 0),
+            skipped=run_stats.counters.get("sources_skipped_by_backoff", 0),
+        )
+        run_stats.set_notification_funnel(
+            seen=pipeline_totals.total_seen,
+            candidates=pipeline_totals.total_send_candidates,
+            new=pipeline_totals.total_new,
+            persisted_without_send=pipeline_totals.total_persisted_without_send,
+            sent=pipeline_totals.total_sent,
+            failed=pipeline_totals.total_send_failed,
+            skipped=(
+                pipeline_totals.total_unsubscribed
+                + pipeline_totals.total_duplicate_db
+                + pipeline_totals.total_duplicate_run
+                + pipeline_totals.total_notification_claim_skipped
+            ),
+        )
+        run_stats.set_data_freshness(
+            latest_source_check_utc=utc_now_iso(),
+            sources_with_items=run_stats.counters.get("sources_with_items", 0),
+            sources_empty=run_stats.counters.get("sources_empty", 0),
+        )
+        run_stats.set_resource_snapshot()
         run_stats.write_jsonl(SCRAPER_RUNS_JSONL_FILE, run_stats.finish(outcome="error" if errors else "success"))
         if errors:
             uniq: list[str] = []

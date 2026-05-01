@@ -54,7 +54,7 @@ from helpers.marketplace_sender import (
 from helpers.process_pool import run_cpu_bound
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 from helpers.runtime_paths import SCRAPER_RUNS_JSONL_FILE, SHAFA_ITEMS_DB_FILE
-from helpers.scraper_stats import RunStatsCollector
+from helpers.scraper_stats import RunStatsCollector, utc_now_iso
 from helpers.sqlite_runtime import apply_runtime_pragmas
 
 try:
@@ -841,11 +841,13 @@ async def run_shafa_scraper():
     total_new = 0
     pipeline_totals = PipelineStats()
     run_stats = RunStatsCollector("shafa")
+    run_stats.set_deploy_metadata()
     errors: list[str] = []
 
     def _add_error(msg: str) -> None:
         if msg:
             errors.append(str(msg)[:200])
+            run_stats.record_error("runtime", message=str(msg)[:200])
 
     logger.info("SHAFA.UA start")
     if not PLAYWRIGHT_AVAILABLE:
@@ -933,6 +935,7 @@ async def run_shafa_scraper():
             if items is None:
                 run_stats.inc("sources_failed")
                 run_stats.record_source(source_name, status="scrape_failed", url=url)
+                run_stats.record_error("scrape_failed", source=source_name)
                 return
             next_streak, next_cycle = finished_source_decision(source_stats.streak, len(items))
             await repository.update_source_stats(url, next_streak, next_cycle)
@@ -978,11 +981,13 @@ async def run_shafa_scraper():
             _add_error("Network error")
             run_stats.inc("sources_failed")
             run_stats.record_source(source_name, status="network_error", url=url)
+            run_stats.record_error("network", source=source_name, message=str(exc)[:200])
         except Exception as exc:
             logger.error("Processing error: %s", exc)
             _add_error(f"Processing error: {exc}")
             run_stats.inc("sources_failed")
             run_stats.record_source(source_name, status="error", url=url, error=str(exc)[:120])
+            run_stats.record_error(type(exc).__name__, source=source_name, message=str(exc)[:200])
 
     try:
         sem = asyncio.Semaphore(SHAFA_TASK_CONCURRENCY)
@@ -1029,6 +1034,33 @@ async def run_shafa_scraper():
             "total_send_failed",
         ):
             run_stats.set_field(field, getattr(pipeline_totals, field))
+        run_stats.set_coverage(
+            expected=len(sources),
+            attempted=run_stats.counters.get("sources_attempted", 0),
+            completed=run_stats.counters.get("sources_with_items", 0) + run_stats.counters.get("sources_empty", 0),
+            blocked=run_stats.counters.get("sources_failed", 0),
+            skipped=run_stats.counters.get("sources_skipped_by_backoff", 0),
+        )
+        run_stats.set_notification_funnel(
+            seen=pipeline_totals.total_seen,
+            candidates=pipeline_totals.total_send_candidates,
+            new=pipeline_totals.total_new,
+            persisted_without_send=pipeline_totals.total_persisted_without_send,
+            sent=pipeline_totals.total_sent,
+            failed=pipeline_totals.total_send_failed,
+            skipped=(
+                pipeline_totals.total_unsubscribed
+                + pipeline_totals.total_duplicate_db
+                + pipeline_totals.total_duplicate_run
+                + pipeline_totals.total_notification_claim_skipped
+            ),
+        )
+        run_stats.set_data_freshness(
+            latest_source_check_utc=utc_now_iso(),
+            sources_with_items=run_stats.counters.get("sources_with_items", 0),
+            sources_empty=run_stats.counters.get("sources_empty", 0),
+        )
+        run_stats.set_resource_snapshot()
         run_stats.write_jsonl(SCRAPER_RUNS_JSONL_FILE, run_stats.finish(outcome="error" if errors else "success"))
         if total_scraped > 0:
             logger.info("Success rate: %.1f%%", (total_sent / total_scraped * 100))

@@ -11,6 +11,10 @@ from typing import Any
 class LystProcessingStats:
     new_total: int = 0
     removed_total: int = 0
+    cleanup_skipped: bool = False
+    cleanup_skip_reason: str = ""
+    active_before_cleanup: int = 0
+    current_seen_keys: int = 0
 
 
 def merge_base_url_into_shoes(result, base_url, country, *, logger):
@@ -170,6 +174,8 @@ async def process_all_shoes(
     mark_shoe_processed,
     save_shoe_data_bulk,
     get_final_clear_link,
+    inactive_cleanup_min_seen: int = 0,
+    inactive_cleanup_min_active_ratio: float = 0.0,
 ):
     new_shoe_count = 0
     semaphore = asyncio.Semaphore(shoe_concurrency)
@@ -229,30 +235,61 @@ async def process_all_shoes(
     logger.info("Processed %s new shoes in total", new_shoe_count)
 
     removed_shoes = []
-    if not run_failed:
-        current_shoes = {shoe_key(shoe) for shoe in all_shoes}
-        removed_shoes = [
-            dict(shoe, key=key, active=False)
-            for key, shoe in old_data.items()
-            if key not in current_shoes and shoe.get("active", True)
-        ]
-        for shoe in removed_shoes:
-            old_data[shoe["key"]]["active"] = False
-        if removed_shoes:
-            logger.info("Marking %s removed shoes inactive", len(removed_shoes))
-            chunk_size = 500
-            for i in range(0, len(removed_shoes), chunk_size):
-                chunk = removed_shoes[i : i + chunk_size]
-                await save_shoe_data_bulk(chunk)
-                touch_progress(
-                    "removed_shoes_batch",
-                    batch_start=i,
-                    batch_size=len(chunk),
-                    total_removed=len(removed_shoes),
-                )
-                await asyncio.sleep(0)
+    active_before_cleanup = sum(1 for shoe in old_data.values() if shoe.get("active", True))
+    current_shoes = {shoe_key(shoe) for shoe in all_shoes}
+    cleanup_skipped = False
+    cleanup_skip_reason = ""
+    if run_failed:
+        cleanup_skipped = True
+        cleanup_skip_reason = "run_failed"
+    else:
+        min_seen = max(0, int(inactive_cleanup_min_seen or 0))
+        min_ratio = max(0.0, float(inactive_cleanup_min_active_ratio or 0.0))
+        current_seen_count = len(current_shoes)
+        if min_seen and current_seen_count < min_seen:
+            cleanup_skipped = True
+            cleanup_skip_reason = f"items_seen_below_min:{current_seen_count}<{min_seen}"
+        elif active_before_cleanup and min_ratio and (current_seen_count / active_before_cleanup) < min_ratio:
+            cleanup_skipped = True
+            cleanup_skip_reason = (
+                f"coverage_ratio_below_min:{current_seen_count}/{active_before_cleanup}<{min_ratio:.3f}"
+            )
+
+        if cleanup_skipped:
+            # LYST can occasionally return a tiny page set while still looking like a
+            # clean run. Skipping cleanup here prevents one bad coverage pass from
+            # marking most known shoes inactive.
+            logger.warning("Skipping inactive cleanup: %s", cleanup_skip_reason)
+        else:
+            removed_shoes = [
+                dict(shoe, key=key, active=False)
+                for key, shoe in old_data.items()
+                if key not in current_shoes and shoe.get("active", True)
+            ]
+            for shoe in removed_shoes:
+                old_data[shoe["key"]]["active"] = False
+            if removed_shoes:
+                logger.info("Marking %s removed shoes inactive", len(removed_shoes))
+                chunk_size = 500
+                for i in range(0, len(removed_shoes), chunk_size):
+                    chunk = removed_shoes[i : i + chunk_size]
+                    await save_shoe_data_bulk(chunk)
+                    touch_progress(
+                        "removed_shoes_batch",
+                        batch_start=i,
+                        batch_size=len(chunk),
+                        total_removed=len(removed_shoes),
+                    )
+                    await asyncio.sleep(0)
 
     touch_progress("process_shoes_done", removed_total=len(removed_shoes), new_total=new_shoe_count)
     # Returning stats keeps the final run status truthful; otherwise a healthy run that
     # found new shoes looked like it found zero new items in machine-readable status.
-    return LystProcessingStats(new_total=new_shoe_count, removed_total=len(removed_shoes))
+    return LystProcessingStats(
+        new_total=new_shoe_count,
+        removed_total=len(removed_shoes),
+        cleanup_skipped=cleanup_skipped,
+        cleanup_skip_reason=cleanup_skip_reason,
+        active_before_cleanup=active_before_cleanup,
+        current_seen_keys=len(current_shoes),
+    )
