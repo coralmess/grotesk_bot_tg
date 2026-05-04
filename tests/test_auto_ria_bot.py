@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from helpers.analytics_events import AnalyticsSink
@@ -212,6 +213,83 @@ class AutoRiaRuntimeTests(unittest.TestCase):
             self.assertEqual(event["url_host"], "cdn.example.com")
             self.assertNotIn("hidden", json.dumps(event))
 
+    def test_refresh_sold_status_stops_after_detail_rate_limit(self) -> None:
+        class MultiStorage(FakeAutoRiaSoldStorage):
+            def fetch_active_sent_items(self) -> list[AutoRiaSentItem]:
+                return [
+                    AutoRiaSentItem(
+                        car_id="one",
+                        title="One",
+                        url="https://auto.ria.com/uk/auto_one.html",
+                        price_usd=10000,
+                        message_id=1,
+                        message_kind="photo",
+                        caption="one",
+                    ),
+                    AutoRiaSentItem(
+                        car_id="two",
+                        title="Two",
+                        url="https://auto.ria.com/uk/auto_two.html",
+                        price_usd=11000,
+                        message_id=2,
+                        message_kind="photo",
+                        caption="two",
+                    ),
+                ]
+
+        async def run_test():
+            runtime = AutoRiaBotRuntime(
+                bot_token="123:abc",
+                chat_id=1,
+                sources=[],
+                detail_request_delay_sec=0,
+                detail_rate_limit_cooldown_sec=30,
+                monotonic_func=lambda: 100.0,
+            )
+            runtime._storage = MultiStorage()
+            calls = []
+
+            async def fake_fetch_detail_text(url: str):
+                calls.append(url)
+                return None
+
+            runtime._fetch_detail_text = fake_fetch_detail_text
+            runtime._note_detail_rate_limit(retry_after_seconds=12, url="https://auto.ria.com/uk/auto_one.html")
+            await runtime._refresh_sold_statuses()
+            return runtime, calls
+
+        runtime, calls = asyncio.run(run_test())
+
+        self.assertEqual(calls, [])
+        self.assertEqual(runtime._detail_rate_limited_until, 112.0)
+
+    def test_detail_fetch_sets_cooldown_on_429(self) -> None:
+        class FakeResponse:
+            status_code = 429
+            text = ""
+            headers = {"Retry-After": "17"}
+
+            def raise_for_status(self):
+                raise AssertionError("429 should be handled before raise_for_status")
+
+        times = iter([10.0, 10.0, 20.0])
+        runtime = AutoRiaBotRuntime(
+            bot_token="123:abc",
+            chat_id=1,
+            sources=[],
+            detail_request_delay_sec=0,
+            detail_rate_limit_cooldown_sec=30,
+            monotonic_func=lambda: next(times),
+        )
+
+        with unittest.mock.patch("helpers.auto_ria.runtime.requests.get", return_value=FakeResponse()):
+            first = runtime._fetch_detail_text_sync("https://auto.ria.com/uk/auto_one.html")
+            skipped = runtime._fetch_detail_text_sync("https://auto.ria.com/uk/auto_two.html")
+
+        self.assertIsNone(first)
+        self.assertIsNone(skipped)
+        self.assertAlmostEqual(runtime._detail_rate_limited_until, 27.0)
+
     def test_refresh_sold_status_edits_stored_photo_message(self) -> None:
         async def run_test() -> tuple[FakeAutoRiaBot, FakeAutoRiaSoldStorage]:
             runtime = AutoRiaBotRuntime(
@@ -227,7 +305,7 @@ class AutoRiaRuntimeTests(unittest.TestCase):
             async def fake_fetch_text(url: str):
                 return SOLD_DETAIL_HTML
 
-            runtime._fetch_text = fake_fetch_text
+            runtime._fetch_detail_text = fake_fetch_text
             await runtime._refresh_sold_statuses()
             return fake_bot, fake_storage
 

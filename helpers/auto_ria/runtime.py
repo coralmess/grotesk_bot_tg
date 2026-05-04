@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import re
+import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -60,6 +61,9 @@ class AutoRiaBotRuntime:
         check_jitter_sec: int = 60,
         request_timeout_sec: int = 30,
         connector_limit: int = 8,
+        detail_request_delay_sec: float = 2.5,
+        detail_rate_limit_cooldown_sec: int = 120,
+        monotonic_func=None,
         service_health=None,
         analytics_sink: AnalyticsSink | None = None,
         logger=None,
@@ -85,6 +89,12 @@ class AutoRiaBotRuntime:
         self._http_semaphore = asyncio.Semaphore(max(2, connector_limit))
         self._send_semaphore = asyncio.Semaphore(2)
         self._connector_limit = max(4, int(connector_limit))
+        self._detail_request_delay_sec = max(0.0, float(detail_request_delay_sec))
+        self._detail_rate_limit_cooldown_sec = max(1, int(detail_rate_limit_cooldown_sec))
+        self._monotonic = monotonic_func or time.monotonic
+        self._last_detail_request_at = 0.0
+        self._detail_rate_limited_until = 0.0
+        self._detail_request_lock = asyncio.Lock()
 
     async def start(self) -> None:
         self._storage.create_tables()
@@ -213,7 +223,15 @@ class AutoRiaBotRuntime:
         for item in self._storage.fetch_active_sent_items():
             if not item.message_id or not item.caption:
                 continue
-            html_text = await self._fetch_text(item.url)
+            if self._is_detail_rate_limited():
+                self._record_detail_analytics("sold_refresh_stopped_by_rate_limit", url=item.url)
+                break
+            html_text = await self._fetch_detail_text(item.url)
+            if html_text is None and self._is_detail_rate_limited():
+                # Stop after a 429 instead of hammering every active item detail page. The
+                # next hourly run will resume sold checks after the cooldown expires.
+                self._record_detail_analytics("sold_refresh_stopped_by_rate_limit", url=item.url)
+                break
             if not is_auto_ria_sold_detail_html(html_text or ""):
                 continue
             edited = await self._edit_sold_message(item)
@@ -368,7 +386,7 @@ class AutoRiaBotRuntime:
         return AutoRiaSendOutcome(sent=True, message_id=getattr(message, "message_id", None), message_kind="photo")
 
     async def _fetch_vin_details_for_listing(self, listing: AutoRiaListing) -> VinDecoderDetails:
-        detail_html = await self._fetch_text(listing.url)
+        detail_html = await self._fetch_detail_text(listing.url)
         if not detail_html:
             return VinDecoderDetails()
 
@@ -402,6 +420,24 @@ class AutoRiaBotRuntime:
             self._logger.warning("JSON fetch failed for %s: %s", url, exc)
             return None
 
+    async def _fetch_detail_text(self, url: str) -> Optional[str]:
+        if self._is_detail_rate_limited():
+            self._record_detail_analytics("detail_cooldown_skip", url=url)
+            return None
+        async with self._detail_request_lock:
+            if self._is_detail_rate_limited():
+                self._record_detail_analytics("detail_cooldown_skip", url=url)
+                return None
+            wait_s = self._detail_request_delay_sec - (self._monotonic() - self._last_detail_request_at)
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+            self._last_detail_request_at = self._monotonic()
+            try:
+                return await asyncio.to_thread(self._fetch_detail_text_sync, url)
+            except Exception as exc:
+                self._logger.warning("Detail HTTP fetch failed for %s: %s", url, exc)
+                return None
+
     def _fetch_text_sync(self, url: str, allow_statuses: Optional[set[int]] = None) -> Optional[str]:
         headers = {
             "User-Agent": RUN_USER_AGENT,
@@ -414,6 +450,34 @@ class AutoRiaBotRuntime:
             return None
         response.raise_for_status()
         return response.text
+
+    def _fetch_detail_text_sync(self, url: str) -> Optional[str]:
+        if self._is_detail_rate_limited():
+            self._record_detail_analytics("detail_cooldown_skip", url=url)
+            return None
+        headers = {
+            "User-Agent": RUN_USER_AGENT,
+            "Accept-Language": RUN_ACCEPT_LANGUAGE,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        response = requests.get(url, headers=headers, timeout=self._request_timeout_sec)
+        if response.status_code == 429:
+            self._note_detail_rate_limit(
+                retry_after_seconds=_retry_after_seconds(response),
+                url=url,
+            )
+            return None
+        response.raise_for_status()
+        return response.text
+
+    def _is_detail_rate_limited(self) -> bool:
+        return self._monotonic() < self._detail_rate_limited_until
+
+    def _note_detail_rate_limit(self, *, retry_after_seconds: Optional[int], url: str) -> None:
+        cooldown = retry_after_seconds if retry_after_seconds and retry_after_seconds > 0 else self._detail_rate_limit_cooldown_sec
+        self._detail_rate_limited_until = max(self._detail_rate_limited_until, self._monotonic() + cooldown)
+        self._logger.warning("Auto RIA detail fetch rate-limited; cooling down detail requests for %ss", cooldown)
+        self._record_detail_analytics("detail_429", url=url, cooldown_seconds=cooldown)
 
     def _fetch_json_sync(self, url: str, allow_statuses: Optional[set[int]] = None) -> Optional[dict]:
         headers = {
@@ -457,6 +521,31 @@ class AutoRiaBotRuntime:
         response.raise_for_status()
         return response.content
 
+    def _record_detail_analytics(self, event: str, *, url: str, cooldown_seconds: int = 0) -> None:
+        try:
+            payload = {
+                "event": event,
+                "cooldown_seconds": int(cooldown_seconds or 0),
+            }
+            payload.update(fingerprint_url(url))
+            self._analytics_sink.append_event("auto_ria_detail", payload)
+            self._analytics_sink.add_daily_counters(
+                "auto_ria_detail",
+                dimensions={"event": event},
+                counters={"events": 1, "cooldown_seconds": int(cooldown_seconds or 0)},
+            )
+        except Exception:
+            # Detail throttling protects Auto RIA access. Analytics should document it
+            # when possible, but never prevent the throttle from doing its job.
+            return
+
+
+def _retry_after_seconds(response) -> Optional[int]:
+    retry_after = getattr(response, "headers", {}).get("Retry-After")
+    if retry_after and str(retry_after).isdigit():
+        return int(retry_after)
+    return None
+
 
 def build_auto_ria_runtime(*, logger=None) -> AutoRiaBotRuntime:
     bot_token = os.getenv("FINANCE_BOT_TOKEN")
@@ -480,5 +569,7 @@ def build_auto_ria_runtime(*, logger=None) -> AutoRiaBotRuntime:
         check_jitter_sec=int(os.getenv("AUTO_RIA_CHECK_JITTER_SEC", "0")),
         request_timeout_sec=int(os.getenv("AUTO_RIA_REQUEST_TIMEOUT_SEC", "30")),
         connector_limit=int(os.getenv("AUTO_RIA_HTTP_CONNECTOR_LIMIT", "8")),
+        detail_request_delay_sec=float(os.getenv("AUTO_RIA_DETAIL_REQUEST_DELAY_SEC", "2.5")),
+        detail_rate_limit_cooldown_sec=int(os.getenv("AUTO_RIA_DETAIL_RATE_LIMIT_COOLDOWN_SEC", "120")),
         logger=logger,
     )
