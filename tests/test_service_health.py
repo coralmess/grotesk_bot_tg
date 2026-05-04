@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from helpers.analytics_events import AnalyticsSink
 from helpers.service_health import ServiceHealthReporter, ServiceMetricsConfig
 
 
@@ -50,6 +51,34 @@ class ServiceHealthReporterTests(unittest.TestCase):
         self.assertEqual(stats["last_error"], "boom")
         self.assertEqual(snapshot["status"], "degraded")
         self.assertEqual(snapshot["last_error"], "boom")
+
+    def test_success_and_failure_record_operation_analytics(self) -> None:
+        analytics_dir = Path(self._tmpdir.name) / "analytics"
+        reporter = ServiceHealthReporter(
+            ServiceMetricsConfig(
+                service_name="test-service",
+                health_file=self.health_file,
+                metrics_port=None,
+                heartbeat_interval_sec=1,
+                analytics_sink=AnalyticsSink(analytics_dir, now_func=lambda: "2026-05-04T11:00:00Z"),
+            )
+        )
+        reporter.start()
+
+        reporter.record_success("exchange_rate_check", duration_seconds=1.25, note="scheduled:no_change")
+        reporter.record_failure("exchange_rate_check", "fetch_failed", duration_seconds=2.5)
+
+        event_path = analytics_dir / "events" / "2026-05-04.service_operation.jsonl"
+        events = [json.loads(line) for line in event_path.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([event["outcome"] for event in events], ["success", "failure"])
+        self.assertEqual(events[0]["operation"], "exchange_rate_check")
+        self.assertEqual(events[0]["note"], "scheduled:no_change")
+        self.assertEqual(events[1]["error"], "fetch_failed")
+
+        daily_path = analytics_dir / "daily" / "2026-05-04.service_operations.json"
+        daily = json.loads(daily_path.read_text(encoding="utf-8"))
+        self.assertEqual(daily["groups"]["operation=exchange_rate_check|outcome=success|service=test-service"]["counters"]["runs"], 1)
+        self.assertEqual(daily["groups"]["operation=exchange_rate_check|outcome=failure|service=test-service"]["counters"]["failures"], 1)
 
 
 if __name__ == "__main__":

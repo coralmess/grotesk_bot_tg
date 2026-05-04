@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from helpers.analytics_events import AnalyticsSink
 from helpers.scraper_stats import RunStatsCollector
 
 
@@ -37,6 +38,38 @@ class RunStatsCollectorTests(unittest.TestCase):
             lines = output_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 1)
             self.assertEqual(json.loads(lines[0]), summary)
+    def test_write_jsonl_updates_daily_run_and_source_analytics(self):
+        times = iter(["2026-05-04T10:00:00Z", "2026-05-04T10:01:00Z"])
+        collector = RunStatsCollector("olx", run_id="run-analytics", now_func=lambda: next(times))
+        collector.inc("items_scraped", 12)
+        collector.inc("items_sent", 2)
+        collector.record_source("Riri", status="ok", items_scraped=12, sent_items=2)
+        summary = collector.finish(outcome="success")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = Path(tmp_dir) / "runs.jsonl"
+            sink = AnalyticsSink(Path(tmp_dir) / "analytics", now_func=lambda: "2026-05-04T10:02:00Z")
+
+            collector.write_jsonl(output_path, summary, analytics_sink=sink)
+
+            event_path = Path(tmp_dir) / "analytics" / "events" / "2026-05-04.scraper_run.jsonl"
+            event = json.loads(event_path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(event["scraper"], "olx")
+            self.assertEqual(event["outcome"], "success")
+            self.assertEqual(event["items_scraped"], 12)
+
+            daily_path = Path(tmp_dir) / "analytics" / "daily" / "2026-05-04.scraper_runs.json"
+            daily = json.loads(daily_path.read_text(encoding="utf-8"))
+            run_bucket = daily["groups"]["outcome=success|scraper=olx"]
+            self.assertEqual(run_bucket["counters"]["runs"], 1)
+            self.assertEqual(run_bucket["counters"]["items_sent"], 2)
+
+            source_path = Path(tmp_dir) / "analytics" / "daily" / "2026-05-04.scraper_sources.json"
+            source_daily = json.loads(source_path.read_text(encoding="utf-8"))
+            source_bucket = source_daily["groups"]["scraper=olx|source=Riri|status=ok"]
+            self.assertEqual(source_bucket["counters"]["runs"], 1)
+            self.assertEqual(source_bucket["counters"]["items_scraped"], 12)
+
 
     def test_records_high_value_analytics_blocks(self):
         collector = RunStatsCollector("shafa", run_id="run-1", now_func=lambda: "2026-04-26T10:00:00Z")

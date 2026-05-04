@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from helpers.analytics_events import AnalyticsSink
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -140,13 +142,21 @@ class RunStatsCollector:
             summary["error_counts"] = dict(sorted(self.error_counts.items()))
         return summary
 
-    def write_jsonl(self, path: Path, summary: dict[str, Any], *, suppress_errors: bool = True) -> None:
+    def write_jsonl(
+        self,
+        path: Path,
+        summary: dict[str, Any],
+        *,
+        suppress_errors: bool = True,
+        analytics_sink: AnalyticsSink | None = None,
+    ) -> None:
         # JSONL gives future debugging/AI analysis a stable, append-only run ledger
         # without forcing it to reverse-engineer meaning from human log text.
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(summary, ensure_ascii=False, sort_keys=True) + "\n")
+            self._write_analytics(summary, analytics_sink=analytics_sink)
         except Exception:
             if not suppress_errors:
                 raise
@@ -161,6 +171,55 @@ class RunStatsCollector:
             source.setdefault("new_per_1000_items", round((new / items) * 1000, 3))
             source.setdefault("sent_per_1000_items", round((sent / items) * 1000, 3))
             source.setdefault("skipped_per_1000_items", round((skipped / items) * 1000, 3))
+
+    @staticmethod
+    def _write_analytics(summary: dict[str, Any], *, analytics_sink: AnalyticsSink | None = None) -> None:
+        sink = analytics_sink or AnalyticsSink()
+        scraper = str(summary.get("scraper") or "unknown")
+        outcome = str(summary.get("outcome") or "unknown")
+        counters = summary.get("counters") if isinstance(summary.get("counters"), dict) else {}
+        event_payload = {
+            "run_id": summary.get("run_id"),
+            "scraper": scraper,
+            "outcome": outcome,
+            "duration_seconds": summary.get("duration_seconds"),
+            "errors_total": counters.get("errors_total", 0),
+            "items_scraped": counters.get("items_scraped", counters.get("items_seen", 0)),
+            "items_sent": counters.get("items_sent", 0),
+            "sources_attempted": counters.get("sources_attempted", 0),
+        }
+        sink.append_event("scraper_run", event_payload)
+        # Daily rollups make the instance analyzable without repeatedly parsing the large
+        # scraper_runs.jsonl ledger or grep-heavy human logs.
+        sink.add_daily_counters(
+            "scraper_runs",
+            dimensions={"scraper": scraper, "outcome": outcome},
+            counters={
+                "runs": 1,
+                "duration_seconds": float(summary.get("duration_seconds") or 0),
+                "items_scraped": _int_value(event_payload["items_scraped"]),
+                "items_sent": _int_value(event_payload["items_sent"]),
+                "errors_total": _int_value(event_payload["errors_total"]),
+            },
+        )
+        for source in summary.get("sources") or []:
+            if not isinstance(source, dict):
+                continue
+            sink.add_daily_counters(
+                "scraper_sources",
+                dimensions={
+                    "scraper": scraper,
+                    "source": str(source.get("name") or "unknown")[:120],
+                    "status": str(source.get("status") or "unknown"),
+                },
+                counters={
+                    "runs": 1,
+                    "items_scraped": _int_value(source.get("items_scraped") or source.get("items_seen")),
+                    "sent_items": _int_value(source.get("sent_items") or source.get("sent")),
+                    "new_items": _int_value(source.get("new_items") or source.get("new")),
+                    "skipped_items": _int_value(source.get("skipped_items") or source.get("skipped")),
+                },
+            )
 
 
 def _percent(part: int, whole: int) -> float:

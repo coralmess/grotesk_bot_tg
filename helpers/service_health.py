@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, start_http_server
 
+from helpers.analytics_events import AnalyticsSink
 from helpers.runtime_paths import service_health_file
 
 LOGGER = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ class ServiceMetricsConfig:
     metrics_port: Optional[int]
     metrics_host: str = "127.0.0.1"
     heartbeat_interval_sec: int = 30
+    analytics_sink: Optional[AnalyticsSink] = None
 
     @classmethod
     def for_service(
@@ -65,6 +67,7 @@ class ServiceMetricsConfig:
         metrics_port: Optional[int] = None,
         metrics_host: str = "127.0.0.1",
         heartbeat_interval_sec: int = 30,
+        analytics_sink: Optional[AnalyticsSink] = None,
     ) -> "ServiceMetricsConfig":
         if metrics_port is None:
             metrics_port = DEFAULT_METRICS_PORTS.get(service_name)
@@ -74,6 +77,7 @@ class ServiceMetricsConfig:
             metrics_port=metrics_port,
             metrics_host=metrics_host,
             heartbeat_interval_sec=heartbeat_interval_sec,
+            analytics_sink=analytics_sink,
         )
 
 
@@ -135,6 +139,7 @@ class ServiceHealthReporter:
             registry=self._registry,
             buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1800, 3600),
         )
+        self._analytics_sink = config.analytics_sink or AnalyticsSink()
 
     @property
     def service_name(self) -> str:
@@ -222,6 +227,12 @@ class ServiceHealthReporter:
                 self._note = note
             self._last_heartbeat_utc = now_iso
             self._write_snapshot_locked()
+        self._record_operation_analytics(
+            operation,
+            outcome="success",
+            duration_seconds=duration_seconds,
+            note=note,
+        )
 
     def record_failure(self, operation: str, error: Any, *, duration_seconds: Optional[float] = None) -> None:
         now_iso = utc_now_iso()
@@ -244,6 +255,12 @@ class ServiceHealthReporter:
             self._note = operation
             self._last_heartbeat_utc = now_iso
             self._write_snapshot_locked()
+        self._record_operation_analytics(
+            operation,
+            outcome="failure",
+            duration_seconds=duration_seconds,
+            error=error_text,
+        )
 
     async def monitor_async(self, operation: str, awaitable):
         started = time.perf_counter()
@@ -289,6 +306,46 @@ class ServiceHealthReporter:
             "service_state": self._service_state,
         }
         _write_json_atomic(self._config.health_file, payload)
+
+    def _record_operation_analytics(
+        self,
+        operation: str,
+        *,
+        outcome: str,
+        duration_seconds: Optional[float] = None,
+        note: str = "",
+        error: str = "",
+    ) -> None:
+        try:
+            payload = {
+                "service": self._config.service_name,
+                "operation": operation,
+                "outcome": outcome,
+                "duration_seconds": round(float(duration_seconds), 6) if duration_seconds is not None else None,
+            }
+            if note:
+                payload["note"] = note[:200]
+            if error:
+                payload["error"] = error[:200]
+            self._analytics_sink.append_event("service_operation", payload)
+            self._analytics_sink.add_daily_counters(
+                "service_operations",
+                dimensions={
+                    "service": self._config.service_name,
+                    "operation": operation,
+                    "outcome": outcome,
+                },
+                counters={
+                    "runs": 1,
+                    "successes": 1 if outcome == "success" else 0,
+                    "failures": 1 if outcome == "failure" else 0,
+                    "duration_seconds": float(duration_seconds or 0),
+                },
+            )
+        except Exception:
+            # Analytics must never make a production bot fail; service health remains the
+            # primary control path and telemetry is a best-effort debugging aid.
+            LOGGER.debug("Could not record service analytics for %s/%s", self._config.service_name, operation)
 
 
 def build_service_health(
