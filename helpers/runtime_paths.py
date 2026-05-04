@@ -14,6 +14,7 @@ RUNTIME_HEALTH_DIR = RUNTIME_DATA_DIR / "health"
 RUNTIME_CACHE_DIR = RUNTIME_DATA_DIR / "cache"
 RUNTIME_BROWSER_DIR = RUNTIME_DATA_DIR / "browser"
 RUNTIME_TMP_DIR = RUNTIME_DATA_DIR / "tmp"
+RUNTIME_ANALYTICS_DIR = RUNTIME_DATA_DIR / "analytics"
 
 
 def ensure_runtime_dirs() -> None:
@@ -29,6 +30,7 @@ def ensure_runtime_dirs() -> None:
         RUNTIME_CACHE_DIR,
         RUNTIME_BROWSER_DIR,
         RUNTIME_TMP_DIR,
+        RUNTIME_ANALYTICS_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
