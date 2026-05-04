@@ -44,6 +44,7 @@ class Harness:
     sleeps: list
     cloudflare_failures: list
     successes: list
+    page_events: list
 
 
 def make_harness(*, resume_state=None, page_results=None, cooldown=False):
@@ -62,6 +63,7 @@ def make_harness(*, resume_state=None, page_results=None, cooldown=False):
         sleeps=[],
         cloudflare_failures=[],
         successes=[],
+        page_events=[],
     )
 
     async def scrape_page(url, country, **kwargs):
@@ -102,6 +104,7 @@ def make_harness(*, resume_state=None, page_results=None, cooldown=False):
         now_kyiv=lambda: "2026-04-26 13:00:00",
         record_source_success=lambda source_name, country: harness.successes.append((source_name, country)),
         sleep=sleep,
+        record_page_event=lambda **fields: harness.page_events.append(fields),
     )
     config = page_runner.PageRunConfig(page_scrape=True, max_scroll_attempts=7, log_tail_lines=200)
     return harness, config, hooks
@@ -255,6 +258,30 @@ class LystPageRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(harness.dumps[0]["reason"], "Stopped too early")
         self.assertFalse(harness.scrape_calls[1][2]["use_pagination"])
         self.assertEqual(harness.resume_updates[-1][2]["scrape_complete"], True)
+
+
+    async def test_records_page_analytics_events_for_page_statuses(self):
+        base_url = {"url": "https://www.lyst.com/shop", "url_name": "Main"}
+        shoe = {"name": "shoe"}
+        harness, config, hooks = make_harness(page_results=[([shoe], "page1", "ok"), ([], "gone", "terminal")])
+
+        result = await page_runner.scrape_all_pages(
+            base_url,
+            "US",
+            config=config,
+            hooks=hooks,
+            resume_state=harness.state,
+            resume_entry_outcomes=harness.outcomes,
+            run_progress=harness.progress,
+            abort_event=FakeAbortEvent(),
+        )
+
+        self.assertEqual(result, [shoe])
+        self.assertEqual([event["status"] for event in harness.page_events], ["ok", "terminal"])
+        self.assertEqual(harness.page_events[0]["items_scraped"], 1)
+        self.assertEqual(harness.page_events[0]["page"], 1)
+        self.assertEqual(harness.page_events[0]["country"], "US")
+        self.assertEqual(harness.page_events[1]["terminal_final_page"], 1)
 
     async def test_clean_terminal_after_success_records_source_success(self):
         base_url = {"url": "https://www.lyst.com/shop", "url_name": "Main"}

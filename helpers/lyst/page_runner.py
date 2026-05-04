@@ -31,6 +31,7 @@ class PageRunHooks:
     now_kyiv: Callable[[], str]
     record_source_success: Callable[[str, str], None]
     sleep: Callable[[float], Awaitable[None]]
+    record_page_event: Callable[..., None] = lambda **fields: None
 
 
 async def scrape_all_pages(
@@ -60,6 +61,14 @@ async def scrape_all_pages(
     if hooks.should_skip_source_for_backoff(url_name, country):
         hooks.logger.warning(f"Skipping {url_name} for {country} due to active Cloudflare cooldown")
         resume_entry_outcomes[key] = "cloudflare_cooldown"
+        hooks.record_page_event(
+            source_name=url_name,
+            country=country,
+            page=None,
+            status="cloudflare_cooldown",
+            items_scraped=0,
+            use_pagination=use_pagination,
+        )
         return all_shoes
 
     page = entry.get("next_page", 1) if resume_active else 1
@@ -91,6 +100,17 @@ async def scrape_all_pages(
             country=country,
             page_num=page,
             status=status,
+        )
+        # Page-level telemetry is intentionally recorded before each branch mutates
+        # resume state, so Cloudflare/terminal/empty pages can be reconstructed later.
+        hooks.record_page_event(
+            source_name=url_name,
+            country=country,
+            page=page,
+            status=status,
+            items_scraped=len(shoes or []),
+            use_pagination=use_pagination,
+            terminal_final_page=last_scraped_page if status == "terminal" else None,
         )
         if status == "cloudflare":
             resume_entry_outcomes[key] = "cloudflare"

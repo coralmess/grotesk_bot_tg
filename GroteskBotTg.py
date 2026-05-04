@@ -64,6 +64,7 @@ from helpers.lyst_debug import (
 )
 from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.scheduler import run_lyst_scheduler
+from helpers.analytics_events import AnalyticsSink
 from colorama import Fore, Back, Style
 from PIL import Image, ImageDraw, ImageFont
 from asyncio import Semaphore
@@ -116,6 +117,7 @@ PAGE_SCRAPE = LYST_PAGE_SCRAPE
 SHOE_DATA_FILE = SHOE_DATA_JSON_FILE
 EXCHANGE_RATES_FILE = EXCHANGE_RATES_JSON_FILE
 BOT_LOG_FILE = PYTHON_LOG_FILE
+LYST_ANALYTICS_SINK = AnalyticsSink()
 SHOES_DB_FILE = RUNTIME_SHOES_DB_FILE
 OLX_DB_FILE = RUNTIME_OLX_DB_FILE
 SHAFA_DB_FILE = RUNTIME_SHAFA_DB_FILE
@@ -1191,6 +1193,7 @@ async def scrape_all_pages(base_url, country, use_pagination=None):
         now_kyiv=_now_kyiv_str,
         record_source_success=_record_lyst_source_success,
         sleep=asyncio.sleep,
+        record_page_event=_record_lyst_page_event,
     )
     return await lyst_page_runner.scrape_all_pages(
         base_url,
@@ -1522,6 +1525,24 @@ def _record_lyst_source_success(source_name: str, country: str, backoff=LYST_CLO
     # Clear only after a clean source/country completion so old penalties do not
     # survive once LYST proves that pair can be fetched again.
     backoff.record_success(source_name, country)
+
+
+def _record_lyst_page_event(**fields):
+    try:
+        source_name = str(fields.get("source_name") or "unknown")
+        country = str(fields.get("country") or "unknown")
+        status = str(fields.get("status") or "unknown")
+        items_scraped = int(fields.get("items_scraped") or 0)
+        LYST_ANALYTICS_SINK.append_event("lyst_page", fields)
+        LYST_ANALYTICS_SINK.add_daily_counters(
+            "lyst_pages",
+            dimensions={"source_name": source_name, "country": country, "status": status},
+            counters={"pages": 1, "items_scraped": items_scraped},
+        )
+    except Exception:
+        # Lyst page analytics is best-effort: it should explain Cloudflare/terminal
+        # behavior later, never make a fragile Lyst run fail while scraping.
+        return
 
 
 def _set_lyst_active_task(task):
