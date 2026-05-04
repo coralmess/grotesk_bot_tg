@@ -1,4 +1,5 @@
 import io
+import json
 import tempfile
 import unittest
 from datetime import datetime
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
+from helpers.analytics_events import AnalyticsSink
 from useful_bot.exchange_rate_helper import ExchangeRateHelper, RateSnapshot
 
 
@@ -121,6 +123,44 @@ class ExchangeRateHelperTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(sent)
         helper._fetch_snapshot.assert_awaited_once()
+
+    async def test_run_check_records_exchange_analytics_for_sent_update(self) -> None:
+        snapshot = RateSnapshot(
+            fetched_at="2026-04-14T10:15:00+03:00",
+            source_date="14.04.2026",
+            usd_buy=41.1,
+            usd_sell=41.8,
+            eur_buy=44.5,
+            eur_sell=45.3,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "useful_bot.exchange_rate_helper.STATE_FILE",
+            Path(temp_dir) / "exchange_state.json",
+        ):
+            sink = AnalyticsSink(Path(temp_dir) / "analytics", now_func=lambda: "2026-05-04T14:00:00Z")
+            helper = ExchangeRateHelper(chat_id=1, analytics_sink=sink)
+            helper._now_kyiv = lambda: datetime(2026, 4, 14, 10, 15, tzinfo=KYIV_TZ)
+            helper._fetch_snapshot = AsyncMock(return_value=snapshot)
+            app = _FakeApplication()
+
+            with patch(
+                "useful_bot.exchange_rate_helper.build_exchange_rate_render_kwargs",
+                return_value=({"usd_buy": 41.1}, []),
+            ), patch(
+                "useful_bot.exchange_rate_helper.run_cpu_bound",
+                new=AsyncMock(return_value=io.BytesIO(b"image")),
+            ):
+                sent = await helper._run_check(app, reason="manual")
+
+            self.assertTrue(sent)
+            event_path = Path(temp_dir) / "analytics" / "events" / "2026-05-04.exchange_rate_check.jsonl"
+            event = json.loads(event_path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(event["event"], "sent")
+            self.assertEqual(event["reason"], "manual")
+            self.assertEqual(event["usd_buy"], 41.1)
+            self.assertEqual(event["eur_sell"], 45.3)
+
 
 
 if __name__ == "__main__":

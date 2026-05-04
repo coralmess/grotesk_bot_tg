@@ -15,6 +15,7 @@ from telegram.constants import ParseMode
 
 from config import RUN_ACCEPT_LANGUAGE, RUN_USER_AGENT
 from config_auto_ria_urls import AUTO_RIA_URLS
+from helpers.analytics_events import AnalyticsSink, fingerprint_url
 from helpers.auto_ria.models import AutoRiaListing, VinDecoderDetails
 from helpers.auto_ria.parsing import (
     build_auto_ria_caption,
@@ -60,6 +61,7 @@ class AutoRiaBotRuntime:
         request_timeout_sec: int = 30,
         connector_limit: int = 8,
         service_health=None,
+        analytics_sink: AnalyticsSink | None = None,
         logger=None,
     ) -> None:
         self._bot = Bot(token=bot_token)
@@ -78,6 +80,7 @@ class AutoRiaBotRuntime:
         self._request_timeout_sec = max(5, int(request_timeout_sec))
         self._storage = AutoRiaStorage(AUTO_RIA_ITEMS_DB_FILE)
         self._service_health = service_health or build_service_health("auto-ria-bot")
+        self._analytics_sink = analytics_sink or AnalyticsSink()
         self._logger = logger or logging.getLogger("auto_ria_bot")
         self._http_semaphore = asyncio.Semaphore(max(2, connector_limit))
         self._send_semaphore = asyncio.Semaphore(2)
@@ -255,7 +258,9 @@ class AutoRiaBotRuntime:
 
     async def _send_listing_alert(self, caption: str, image_url: Optional[str]) -> AutoRiaSendOutcome:
         if not self._is_valid_image_url(image_url):
-            return await self._coerce_send_outcome(await self._send_text_alert(caption), message_kind="text")
+            outcome = await self._coerce_send_outcome(await self._send_text_alert(caption), message_kind="text")
+            self._record_send_analytics(event="sent" if outcome.sent else "failed", message_kind="text", fallback_reason="invalid_or_missing_url")
+            return outcome
 
         try:
             raw = await self._download_image_bytes(image_url)
@@ -263,7 +268,9 @@ class AutoRiaBotRuntime:
             self._logger.warning("Photo download failed; sending Auto RIA text alert: %s", exc)
             raw = None
         if not raw:
-            return await self._coerce_send_outcome(await self._send_text_alert(caption), message_kind="text")
+            outcome = await self._coerce_send_outcome(await self._send_text_alert(caption), message_kind="text")
+            self._record_send_analytics(event="sent" if outcome.sent else "failed", message_kind="text", image_url=image_url, fallback_reason="download_failed")
+            return outcome
 
         photo_bytes = await run_cpu_bound(
             upscale_image_bytes_for_telegram_sync,
@@ -274,10 +281,60 @@ class AutoRiaBotRuntime:
         result = await self._send_photo_alert(photo_bytes, caption)
         outcome = await self._coerce_send_outcome(result, message_kind="photo")
         if outcome.sent:
+            self._record_send_analytics(
+                event="sent",
+                message_kind="photo",
+                image_url=image_url,
+                raw_bytes=len(raw),
+                output_bytes=len(photo_bytes),
+            )
             return outcome
 
         self._logger.warning("Photo send failed; sending Auto RIA text alert")
-        return await self._coerce_send_outcome(await self._send_text_alert(caption), message_kind="text")
+        outcome = await self._coerce_send_outcome(await self._send_text_alert(caption), message_kind="text")
+        self._record_send_analytics(
+            event="sent" if outcome.sent else "failed",
+            message_kind="text",
+            image_url=image_url,
+            raw_bytes=len(raw),
+            output_bytes=len(photo_bytes),
+            fallback_reason="photo_send_failed",
+        )
+        return outcome
+
+    def _record_send_analytics(
+        self,
+        *,
+        event: str,
+        message_kind: str,
+        image_url: Optional[str] = None,
+        raw_bytes: int = 0,
+        output_bytes: int = 0,
+        fallback_reason: str = "",
+    ) -> None:
+        try:
+            payload = {
+                "event": event,
+                "message_kind": message_kind,
+                "raw_bytes": int(raw_bytes or 0),
+                "output_bytes": int(output_bytes or 0),
+                "fallback_reason": fallback_reason,
+            }
+            payload.update(fingerprint_url(image_url))
+            self._analytics_sink.append_event("auto_ria_send", payload)
+            self._analytics_sink.add_daily_counters(
+                "auto_ria_send",
+                dimensions={"event": event, "message_kind": message_kind},
+                counters={
+                    "messages": 1,
+                    "failures": 1 if event == "failed" else 0,
+                    "raw_bytes": int(raw_bytes or 0),
+                    "output_bytes": int(output_bytes or 0),
+                },
+            )
+        except Exception:
+            # Auto RIA dedupe/send flow must not depend on analytics file availability.
+            return
 
     async def _coerce_send_outcome(self, result, *, message_kind: str) -> AutoRiaSendOutcome:
         if isinstance(result, AutoRiaSendOutcome):

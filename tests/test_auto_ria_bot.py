@@ -1,8 +1,10 @@
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from helpers.analytics_events import AnalyticsSink
 from helpers.auto_ria.runtime import AutoRiaBotRuntime
 from helpers.auto_ria.parsing import (
     build_auto_ria_caption,
@@ -183,6 +185,32 @@ class AutoRiaRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(runtime._sources[0].url, "https://auto.ria.com/uk/search/?page=0&limit=100&order=7")
+
+
+    def test_runtime_records_send_analytics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runtime = AutoRiaBotRuntime(
+                bot_token="123:abc",
+                chat_id=1,
+                sources=[],
+                analytics_sink=AnalyticsSink(Path(tmp_dir), now_func=lambda: "2026-05-04T16:00:00Z"),
+            )
+
+            runtime._record_send_analytics(
+                event="sent",
+                message_kind="photo",
+                image_url="https://cdn.example.com/car.jpg?token=hidden",
+                raw_bytes=100,
+                output_bytes=200,
+            )
+
+            event_path = Path(tmp_dir) / "events" / "2026-05-04.auto_ria_send.jsonl"
+            event = json.loads(event_path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(event["event"], "sent")
+            self.assertEqual(event["message_kind"], "photo")
+            self.assertEqual(event["raw_bytes"], 100)
+            self.assertEqual(event["url_host"], "cdn.example.com")
+            self.assertNotIn("hidden", json.dumps(event))
 
     def test_refresh_sold_status_edits_stored_photo_message(self) -> None:
         async def run_test() -> tuple[FakeAutoRiaBot, FakeAutoRiaSoldStorage]:

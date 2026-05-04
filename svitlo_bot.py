@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.error import BadRequest, Forbidden, NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
+from helpers.analytics_events import AnalyticsSink
 from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.runtime_paths import SVITLO_SUBSCRIBERS_JSON_FILE, SVITLO_STATE_JSON_FILE
 from helpers.service_health import build_service_health
@@ -46,6 +48,7 @@ class SvitloBot:
         self._monitor_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._service_health = build_service_health("svitlobot")
+        self._analytics_sink = AnalyticsSink()
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_chat or not update.message:
@@ -102,7 +105,9 @@ class SvitloBot:
     async def _monitor_loop(self, application: Application) -> None:
         while True:
             try:
+                check_started = time.perf_counter()
                 new_value = await self._check_power_status()
+                check_latency = time.perf_counter() - check_started
                 now_iso = datetime.now(timezone.utc).isoformat()
 
                 if self._state is None:
@@ -110,6 +115,7 @@ class SvitloBot:
                     self._save_state()
                     logging.info("Initial power state: %s", new_value)
                     self._service_health.record_success("power_check", note=f"initial:{new_value}")
+                    self._record_power_analytics("initial", state=new_value, latency_seconds=check_latency)
                 elif new_value != self._state.value:
                     previous_state = self._state
                     previous = previous_state.value
@@ -132,6 +138,13 @@ class SvitloBot:
                         self._state.transition_message_ids = message_ids
                         self._save_state()
                         self._service_health.record_success("power_state_change", note=f"{previous}->{new_value}")
+                        self._record_power_analytics(
+                            "transition",
+                            state=new_value,
+                            previous_state=previous,
+                            latency_seconds=check_latency,
+                            suppressed_short_outage=False,
+                        )
                     elif previous == "OFF" and new_value == "ON":
                         outage_seconds = self._duration_seconds(previous_state.changed_at, now_iso)
                         if outage_seconds is not None and outage_seconds < IGNORE_OUTAGE_SECONDS:
@@ -150,6 +163,13 @@ class SvitloBot:
                             )
                             self._save_state()
                             self._service_health.record_success("power_state_change", note="ignored_short_outage")
+                            self._record_power_analytics(
+                                "transition",
+                                state=new_value,
+                                previous_state=previous,
+                                latency_seconds=check_latency,
+                                suppressed_short_outage=True,
+                            )
                         else:
                             self._state = PowerState(value="ON", updated_at=now_iso, changed_at=now_iso)
                             self._save_state()
@@ -161,6 +181,13 @@ class SvitloBot:
                                 previous_duration,
                             )
                             self._service_health.record_success("power_state_change", note=f"{previous}->{new_value}")
+                            self._record_power_analytics(
+                                "transition",
+                                state=new_value,
+                                previous_state=previous,
+                                latency_seconds=check_latency,
+                                suppressed_short_outage=False,
+                            )
                     else:
                         self._state = PowerState(value=new_value, updated_at=now_iso, changed_at=now_iso)
                         self._save_state()
@@ -172,17 +199,60 @@ class SvitloBot:
                             previous_duration,
                         )
                         self._service_health.record_success("power_state_change", note=f"{previous}->{new_value}")
+                        self._record_power_analytics(
+                            "transition",
+                            state=new_value,
+                            previous_state=previous,
+                            latency_seconds=check_latency,
+                            suppressed_short_outage=False,
+                        )
                 else:
                     self._state.updated_at = now_iso
                     self._save_state()
                     self._service_health.record_success("power_check", note=f"unchanged:{new_value}")
+                    self._record_power_analytics("unchanged", state=new_value, latency_seconds=check_latency)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logging.exception("Unexpected monitor loop error")
                 self._service_health.record_failure("power_check", "monitor_loop_error")
+                self._record_power_analytics("failed", state="UNKNOWN")
 
             await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+
+    def _record_power_analytics(
+        self,
+        event: str,
+        *,
+        state: str,
+        previous_state: str = "",
+        latency_seconds: Optional[float] = None,
+        suppressed_short_outage: bool = False,
+    ) -> None:
+        try:
+            payload = {
+                "event": event,
+                "state": state,
+                "previous_state": previous_state,
+                "latency_seconds": round(float(latency_seconds), 6) if latency_seconds is not None else None,
+                "suppressed_short_outage": bool(suppressed_short_outage),
+                "subscriber_count": len(self._subscribers),
+            }
+            self._analytics_sink.append_event("svitlo_power", payload)
+            self._analytics_sink.add_daily_counters(
+                "svitlo_power",
+                dimensions={"event": event, "state": state},
+                counters={
+                    "checks": 1,
+                    "transitions": 1 if event == "transition" else 0,
+                    "suppressed_short_outages": 1 if suppressed_short_outage else 0,
+                    "latency_seconds": float(latency_seconds or 0),
+                },
+            )
+        except Exception:
+            # Electricity monitoring should be more reliable than its diagnostics; a
+            # telemetry write failure must not suppress state-change notifications.
+            return
 
     async def _check_power_status(self) -> str:
         try:

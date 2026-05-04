@@ -14,6 +14,7 @@ from telegram import Update
 from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from helpers.analytics_events import AnalyticsSink
 from helpers.runtime_paths import RUNTIME_JSON_DIR, ensure_runtime_dirs
 from helpers.process_pool import run_cpu_bound
 from useful_bot.exchange_rate_image import render_exchange_rate_card
@@ -49,13 +50,14 @@ class RateSnapshot:
 class ExchangeRateHelper:
     helper_name = "Exchange Rate Helper"
 
-    def __init__(self, chat_id: int) -> None:
+    def __init__(self, chat_id: int, *, analytics_sink: Optional[AnalyticsSink] = None) -> None:
         ensure_runtime_dirs()
         self._chat_id = chat_id
         self._state = self._load_state()
         self._lock = asyncio.Lock()
         self._monitor_task: Optional[asyncio.Task] = None
         self._http_session: Optional[aiohttp.ClientSession] = None
+        self._analytics_sink = analytics_sink or AnalyticsSink()
 
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CommandHandler("exchange_status", self.status_command))
@@ -122,6 +124,7 @@ class ExchangeRateHelper:
             if auto_send_bucket is not None and self._state.get("last_auto_sent_bucket") == auto_send_bucket:
                 if service_health is not None:
                     service_health.record_success("exchange_rate_check", note=f"{reason}:already_sent_this_hour")
+                self._record_exchange_analytics("skipped", reason=reason, skip_reason="already_sent_this_hour")
                 return False
             try:
                 snapshot = await self._fetch_snapshot()
@@ -129,6 +132,7 @@ class ExchangeRateHelper:
                 logging.exception("Could not fetch/parse exchange rates from Minfin")
                 if service_health is not None:
                     service_health.record_failure("exchange_rate_check", "fetch_failed")
+                self._record_exchange_analytics("failed", reason=reason, skip_reason="fetch_failed")
                 return False
 
             last_snapshot_data = self._state.get("last_snapshot")
@@ -150,6 +154,7 @@ class ExchangeRateHelper:
             if not changed:
                 if service_health is not None:
                     service_health.record_success("exchange_rate_check", note=f"{reason}:no_change")
+                self._record_exchange_analytics("skipped", snapshot=snapshot, reason=reason, skip_reason="no_change")
                 return False
 
             history = self._state.get("history", [])
@@ -184,6 +189,7 @@ class ExchangeRateHelper:
                 logging.error("Could not send exchange-rate update to Telegram; will retry on next check.")
                 if service_health is not None:
                     service_health.record_failure("exchange_rate_check", "telegram_send_failed")
+                self._record_exchange_analytics("failed", snapshot=snapshot, reason=reason, skip_reason="telegram_send_failed")
                 return False
 
             # The presenter already computed the exact snapshot-derived history row used by
@@ -197,7 +203,41 @@ class ExchangeRateHelper:
             self._save_state()
             if service_health is not None:
                 service_health.record_success("exchange_rate_check", note=reason)
+            self._record_exchange_analytics("sent", snapshot=snapshot, reason=reason)
             return True
+
+    def _record_exchange_analytics(
+        self,
+        event: str,
+        *,
+        snapshot: Optional[RateSnapshot] = None,
+        reason: str = "",
+        skip_reason: str = "",
+    ) -> None:
+        try:
+            payload: dict[str, Any] = {"event": event, "reason": reason}
+            if skip_reason:
+                payload["skip_reason"] = skip_reason
+            if snapshot is not None:
+                payload.update(
+                    {
+                        "source_date": snapshot.source_date,
+                        "usd_buy": snapshot.usd_buy,
+                        "usd_sell": snapshot.usd_sell,
+                        "eur_buy": snapshot.eur_buy,
+                        "eur_sell": snapshot.eur_sell,
+                    }
+                )
+            self._analytics_sink.append_event("exchange_rate_check", payload)
+            self._analytics_sink.add_daily_counters(
+                "exchange_rate_checks",
+                dimensions={"event": event, "reason": reason or "unknown"},
+                counters={"checks": 1, "sent": 1 if event == "sent" else 0, "failures": 1 if event == "failed" else 0},
+            )
+        except Exception:
+            # Exchange analytics is diagnostic-only; rate checks and Telegram delivery must
+            # continue even if the runtime analytics file is temporarily unavailable.
+            return
 
     async def _fetch_snapshot(self) -> RateSnapshot:
         session = await self._get_http_session()
