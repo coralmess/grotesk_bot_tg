@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Generic, Optional, Protocol, Sequence, TypeVar
 
+from helpers.analytics_events import AnalyticsSink, fingerprint_url, stable_hash
 from helpers.marketplace_core import MarketplaceItem, SourceStats, duplicate_key
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 
@@ -104,6 +105,7 @@ async def process_marketplace_items(
     build_message: Callable[[ItemT, Optional[Dict[str, Any]], str], str],
     send_item: Callable[[ItemT, str, str], Awaitable[bool]],
     hydrate_from_previous: Optional[Callable[[ItemT, Optional[Dict[str, Any]]], None]] = None,
+    analytics_sink: Optional[AnalyticsSink] = None,
     logger=None,
 ) -> PipelineStats:
     # This shared pipeline was introduced to make OLX and SHAFA follow the exact same
@@ -156,6 +158,14 @@ async def process_marketplace_items(
         decision = decide_item(item, previous)
         if decision.persist_without_send:
             stats.total_persisted_without_send += 1
+            _record_item_analytics(
+                analytics_sink,
+                event="persist_without_send",
+                source_kind=source_kind,
+                source_name=source_name,
+                item=item,
+                previous=previous,
+            )
             persist_only_updates.append(ItemUpdate(item=item, touch_last_sent=False))
             continue
         if not decision.send_notification:
@@ -175,6 +185,14 @@ async def process_marketplace_items(
         if decision.is_new_item:
             stats.total_new += 1
         stats.total_send_candidates += 1
+        _record_item_analytics(
+            analytics_sink,
+            event="send_candidate",
+            source_kind=source_kind,
+            source_name=source_name,
+            item=item,
+            previous=previous,
+        )
         send_candidates.append((item, previous))
 
     if persist_only_updates:
@@ -189,10 +207,34 @@ async def process_marketplace_items(
             sent = bool(await send_item(item, build_message(item, previous, source_name), source_name))
             if sent:
                 await repository.mark_notification_sent(item, source_name)
+                _record_item_analytics(
+                    analytics_sink,
+                    event="sent",
+                    source_kind=source_kind,
+                    source_name=source_name,
+                    item=item,
+                    previous=previous,
+                )
             else:
                 await repository.release_notification_claim(item, source_name)
+                _record_item_analytics(
+                    analytics_sink,
+                    event="send_failed",
+                    source_kind=source_kind,
+                    source_name=source_name,
+                    item=item,
+                    previous=previous,
+                )
         except Exception:
             await repository.release_notification_claim(item, source_name)
+            _record_item_analytics(
+                analytics_sink,
+                event="send_exception",
+                source_kind=source_kind,
+                source_name=source_name,
+                item=item,
+                previous=previous,
+            )
             raise
         finally:
             # Persisting in finally keeps item state aligned even when Telegram delivery is
@@ -210,3 +252,37 @@ async def process_marketplace_items(
         else:
             stats.total_send_failed += 1
     return stats
+
+
+def _record_item_analytics(
+    analytics_sink: Optional[AnalyticsSink],
+    *,
+    event: str,
+    source_kind: str,
+    source_name: str,
+    item: MarketplaceItem,
+    previous: Optional[Dict[str, Any]],
+) -> None:
+    if analytics_sink is None:
+        return
+    try:
+        payload: dict[str, Any] = {
+            "event": event,
+            "source_kind": source_kind,
+            "source_name": source_name,
+            "item_id_hash": stable_hash(item.id),
+            "name_hash": stable_hash(item.name),
+            "price_int": item.price_int,
+            "had_previous": previous is not None,
+        }
+        payload.update(fingerprint_url(item.link))
+        analytics_sink.append_event("marketplace_item", payload)
+        analytics_sink.add_daily_counters(
+            "marketplace_items",
+            dimensions={"source_kind": source_kind, "source_name": source_name, "event": event},
+            counters={"items": 1},
+        )
+    except Exception:
+        # Marketplace notification flow must never fail because the optional analytics
+        # ledger cannot be written, especially during DB locks or disk-pressure debugging.
+        return

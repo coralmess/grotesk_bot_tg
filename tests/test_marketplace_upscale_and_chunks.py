@@ -1,4 +1,7 @@
 import io
+import json
+import tempfile
+from pathlib import Path
 import asyncio
 import unittest
 from unittest.mock import patch
@@ -6,7 +9,8 @@ from unittest.mock import patch
 from PIL import Image
 from bs4 import BeautifulSoup
 
-from helpers.image_pipeline import encode_jpeg_for_telegram, upscale_image_bytes_for_telegram_sync
+from helpers.analytics_events import AnalyticsSink
+from helpers.image_pipeline import encode_jpeg_for_telegram, send_remote_photo_with_fallback, upscale_image_bytes_for_telegram_sync
 from olx_scraper import _extract_first_image_from_card, _next_chunk_pause, _source_chunks, fetch_first_image_best
 
 
@@ -56,6 +60,72 @@ class MarketplaceImageUpscaleTests(unittest.TestCase):
         self.assertIsNotNone(result)
         with Image.open(io.BytesIO(result)) as im:
             self.assertEqual(im.size, (1540, 1154))
+
+    def test_upscale_records_image_analytics(self):
+        data = self._image_bytes(100, 80)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sink = AnalyticsSink(Path(tmp_dir), now_func=lambda: "2026-05-04T13:00:00Z")
+            result = upscale_image_bytes_for_telegram_sync(
+                data,
+                min_upscale_dim=1500,
+                upscale_factors=(2.0,),
+                analytics_sink=sink,
+                source_kind="olx",
+                source_name="OLX Source",
+                image_url="https://example.com/photo.jpg?token=hidden",
+            )
+
+            self.assertIsNotNone(result)
+            event_path = Path(tmp_dir) / "events" / "2026-05-04.image_pipeline.jsonl"
+            event = json.loads(event_path.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(event["source_kind"], "olx")
+            self.assertEqual(event["source_name"], "OLX Source")
+            self.assertEqual(event["input_width"], 100)
+            self.assertEqual(event["output_width"], 200)
+            self.assertEqual(event["upscale_factor"], 2.0)
+            self.assertEqual(event["url_host"], "example.com")
+            self.assertNotIn("hidden", json.dumps(event))
+
+    def test_send_remote_photo_records_text_fallback_when_no_image(self):
+        async def _run():
+            sent_messages = []
+
+            async def send_message(_bot, _chat_id, text):
+                sent_messages.append(text)
+                return True
+
+            async def send_photo_by_bytes(_bot, _chat_id, _photo_bytes, _caption):
+                return True
+
+            async def run_cpu_bound_fn(*args, **kwargs):
+                return None
+
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                sink = AnalyticsSink(Path(tmp_dir), now_func=lambda: "2026-05-04T13:01:00Z")
+                result = await send_remote_photo_with_fallback(
+                    bot=object(),
+                    chat_id="1",
+                    caption="caption",
+                    image_url=None,
+                    is_valid_image_url=lambda url: False,
+                    download_bytes=lambda url: None,
+                    send_message=send_message,
+                    send_photo_by_bytes=send_photo_by_bytes,
+                    run_cpu_bound_fn=run_cpu_bound_fn,
+                    logger=None,
+                    analytics_sink=sink,
+                    source_kind="shafa",
+                    source_name="SHAFA Source",
+                )
+
+                self.assertTrue(result)
+                event = json.loads((Path(tmp_dir) / "events" / "2026-05-04.image_pipeline.jsonl").read_text(encoding="utf-8").splitlines()[0])
+                self.assertEqual(event["event"], "text_fallback")
+                self.assertEqual(event["fallback_reason"], "invalid_or_missing_url")
+                self.assertEqual(sent_messages, ["caption"])
+
+        asyncio.run(_run())
 
     def test_marketplace_jpeg_encoder_uses_fixed_quality_98(self):
         qualities = []

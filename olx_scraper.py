@@ -27,6 +27,7 @@ from config import (
     MARKET_IMAGE_UPSCALE_FACTORS,
 )
 from config_olx_urls import OLX_URLS
+from helpers.analytics_events import AnalyticsSink
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
 from helpers.marketplace_core import (
     MarketplaceItem,
@@ -71,6 +72,7 @@ _HTTP_IMAGE_SEMAPHORE = asyncio.Semaphore(OLX_HTTP_IMAGE_CONCURRENCY)
 _SEND_SEMAPHORE = asyncio.Semaphore(OLX_SEND_CONCURRENCY)
 _UPSCALE_SEMAPHORE = asyncio.Semaphore(OLX_UPSCALE_CONCURRENCY)
 _http_session: Optional[aiohttp.ClientSession] = None
+_ANALYTICS_SINK = AnalyticsSink()
 MIN_PRICE_DIFF = 50
 MIN_PRICE_DIFF_PERCENT = 20.0
 NOTIFICATION_CLAIM_STALE_MINUTES = 120
@@ -488,6 +490,8 @@ send_photo_with_upscale = build_media_sender(
     min_upscale_dim=MARKET_IMAGE_UPSCALE_MIN_DIM,
     max_dim=MARKET_IMAGE_UPSCALE_MAX_DIM,
     upscale_factors=MARKET_IMAGE_UPSCALE_FACTORS,
+    source_kind="olx",
+    analytics_sink=_ANALYTICS_SINK,
 )
 
 DB_FILE = OLX_ITEMS_DB_FILE
@@ -1148,7 +1152,7 @@ async def run_olx_scraper():
             if not image_url:
                 logger.warning("No image available for item %s", item.id)
                 total_without_images += 1
-            sent = await send_photo_with_upscale(bot, default_chat, text, image_url)
+            sent = await send_photo_with_upscale(bot, default_chat, text, image_url, source_name=source_name)
             await asyncio.sleep(0.2)
             return bool(sent)
         except RetryAfter as exc:
@@ -1216,6 +1220,7 @@ async def run_olx_scraper():
                 decide_item=_decide_olx_item,
                 build_message=build_message,
                 send_item=_send_item,
+                analytics_sink=_ANALYTICS_SINK,
                 logger=logger,
             )
             pipeline_totals.add(pipeline_stats)

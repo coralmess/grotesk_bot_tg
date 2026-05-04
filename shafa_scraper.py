@@ -25,6 +25,7 @@ from config import (
     MARKET_IMAGE_UPSCALE_FACTORS,
 )
 from config_shafa_urls import SHAFA_URLS
+from helpers.analytics_events import AnalyticsSink
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
 from helpers.marketplace_core import (
     MarketplaceItem,
@@ -78,6 +79,7 @@ if not PLAYWRIGHT_AVAILABLE:
     logger.warning("Playwright is not installed. Run: pip install playwright && playwright install chromium")
 
 BASE_SHAFA = "https://shafa.ua"
+_ANALYTICS_SINK = AnalyticsSink()
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
 _HTTP_SEMAPHORE = asyncio.Semaphore(SHAFA_HTTP_CONCURRENCY)
 _SEND_SEMAPHORE = asyncio.Semaphore(SHAFA_SEND_CONCURRENCY)
@@ -507,6 +509,8 @@ send_photo_with_upscale = build_media_sender(
     min_upscale_dim=MARKET_IMAGE_UPSCALE_MIN_DIM,
     max_dim=MARKET_IMAGE_UPSCALE_MAX_DIM,
     upscale_factors=MARKET_IMAGE_UPSCALE_FACTORS,
+    source_kind="shafa",
+    analytics_sink=_ANALYTICS_SINK,
 )
 
 DB_FILE = SHAFA_ITEMS_DB_FILE
@@ -892,7 +896,13 @@ async def run_shafa_scraper():
 
     async def _send_item(item: ShafaItem, text: str, source_name: str) -> bool:
         try:
-            sent = await send_photo_with_upscale(bot, default_chat, text, item.first_image_url)
+            sent = await send_photo_with_upscale(
+                bot,
+                default_chat,
+                text,
+                item.first_image_url,
+                source_name=source_name,
+            )
             return bool(sent)
         except RetryAfter as exc:
             logger.warning("Telegram rate limit hit; waiting %ss", exc.retry_after)
@@ -956,6 +966,7 @@ async def run_shafa_scraper():
                 build_message=build_message,
                 send_item=_send_item,
                 hydrate_from_previous=_hydrate_shafa_item,
+                analytics_sink=_ANALYTICS_SINK,
                 logger=logger,
             )
             total_new += pipeline_stats.total_new

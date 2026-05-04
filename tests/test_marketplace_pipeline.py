@@ -1,6 +1,10 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from dataclasses import dataclass
 
+from helpers.analytics_events import AnalyticsSink
 from helpers.marketplace_core import MarketplaceItem
 from helpers.marketplace_pipeline import (
     ItemDecision,
@@ -137,6 +141,40 @@ class MarketplacePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(repository.marked_sent, [])
         self.assertEqual(repository.released, [("3", "OLX")])
         self.assertIn(("3", False, "OLX"), repository.persisted)
+
+    async def test_process_marketplace_items_records_lifecycle_analytics(self) -> None:
+        repository = DummyRepository()
+        duplicate_tracker = RunDuplicateTracker[DummyItem]()
+        item = DummyItem(id="analytics-1", name="Analytics Item", link="https://example.com/item?secret=1", price_text="100 ???", price_int=100)
+
+        async def _send_item(item, text, source_name):
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sink = AnalyticsSink(Path(tmp_dir), now_func=lambda: "2026-05-04T12:00:00Z")
+            stats = await process_marketplace_items(
+                source_kind="olx",
+                source_name="OLX Source",
+                items=[item],
+                repository=repository,
+                duplicate_tracker=duplicate_tracker,
+                decide_item=lambda current, previous: ItemDecision(send_notification=True, is_new_item=True),
+                build_message=lambda current, previous, source_name: "message",
+                send_item=_send_item,
+                analytics_sink=sink,
+            )
+
+            self.assertEqual(stats.total_sent, 1)
+            event_path = Path(tmp_dir) / "events" / "2026-05-04.marketplace_item.jsonl"
+            events = [json.loads(line) for line in event_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([event["event"] for event in events], ["send_candidate", "sent"])
+            self.assertEqual(events[0]["source_kind"], "olx")
+            self.assertEqual(events[0]["source_name"], "OLX Source")
+            self.assertEqual(events[0]["item_id_hash"][:7], "sha256:")
+            self.assertNotIn("secret", json.dumps(events))
+
+            daily = json.loads((Path(tmp_dir) / "daily" / "2026-05-04.marketplace_items.json").read_text(encoding="utf-8"))
+            self.assertEqual(daily["groups"]["event=sent|source_kind=olx|source_name=OLX Source"]["counters"]["items"], 1)
 
     async def test_process_marketplace_items_skips_unsubscribed(self) -> None:
         repository = DummyRepository()

@@ -10,6 +10,7 @@ import aiohttp
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter, TimedOut
 
+from helpers.analytics_events import AnalyticsSink
 from helpers.image_pipeline import send_remote_photo_with_fallback
 
 
@@ -125,8 +126,16 @@ def build_media_sender(
     min_upscale_dim: int = 1500,
     max_dim: int = 5000,
     upscale_factors: Iterable[float] = (2.0,),
+    source_kind: str = "",
+    analytics_sink: Optional[AnalyticsSink] = None,
 ):
-    async def send_photo_with_upscale(bot, chat_id: str, caption: str, image_url: Optional[str]) -> bool:
+    async def send_photo_with_upscale(
+        bot,
+        chat_id: str,
+        caption: str,
+        image_url: Optional[str],
+        source_name: str = "",
+    ) -> bool:
         # The image pipeline stays centralized so marketplace send behavior stays identical
         # across OLX and SHAFA even when transport or image fallback rules evolve.
         return await send_remote_photo_with_fallback(
@@ -143,6 +152,9 @@ def build_media_sender(
             min_upscale_dim=min_upscale_dim,
             max_dim=max_dim,
             upscale_factors=upscale_factors,
+            analytics_sink=analytics_sink,
+            source_kind=source_kind,
+            source_name=source_name,
         )
 
     return send_photo_with_upscale

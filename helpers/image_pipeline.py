@@ -8,6 +8,8 @@ from typing import Awaitable, Callable, Iterable, Optional
 import requests
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
+from helpers.analytics_events import AnalyticsSink, fingerprint_url
+
 _EDSR_LOCK = threading.Lock()
 _EDSR_SUPERRES = None
 _EDSR_MODEL_PATH_LOADED: Optional[str] = None
@@ -292,6 +294,10 @@ def upscale_image_bytes_for_telegram_sync(
     min_upscale_dim: int = 1500,
     upscale_factors: Iterable[float] = (2.0,),
     logger=None,
+    analytics_sink: Optional[AnalyticsSink] = None,
+    source_kind: str = "",
+    source_name: str = "",
+    image_url: Optional[str] = None,
 ) -> Optional[bytes]:
     try:
         im = Image.open(io.BytesIO(img_bytes))
@@ -299,6 +305,19 @@ def upscale_image_bytes_for_telegram_sync(
             im = im.convert("RGB")
         w, h = im.size
         if min(w, h) >= min_upscale_dim:
+            _record_image_analytics(
+                analytics_sink,
+                event="skip_upscale",
+                source_kind=source_kind,
+                source_name=source_name,
+                image_url=image_url,
+                input_bytes=len(img_bytes),
+                input_size=(w, h),
+                output_bytes=len(img_bytes),
+                output_size=(w, h),
+                upscale_factor=1.0,
+                reason="large_enough",
+            )
             return None
 
         # Try the largest upscale factors first; for marketplace photos the best result is
@@ -316,6 +335,18 @@ def upscale_image_bytes_for_telegram_sync(
             im_up = enhance_marketplace_upscale(im_up)
             data = encode_jpeg_for_telegram(im_up)
             if data is not None:
+                _record_image_analytics(
+                    analytics_sink,
+                    event="upscaled",
+                    source_kind=source_kind,
+                    source_name=source_name,
+                    image_url=image_url,
+                    input_bytes=len(img_bytes),
+                    input_size=(w, h),
+                    output_bytes=len(data),
+                    output_size=im_up.size,
+                    upscale_factor=factor,
+                )
                 return data
 
             trial = im_up
@@ -329,11 +360,43 @@ def upscale_image_bytes_for_telegram_sync(
                     continue
                 data = encode_jpeg_for_telegram(trial)
                 if data is not None:
+                    _record_image_analytics(
+                        analytics_sink,
+                        event="upscaled",
+                        source_kind=source_kind,
+                        source_name=source_name,
+                        image_url=image_url,
+                        input_bytes=len(img_bytes),
+                        input_size=(w, h),
+                        output_bytes=len(data),
+                        output_size=trial.size,
+                        upscale_factor=factor,
+                        reason="downscaled_to_fit",
+                    )
                     return data
+        _record_image_analytics(
+            analytics_sink,
+            event="upscale_failed",
+            source_kind=source_kind,
+            source_name=source_name,
+            image_url=image_url,
+            input_bytes=len(img_bytes),
+            input_size=(w, h),
+            reason="no_factor_fit",
+        )
         return None
     except Exception as exc:
         if logger is not None:
             logger.error(f"Image upscale failed: {exc}")
+        _record_image_analytics(
+            analytics_sink,
+            event="upscale_exception",
+            source_kind=source_kind,
+            source_name=source_name,
+            image_url=image_url,
+            input_bytes=len(img_bytes) if img_bytes else 0,
+            reason=str(exc)[:120],
+        )
         return None
 
 
@@ -352,17 +415,36 @@ async def send_remote_photo_with_fallback(
     min_upscale_dim: int = 1500,
     max_dim: int = 5000,
     upscale_factors: Iterable[float] = (2.0,),
+    analytics_sink: Optional[AnalyticsSink] = None,
+    source_kind: str = "",
+    source_name: str = "",
 ) -> bool:
     # OLX and SHAFA ended up with almost identical send flows: download remote image,
     # optionally upscale it for Telegram, then fall back to plain text on failure.
     # Keeping that orchestration here avoids the two scrapers drifting again.
     if not image_url or not is_valid_image_url(image_url):
+        _record_image_analytics(
+            analytics_sink,
+            event="text_fallback",
+            source_kind=source_kind,
+            source_name=source_name,
+            image_url=image_url,
+            reason="invalid_or_missing_url",
+        )
         result = await send_message(bot, chat_id, caption)
         return bool(result)
 
     raw = await download_bytes(image_url)
     if not raw:
         logger.warning("Photo not downloaded; sending text")
+        _record_image_analytics(
+            analytics_sink,
+            event="text_fallback",
+            source_kind=source_kind,
+            source_name=source_name,
+            image_url=image_url,
+            reason="download_failed",
+        )
         result = await send_message(bot, chat_id, caption)
         return bool(result)
 
@@ -375,11 +457,124 @@ async def send_remote_photo_with_fallback(
         logger=logger,
     )
     photo_bytes = photo_bytes or raw
+    _record_image_send_analytics(
+        analytics_sink,
+        source_kind=source_kind,
+        source_name=source_name,
+        image_url=image_url,
+        raw=raw,
+        photo_bytes=photo_bytes,
+        upscaled=photo_bytes is not raw,
+    )
 
     result = await send_photo_by_bytes(bot, chat_id, photo_bytes, caption)
     if result is not None:
         return bool(result)
 
     logger.warning("Photo not sent; sending text")
+    _record_image_analytics(
+        analytics_sink,
+        event="text_fallback",
+        source_kind=source_kind,
+        source_name=source_name,
+        image_url=image_url,
+        input_bytes=len(raw),
+        output_bytes=len(photo_bytes),
+        reason="telegram_photo_send_failed",
+    )
     result = await send_message(bot, chat_id, caption)
     return bool(result)
+
+
+def _record_image_send_analytics(
+    analytics_sink: Optional[AnalyticsSink],
+    *,
+    source_kind: str,
+    source_name: str,
+    image_url: Optional[str],
+    raw: bytes,
+    photo_bytes: bytes,
+    upscaled: bool,
+) -> None:
+    input_size = _image_size(raw)
+    output_size = _image_size(photo_bytes)
+    _record_image_analytics(
+        analytics_sink,
+        event="photo_prepared",
+        source_kind=source_kind,
+        source_name=source_name,
+        image_url=image_url,
+        input_bytes=len(raw),
+        output_bytes=len(photo_bytes),
+        input_size=input_size,
+        output_size=output_size,
+        upscale_factor=_factor_from_sizes(input_size, output_size),
+        reason="upscaled" if upscaled else "raw",
+    )
+
+
+def _record_image_analytics(
+    analytics_sink: Optional[AnalyticsSink],
+    *,
+    event: str,
+    source_kind: str = "",
+    source_name: str = "",
+    image_url: Optional[str] = None,
+    input_bytes: int = 0,
+    output_bytes: int = 0,
+    input_size: tuple[int, int] | None = None,
+    output_size: tuple[int, int] | None = None,
+    upscale_factor: float | None = None,
+    reason: str = "",
+) -> None:
+    if analytics_sink is None:
+        return
+    try:
+        payload: dict[str, object] = {
+            "event": event,
+            "source_kind": source_kind,
+            "source_name": source_name,
+            "input_bytes": int(input_bytes or 0),
+            "output_bytes": int(output_bytes or 0),
+        }
+        if input_size:
+            payload["input_width"], payload["input_height"] = input_size
+        if output_size:
+            payload["output_width"], payload["output_height"] = output_size
+        if upscale_factor is not None:
+            payload["upscale_factor"] = round(float(upscale_factor), 3)
+        if reason:
+            payload["reason"] = reason[:120]
+            payload["fallback_reason"] = reason[:120]
+        payload.update(fingerprint_url(image_url))
+        analytics_sink.append_event("image_pipeline", payload)
+        analytics_sink.add_daily_counters(
+            "image_pipeline",
+            dimensions={"source_kind": source_kind or "unknown", "event": event},
+            counters={
+                "images": 1,
+                "input_bytes": int(input_bytes or 0),
+                "output_bytes": int(output_bytes or 0),
+            },
+        )
+    except Exception:
+        return
+
+
+def _image_size(data: bytes) -> tuple[int, int] | None:
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            return image.size
+    except Exception:
+        return None
+
+
+def _factor_from_sizes(
+    input_size: tuple[int, int] | None,
+    output_size: tuple[int, int] | None,
+) -> float | None:
+    if not input_size or not output_size:
+        return None
+    if input_size[0] <= 0 or input_size[1] <= 0:
+        return None
+    return max(output_size[0] / input_size[0], output_size[1] / input_size[1])
