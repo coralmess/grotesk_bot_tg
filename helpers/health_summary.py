@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from helpers.analytics_summary import build_analytics_daily_summary, write_analytics_summary
 from helpers.runtime_paths import (
     LAST_RUNS_JSON_FILE,
     MARKET_OLX_RUN_STATUS_FILE,
@@ -50,6 +51,7 @@ def build_health_summary_payload() -> dict[str, Any]:
     payload = {
         "generated_at_utc": _iso_now(),
         "services": services,
+        "analytics": build_analytics_daily_summary(),
         "lyst": _read_json(LAST_RUNS_JSON_FILE) or {},
         "market": {
             "olx": _read_json(MARKET_OLX_RUN_STATUS_FILE) or {},
@@ -91,6 +93,7 @@ def render_health_summary_text(payload: dict[str, Any]) -> str:
 
 def write_health_summary_files() -> dict[str, Any]:
     payload = build_health_summary_payload()
+    write_analytics_summary()
     # Keep both machine-readable and grep-friendly outputs so the instance can use the
     # same source for bots, shell checks, or future lightweight dashboards.
     SUMMARY_JSON_FILE.write_text(
