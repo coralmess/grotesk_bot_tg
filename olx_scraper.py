@@ -547,7 +547,7 @@ async def filter_items_for_source(source_name: str, items: List[OlxItem]) -> Tup
         detail_text = await fetch_item_description_text(item.link)
         if should_skip_item_for_source_filter(source_name, item, detail_text):
             skipped += 1
-            logger.info("Skipping OLX style-tag spam for %s: %s", source_name, item.name)
+            logger.debug("Skipping OLX style-tag spam for %s: %s", source_name, item.name)
             continue
         kept.append(item)
     return kept, skipped
