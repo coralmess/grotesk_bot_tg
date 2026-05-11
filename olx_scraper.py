@@ -104,6 +104,10 @@ OLX_RESULT_BOUNDARY_CLASSES = {
     "css-wsrviy",  # OLX separator class used before April 2026.
     "css-133tiyu",  # OLX separator class observed after recommendation layout update.
 }
+OLX_SOURCE_DETAIL_FILTER_ALIASES = {
+    "ann demeulemeester": ("ann demeulemeester", "ann d"),
+    "carol christian poell": ("carol christian poell", "ccp"),
+}
 
 
 def _source_chunks(sources: List[Dict[str, Any]], chunk_size: int) -> List[List[Dict[str, Any]]]:
@@ -149,9 +153,38 @@ def _normalize_search_text(text: str) -> str:
     return " ".join(normalized_values).lower()
 
 
+def _compact_brand_text(text: str) -> str:
+    return re.sub(r"[^0-9a-zа-яіїєґ]+", "", (text or "").casefold())
+
+
 def _contains_no_listings(text: str) -> bool:
     normalized = _normalize_search_text(text)
     return any(pattern in normalized for pattern in NO_LISTINGS_PATTERNS)
+
+
+def _source_filter_aliases(source_name: str) -> tuple[str, ...]:
+    return OLX_SOURCE_DETAIL_FILTER_ALIASES.get(" ".join((source_name or "").split()).casefold(), ())
+
+
+def _item_title_matches_source(source_name: str, item: "OlxItem") -> bool:
+    compact_name = _compact_brand_text(item.name)
+    return any(_compact_brand_text(alias) in compact_name for alias in _source_filter_aliases(source_name))
+
+
+def _detail_text_has_spam_brand_marker(detail_text: str) -> bool:
+    compact = _compact_brand_text(detail_text)
+    return "enfantsrichesdeprimes" in compact or "rickowens" in compact
+
+
+def should_skip_item_for_source_filter(source_name: str, item: "OlxItem", detail_text: str) -> bool:
+    if not _source_filter_aliases(source_name):
+        return False
+    if _item_title_matches_source(source_name, item):
+        return False
+    # These two OLX searches are noisy because sellers mention the target brand only
+    # in long style-tag descriptions. The explicit Rick/ERD markers are checked on
+    # detail text, not on listing text, so normal search cards are not cut broadly.
+    return _detail_text_has_spam_brand_marker(detail_text)
 
 @dataclass
 class OlxItem(MarketplaceItem):
@@ -484,6 +517,40 @@ async def fetch_first_image_best(item_url: str) -> Optional[str]:
     except Exception as e:
         logger.debug(f"Failed to fetch first image from {item_url}: {e}")
         return None
+
+
+def _extract_detail_description_text(html: str) -> str:
+    soup = BeautifulSoup(html or "", _PARSER)
+    if desc := soup.find("div", class_="css-fl29zg"):
+        return desc.get_text(" ", strip=True)
+    return soup.get_text(" ", strip=True)
+
+
+async def fetch_item_description_text(item_url: str) -> str:
+    try:
+        return _extract_detail_description_text(await fetch_html(item_url))
+    except Exception as e:
+        logger.debug("Failed to fetch OLX detail description from %s: %s", item_url, e)
+        return ""
+
+
+async def filter_items_for_source(source_name: str, items: List[OlxItem]) -> Tuple[List[OlxItem], int]:
+    if not _source_filter_aliases(source_name):
+        return items, 0
+
+    kept: List[OlxItem] = []
+    skipped = 0
+    for item in items:
+        if _item_title_matches_source(source_name, item):
+            kept.append(item)
+            continue
+        detail_text = await fetch_item_description_text(item.link)
+        if should_skip_item_for_source_filter(source_name, item, detail_text):
+            skipped += 1
+            logger.info("Skipping OLX style-tag spam for %s: %s", source_name, item.name)
+            continue
+        kept.append(item)
+    return kept, skipped
 
 
 _download_bytes = build_image_downloader(
@@ -1216,6 +1283,10 @@ async def run_olx_scraper():
                 run_stats.record_source(source_name, status="scrape_failed", url=url)
                 run_stats.record_error("scrape_failed", source=source_name)
                 return
+            items, detail_filtered = await filter_items_for_source(source_name, items)
+            if detail_filtered:
+                run_stats.inc("items_skipped_source_filter", detail_filtered)
+                logger.info("OLX source filter skipped %s item(s) for %s", detail_filtered, source_name)
 
             next_streak, next_cycle = finished_source_decision(source_stats.streak, len(items))
             await repository.update_source_stats(url, next_streak, next_cycle)

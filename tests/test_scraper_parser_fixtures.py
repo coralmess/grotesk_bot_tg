@@ -80,6 +80,57 @@ class ScraperParserFixtureTests(unittest.TestCase):
 
         self.assertEqual([olx_scraper.parse_card(card).name for card in cards], ["First real item", "Second real item"])
 
+    def test_olx_ann_demeulemeester_filter_rejects_style_tag_spam(self) -> None:
+        item = olx_scraper.OlxItem(
+            id="spam",
+            name="Number Nine Birds T-Shirt If6was9 ERD Type",
+            link="https://example.com/spam",
+            price_text="2701 грн",
+            price_int=2701,
+        )
+
+        self.assertTrue(
+            olx_scraper.should_skip_item_for_source_filter(
+                "Ann Demeulemeester",
+                item,
+                "Стили под которые подойдет кофта: Rick Owens Style EnfantsRichesDeprimes ERD Style",
+            )
+        )
+
+    def test_olx_ann_demeulemeester_filter_keeps_target_brand_title(self) -> None:
+        item = olx_scraper.OlxItem(
+            id="real",
+            name="Ann Demeulemeester Black Olan Jeans",
+            link="https://example.com/real",
+            price_text="5691 грн",
+            price_int=5691,
+        )
+
+        self.assertFalse(
+            olx_scraper.should_skip_item_for_source_filter(
+                "Ann Demeulemeester",
+                item,
+                "Стили под которые подойдет кофта: Rick Owens Style EnfantsRichesDeprimes ERD Style",
+            )
+        )
+
+    def test_olx_carol_christian_poell_filter_keeps_unrelated_sources(self) -> None:
+        item = olx_scraper.OlxItem(
+            id="rick",
+            name="Rick Owens jeans",
+            link="https://example.com/rick",
+            price_text="1200 грн",
+            price_int=1200,
+        )
+
+        self.assertFalse(
+            olx_scraper.should_skip_item_for_source_filter(
+                "Rick Owens",
+                item,
+                "Description mentions Enfants Riches Deprimes and RickOwens",
+            )
+        )
+
     def test_shafa_fixture_uses_current_sale_price_and_same_anchor_image(self) -> None:
         soup = _fixture_soup("shafa_sale_card.html")
         cards = shafa_scraper.collect_cards(soup)
