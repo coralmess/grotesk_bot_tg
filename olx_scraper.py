@@ -7,6 +7,7 @@ from telegram.error import RetryAfter, TimedOut
 import asyncio, re, sqlite3, aiohttp, random, logging
 import aiosqlite
 from html import escape
+from urllib.parse import parse_qs, urlparse
 from config import (
     TELEGRAM_OLX_BOT_TOKEN,
     DANYLO_DEFAULT_CHAT_ID,
@@ -302,6 +303,18 @@ def _extract_first_image_from_card(card) -> Optional[str]:
     return None
 
 
+def _is_extended_search_link(link: str) -> bool:
+    try:
+        reason_values = parse_qs(urlparse(link).query).get("reason", [])
+    except Exception:
+        return False
+    # OLX appends these reason parameters to broad-category recommendations
+    # rendered after "Більше результатів ...". The DOM separator should stop us
+    # before those cards, but this link-level guard prevents noisy false alerts
+    # if OLX changes or temporarily omits the separator again.
+    return any(str(value).startswith("extended_search") for value in reason_values)
+
+
 def parse_card(card) -> Optional[OlxItem]:
     """Parse OLX card element into OlxItem."""
     try:
@@ -311,6 +324,8 @@ def parse_card(card) -> Optional[OlxItem]:
         if not (href := a["href"] if a else None):
             return None
         link = href if href.startswith("http") else f"{BASE_OLX}{href}"
+        if _is_extended_search_link(link):
+            return None
         name = _extract_name_from_card(card, title_anchor)
         price_el = card.find(attrs={"data-testid": "ad-price"})
         price_text, price_int = normalize_price(price_el.get_text(" ", strip=True) if price_el else "")

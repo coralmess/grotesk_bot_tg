@@ -39,6 +39,47 @@ class ScraperParserFixtureTests(unittest.TestCase):
         self.assertEqual(item.name, "Real search item")
         self.assertNotIn("Recommended unrelated item", cards[0].get_text(" ", strip=True))
 
+    def test_olx_extended_search_card_is_rejected_even_if_boundary_is_missing(self) -> None:
+        soup = BeautifulSoup(
+            """
+            <div data-testid="l-card">
+              <a href="/d/uk/obyavlenie/orciani-bag-IDbad.html?reason=extended_search_extended_category&search_reason=search%7Corganic">
+                Orciani unrelated category recommendation
+              </a>
+              <p data-testid="ad-price">2 500 грн.</p>
+              <img src="https://img.olx.ua/images/bad.jpg" />
+            </div>
+            """,
+            "lxml",
+        )
+
+        self.assertIsNone(olx_scraper.parse_card(soup.find("div", attrs={"data-testid": "l-card"})))
+
+    def test_olx_save_search_banner_does_not_stop_real_cards_after_it(self) -> None:
+        soup = BeautifulSoup(
+            """
+            <div data-testid="l-card">
+              <a href="/d/uk/obyavlenie/first-real-IDone.html">First real item</a>
+              <p data-testid="ad-price">1 000 грн.</p>
+            </div>
+            <div>
+              <div class="css-1vnmjfl">
+                <p data-nx-name="P3" data-nx-legacy="true">Зберегти параметри пошуку</p>
+                <p data-nx-name="P4" data-nx-legacy="true">Якщо з’являться схожі оголошення, ми повідомимо.</p>
+              </div>
+            </div>
+            <div data-testid="l-card">
+              <a href="/d/uk/obyavlenie/second-real-IDtwo.html">Second real item</a>
+              <p data-testid="ad-price">2 000 грн.</p>
+            </div>
+            """,
+            "lxml",
+        )
+
+        cards = olx_scraper.collect_cards_with_stop(soup)
+
+        self.assertEqual([olx_scraper.parse_card(card).name for card in cards], ["First real item", "Second real item"])
+
     def test_shafa_fixture_uses_current_sale_price_and_same_anchor_image(self) -> None:
         soup = _fixture_soup("shafa_sale_card.html")
         cards = shafa_scraper.collect_cards(soup)
