@@ -59,6 +59,11 @@ MARKET_TELEGRAM_READ_TIMEOUT = float(os.getenv('MARKET_TELEGRAM_READ_TIMEOUT', '
 MARKET_TELEGRAM_WRITE_TIMEOUT = float(os.getenv('MARKET_TELEGRAM_WRITE_TIMEOUT', '30'))
 MARKET_TELEGRAM_POOL_TIMEOUT = float(os.getenv('MARKET_TELEGRAM_POOL_TIMEOUT', '30'))
 MARKET_TELEGRAM_MEDIA_WRITE_TIMEOUT = float(os.getenv('MARKET_TELEGRAM_MEDIA_WRITE_TIMEOUT', '90'))
+# Marketplace notification correctness is more important than delivery speed.
+# Keep a small randomized gap between Telegram API sends so photo uploads cannot
+# pile up, time out ambiguously, and poison the "already sent" ledger.
+MARKET_TELEGRAM_SEND_GAP_MIN_SEC = float(os.getenv('MARKET_TELEGRAM_SEND_GAP_MIN_SEC', '4'))
+MARKET_TELEGRAM_SEND_GAP_MAX_SEC = float(os.getenv('MARKET_TELEGRAM_SEND_GAP_MAX_SEC', '10'))
 BLOCK_RESOURCES = os.getenv('BLOCK_RESOURCES', 'true' if IS_INSTANCE else 'false').strip().lower() in ('1', 'true', 'yes', 'y', 'on')
 # Lyst now prefers the HTTP parser first. It is cheaper, returns images via LD-JSON,
 # and only falls back to Playwright when HTTP truly fails.
@@ -88,7 +93,9 @@ OLX_TASK_CONCURRENCY = int(os.getenv('OLX_TASK_CONCURRENCY', '3' if IS_INSTANCE 
 OLX_HTTP_HTML_CONCURRENCY = int(os.getenv('OLX_HTTP_HTML_CONCURRENCY', '8' if IS_INSTANCE else '10'))
 OLX_HTTP_IMAGE_CONCURRENCY = int(os.getenv('OLX_HTTP_IMAGE_CONCURRENCY', '4' if IS_INSTANCE else '6'))
 OLX_UPSCALE_CONCURRENCY = int(os.getenv('OLX_UPSCALE_CONCURRENCY', '1' if IS_INSTANCE else '2'))
-OLX_SEND_CONCURRENCY = int(os.getenv('OLX_SEND_CONCURRENCY', '2' if IS_INSTANCE else '2'))
+# Telegram delivery is serialized intentionally. Slow accurate delivery is safer
+# than concurrent photo sends that can hit pool/media timeouts under bursts.
+OLX_SEND_CONCURRENCY = int(os.getenv('OLX_SEND_CONCURRENCY', '1'))
 OLX_HTTP_CONNECTOR_LIMIT = int(os.getenv('OLX_HTTP_CONNECTOR_LIMIT', '16' if IS_INSTANCE else '20'))
 # OLX has many more sources than SHAFA. Chunking spreads site requests and image
 # work across time instead of creating one short CPU/network burst.
@@ -98,7 +105,7 @@ OLX_SOURCE_CHUNK_PAUSE_MAX_SEC = float(os.getenv('OLX_SOURCE_CHUNK_PAUSE_MAX_SEC
 
 SHAFA_TASK_CONCURRENCY = int(os.getenv('SHAFA_TASK_CONCURRENCY', '3' if IS_INSTANCE else '3'))
 SHAFA_HTTP_CONCURRENCY = int(os.getenv('SHAFA_HTTP_CONCURRENCY', '8' if IS_INSTANCE else '10'))
-SHAFA_SEND_CONCURRENCY = int(os.getenv('SHAFA_SEND_CONCURRENCY', '2' if IS_INSTANCE else '2'))
+SHAFA_SEND_CONCURRENCY = int(os.getenv('SHAFA_SEND_CONCURRENCY', '1'))
 SHAFA_UPSCALE_CONCURRENCY = int(os.getenv('SHAFA_UPSCALE_CONCURRENCY', '1' if IS_INSTANCE else '2'))
 SHAFA_PLAYWRIGHT_CONCURRENCY = int(os.getenv('SHAFA_PLAYWRIGHT_CONCURRENCY', '2' if IS_INSTANCE else '2'))
 SHAFA_HTTP_CONNECTOR_LIMIT = int(os.getenv('SHAFA_HTTP_CONNECTOR_LIMIT', '16' if IS_INSTANCE else '20'))

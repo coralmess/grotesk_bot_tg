@@ -20,6 +20,8 @@ from config import (
     MARKET_TELEGRAM_POOL_SIZE,
     MARKET_TELEGRAM_POOL_TIMEOUT,
     MARKET_TELEGRAM_READ_TIMEOUT,
+    MARKET_TELEGRAM_SEND_GAP_MAX_SEC,
+    MARKET_TELEGRAM_SEND_GAP_MIN_SEC,
     MARKET_TELEGRAM_WRITE_TIMEOUT,
 )
 
@@ -84,16 +86,30 @@ def build_marketplace_bot(token: str):
     return Bot(token=token, request=request)
 
 
+async def _sleep_after_marketplace_send() -> None:
+    low = max(0.0, MARKET_TELEGRAM_SEND_GAP_MIN_SEC)
+    high = max(low, MARKET_TELEGRAM_SEND_GAP_MAX_SEC)
+    if high <= 0:
+        return
+    await asyncio.sleep(random.uniform(low, high))
+
+
 def build_message_sender(*, send_semaphore: asyncio.Semaphore):
     @async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=False)
     async def send_message(bot, chat_id: str, text: str) -> DeliveryResult:
         async with send_semaphore:
-            message = await bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=False,
-            )
+            try:
+                message = await bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=False,
+                )
+            finally:
+                # Keep the lock during the pause so the next marketplace send cannot
+                # start immediately after this one. This deliberately favors delivery
+                # confirmation accuracy over fast bursts.
+                await _sleep_after_marketplace_send()
         return DeliveryResult(delivered=True, telegram_message_id=getattr(message, "message_id", None), channel="text")
 
     return send_message
@@ -103,12 +119,17 @@ def build_photo_sender(*, send_semaphore: asyncio.Semaphore):
     @async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=False)
     async def send_photo_by_bytes(bot, chat_id: str, photo_bytes: bytes, caption: str) -> DeliveryResult:
         async with send_semaphore:
-            message = await bot.send_photo(
-                chat_id=chat_id,
-                photo=io.BytesIO(photo_bytes),
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-            )
+            try:
+                message = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=io.BytesIO(photo_bytes),
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                )
+            finally:
+                # Same throttle as text sends: photo uploads are the most likely path
+                # to ambiguous Telegram timeouts, so keep them serialized and spaced.
+                await _sleep_after_marketplace_send()
         return DeliveryResult(delivered=True, telegram_message_id=getattr(message, "message_id", None), channel="photo")
 
     return send_photo_by_bytes
