@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, Generic, Optional, Protocol, Sequence, TypeVar
 
 from helpers.analytics_events import AnalyticsSink, fingerprint_url, stable_hash
-from helpers.marketplace_core import MarketplaceItem, SourceStats, duplicate_key
+from helpers.marketplace_core import DeliveryResult, MarketplaceItem, SourceStats, duplicate_key
 from helpers.scraper_unsubscribes import fetch_unsubscribed_ids
 
 ItemT = TypeVar("ItemT", bound=MarketplaceItem)
@@ -60,7 +60,7 @@ class MarketplaceRepository(Protocol[ItemT]):
     async def claim_notification_key(self, item: ItemT, source_name: str) -> bool:
         ...
 
-    async def mark_notification_sent(self, item: ItemT, source_name: str) -> None:
+    async def mark_notification_sent(self, item: ItemT, source_name: str, telegram_message_id: Optional[int] = None) -> None:
         ...
 
     async def release_notification_claim(self, item: ItemT, source_name: str) -> None:
@@ -103,7 +103,7 @@ async def process_marketplace_items(
     duplicate_tracker: RunDuplicateTracker[ItemT],
     decide_item: Callable[[ItemT, Optional[Dict[str, Any]]], ItemDecision],
     build_message: Callable[[ItemT, Optional[Dict[str, Any]], str], str],
-    send_item: Callable[[ItemT, str, str], Awaitable[bool]],
+    send_item: Callable[[ItemT, str, str], Awaitable[bool | DeliveryResult]],
     hydrate_from_previous: Optional[Callable[[ItemT, Optional[Dict[str, Any]]], None]] = None,
     analytics_sink: Optional[AnalyticsSink] = None,
     logger=None,
@@ -201,12 +201,17 @@ async def process_marketplace_items(
     if not send_candidates:
         return stats
 
-    async def _deliver(item: ItemT, previous: Optional[Dict[str, Any]]) -> bool:
-        sent = False
+    def _coerce_delivery_result(value: bool | DeliveryResult) -> DeliveryResult:
+        if isinstance(value, DeliveryResult):
+            return value
+        return DeliveryResult(delivered=bool(value))
+
+    async def _deliver(item: ItemT, previous: Optional[Dict[str, Any]]) -> DeliveryResult:
+        delivery = DeliveryResult(delivered=False)
         try:
-            sent = bool(await send_item(item, build_message(item, previous, source_name), source_name))
-            if sent:
-                await repository.mark_notification_sent(item, source_name)
+            delivery = _coerce_delivery_result(await send_item(item, build_message(item, previous, source_name), source_name))
+            if delivery.delivered:
+                await repository.mark_notification_sent(item, source_name, delivery.telegram_message_id)
                 _record_item_analytics(
                     analytics_sink,
                     event="sent",
@@ -214,6 +219,7 @@ async def process_marketplace_items(
                     source_name=source_name,
                     item=item,
                     previous=previous,
+                    delivery=delivery,
                 )
             else:
                 await repository.release_notification_claim(item, source_name)
@@ -224,6 +230,7 @@ async def process_marketplace_items(
                     source_name=source_name,
                     item=item,
                     previous=previous,
+                    delivery=delivery,
                 )
         except Exception:
             await repository.release_notification_claim(item, source_name)
@@ -237,17 +244,19 @@ async def process_marketplace_items(
             )
             raise
         finally:
-            # Persisting in finally keeps item state aligned even when Telegram delivery is
-            # ambiguous or fails after the notification key was already claimed.
-            await repository.persist_items([ItemUpdate(item=item, touch_last_sent=sent)], source_name)
-        return sent
+            # Failed sends are intentionally not persisted as normal seen items. Otherwise a
+            # transient Telegram/image problem can make a first-seen item look already known
+            # on the next run and silently suppress the retry.
+            if delivery.delivered:
+                await repository.persist_items([ItemUpdate(item=item, touch_last_sent=True)], source_name)
+        return delivery
 
     results = await asyncio.gather(
         *(_deliver(item, previous) for item, previous in send_candidates),
         return_exceptions=True,
     )
     for result in results:
-        if result is True:
+        if isinstance(result, DeliveryResult) and result.delivered:
             stats.total_sent += 1
         else:
             stats.total_send_failed += 1
@@ -262,6 +271,7 @@ def _record_item_analytics(
     source_name: str,
     item: MarketplaceItem,
     previous: Optional[Dict[str, Any]],
+    delivery: Optional[DeliveryResult] = None,
 ) -> None:
     if analytics_sink is None:
         return
@@ -275,6 +285,15 @@ def _record_item_analytics(
             "price_int": item.price_int,
             "had_previous": previous is not None,
         }
+        if delivery is not None:
+            payload.update(
+                {
+                    "telegram_message_id": delivery.telegram_message_id,
+                    "delivery_channel": delivery.channel,
+                    "failure_reason": delivery.failure_reason,
+                    "retry_later": delivery.retry_later,
+                }
+            )
         payload.update(fingerprint_url(item.link))
         analytics_sink.append_event("marketplace_item", payload)
         analytics_sink.add_daily_counters(

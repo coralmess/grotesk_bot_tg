@@ -9,9 +9,19 @@ from typing import Any, Awaitable, Callable, Iterable, Optional
 import aiohttp
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter, TimedOut
+from telegram.request import HTTPXRequest
 
 from helpers.analytics_events import AnalyticsSink
+from helpers.marketplace_core import DeliveryResult
 from helpers.image_pipeline import send_remote_photo_with_fallback
+from config import (
+    MARKET_TELEGRAM_CONNECT_TIMEOUT,
+    MARKET_TELEGRAM_MEDIA_WRITE_TIMEOUT,
+    MARKET_TELEGRAM_POOL_SIZE,
+    MARKET_TELEGRAM_POOL_TIMEOUT,
+    MARKET_TELEGRAM_READ_TIMEOUT,
+    MARKET_TELEGRAM_WRITE_TIMEOUT,
+)
 
 
 class RetryableHttpStatus(Exception):
@@ -32,8 +42,9 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0, *, assume_timeo
                 except RetryAfter as exc:
                     await asyncio.sleep(exc.retry_after)
                 except TimedOut:
-                    # Telegram sometimes delivers the message but times out before the bot
-                    # gets the response. Treating those cases as success avoids duplicates.
+                    # Marketplace notifications must not be marked as sent unless Telegram
+                    # returns a Message; otherwise bursty photo uploads can silently lose
+                    # items while poisoning the duplicate ledger.
                     if assume_timeout_success:
                         return True
                     if attempt < max_retries - 1:
@@ -42,6 +53,8 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0, *, assume_timeo
                     if attempt < max_retries - 1:
                         wait_s = exc.wait_s if exc.wait_s > 0 else (backoff_base * (attempt + 1))
                         await asyncio.sleep(wait_s)
+                    else:
+                        raise
                 except Exception:
                     if attempt < max_retries - 1:
                         await asyncio.sleep(backoff_base * (attempt + 1) + random.random())
@@ -54,32 +67,49 @@ def async_retry(max_retries: int = 3, backoff_base: float = 1.0, *, assume_timeo
     return decorator
 
 
+def build_marketplace_bot(token: str):
+    from telegram import Bot
+
+    # Marketplace sends can upload many photos in a short burst. The default
+    # python-telegram-bot HTTP pool is one connection with very small timeouts,
+    # which made concurrent sends look successful after ambiguous timeouts.
+    request = HTTPXRequest(
+        connection_pool_size=MARKET_TELEGRAM_POOL_SIZE,
+        connect_timeout=MARKET_TELEGRAM_CONNECT_TIMEOUT,
+        read_timeout=MARKET_TELEGRAM_READ_TIMEOUT,
+        write_timeout=MARKET_TELEGRAM_WRITE_TIMEOUT,
+        pool_timeout=MARKET_TELEGRAM_POOL_TIMEOUT,
+        media_write_timeout=MARKET_TELEGRAM_MEDIA_WRITE_TIMEOUT,
+    )
+    return Bot(token=token, request=request)
+
+
 def build_message_sender(*, send_semaphore: asyncio.Semaphore):
-    @async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
-    async def send_message(bot, chat_id: str, text: str) -> bool:
+    @async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=False)
+    async def send_message(bot, chat_id: str, text: str) -> DeliveryResult:
         async with send_semaphore:
-            await bot.send_message(
+            message = await bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=False,
             )
-        return True
+        return DeliveryResult(delivered=True, telegram_message_id=getattr(message, "message_id", None), channel="text")
 
     return send_message
 
 
 def build_photo_sender(*, send_semaphore: asyncio.Semaphore):
-    @async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=True)
-    async def send_photo_by_bytes(bot, chat_id: str, photo_bytes: bytes, caption: str) -> bool:
+    @async_retry(max_retries=3, backoff_base=2.0, assume_timeout_success=False)
+    async def send_photo_by_bytes(bot, chat_id: str, photo_bytes: bytes, caption: str) -> DeliveryResult:
         async with send_semaphore:
-            await bot.send_photo(
+            message = await bot.send_photo(
                 chat_id=chat_id,
                 photo=io.BytesIO(photo_bytes),
                 caption=caption,
                 parse_mode=ParseMode.HTML,
             )
-        return True
+        return DeliveryResult(delivered=True, telegram_message_id=getattr(message, "message_id", None), channel="photo")
 
     return send_photo_by_bytes
 
@@ -106,6 +136,8 @@ def build_image_downloader(
                     retry_after = response.headers.get("Retry-After")
                     wait_s = int(retry_after) if retry_after and retry_after.isdigit() else 15
                     raise RetryableHttpStatus(429, wait_s=wait_s, context="image download")
+                if response.status in (404, 410):
+                    raise RetryableHttpStatus(response.status, wait_s=2, context="image download")
                 if response.status == 403:
                     logger.warning("Image forbidden (403). Falling back to text-only send.")
                     return None
@@ -119,8 +151,8 @@ def build_media_sender(
     *,
     is_valid_image_url: Callable[[Optional[str]], bool],
     download_bytes: Callable[[str], Awaitable[Optional[bytes]]],
-    send_message: Callable[[object, str, str], Awaitable[bool]],
-    send_photo_by_bytes: Callable[[object, str, bytes, str], Awaitable[bool]],
+    send_message: Callable[[object, str, str], Awaitable[DeliveryResult]],
+    send_photo_by_bytes: Callable[[object, str, bytes, str], Awaitable[DeliveryResult]],
     run_cpu_bound_fn: Callable[..., Awaitable[Optional[bytes]]],
     logger,
     min_upscale_dim: int = 1500,
@@ -135,7 +167,7 @@ def build_media_sender(
         caption: str,
         image_url: Optional[str],
         source_name: str = "",
-    ) -> bool:
+    ) -> DeliveryResult:
         # The image pipeline stays centralized so marketplace send behavior stays identical
         # across OLX and SHAFA even when transport or image fallback rules evolve.
         return await send_remote_photo_with_fallback(

@@ -63,7 +63,17 @@ class OlxDuplicateDetectionTests(unittest.TestCase):
                     price_text="1090 грн",
                     price_int=1090,
                 )
-                olx_scraper._db_mark_notification_sent_sync(sent, "Thom Krom")
+                olx_scraper._db_mark_notification_sent_sync(sent, "Thom Krom", telegram_message_id=12345)
+
+                conn = olx_scraper._db_connect()
+                try:
+                    row = conn.execute(
+                        "SELECT telegram_message_id FROM olx_notifications WHERE item_id = ?",
+                        ("sent-1",),
+                    ).fetchone()
+                finally:
+                    conn.close()
+                self.assertEqual(row["telegram_message_id"], 12345)
 
                 candidate = olx_scraper.OlxItem(
                     id="candidate-2",
@@ -78,17 +88,17 @@ class OlxDuplicateDetectionTests(unittest.TestCase):
             finally:
                 olx_scraper.DB_FILE = original_db
 
-    def test_timeout_assumed_delivered_for_send_retry(self) -> None:
+    def test_timeout_is_not_assumed_delivered_for_send_retry(self) -> None:
         calls = {"count": 0}
 
-        @olx_scraper.async_retry(max_retries=3, assume_timeout_success=True)
+        @olx_scraper.async_retry(max_retries=3, assume_timeout_success=False)
         async def _send() -> bool:
             calls["count"] += 1
             raise TimedOut("timeout")
 
         result = __import__("asyncio").run(_send())
-        self.assertTrue(result)
-        self.assertEqual(calls["count"], 1)
+        self.assertIsNone(result)
+        self.assertEqual(calls["count"], 3)
 
 
 class ShafaDuplicateDetectionTests(unittest.TestCase):
@@ -147,7 +157,17 @@ class ShafaDuplicateDetectionTests(unittest.TestCase):
                     price_text="1090 грн",
                     price_int=1090,
                 )
-                shafa_scraper._db_mark_notification_sent_sync(sent, "Thom Krom")
+                shafa_scraper._db_mark_notification_sent_sync(sent, "Thom Krom", telegram_message_id=54321)
+
+                conn = shafa_scraper._db_connect()
+                try:
+                    row = conn.execute(
+                        "SELECT telegram_message_id FROM shafa_notifications WHERE item_id = ?",
+                        ("sent-1",),
+                    ).fetchone()
+                finally:
+                    conn.close()
+                self.assertEqual(row["telegram_message_id"], 54321)
 
                 candidate = shafa_scraper.ShafaItem(
                     id="candidate-2",
@@ -162,14 +182,14 @@ class ShafaDuplicateDetectionTests(unittest.TestCase):
             finally:
                 shafa_scraper.DB_FILE = original_db
 
-    def test_timeout_assumed_delivered_for_send_retry(self) -> None:
+    def test_timeout_is_not_assumed_delivered_for_send_retry(self) -> None:
         calls = {"count": 0}
 
-        @shafa_scraper.async_retry(max_retries=3, assume_timeout_success=True)
+        @shafa_scraper.async_retry(max_retries=3, assume_timeout_success=False)
         async def _send() -> bool:
             calls["count"] += 1
             raise TimedOut("timeout")
 
         result = __import__("asyncio").run(_send())
-        self.assertTrue(result)
-        self.assertEqual(calls["count"], 1)
+        self.assertIsNone(result)
+        self.assertEqual(calls["count"], 3)

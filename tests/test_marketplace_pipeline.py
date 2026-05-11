@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from helpers.analytics_events import AnalyticsSink
 from helpers.marketplace_core import MarketplaceItem
 from helpers.marketplace_pipeline import (
+    DeliveryResult,
     ItemDecision,
     ItemUpdate,
     RunDuplicateTracker,
@@ -38,8 +39,8 @@ class DummyRepository:
     async def claim_notification_key(self, item, source_name):
         return self.claim_results.get(item.id, True)
 
-    async def mark_notification_sent(self, item, source_name):
-        self.marked_sent.append((item.id, source_name))
+    async def mark_notification_sent(self, item, source_name, telegram_message_id=None):
+        self.marked_sent.append((item.id, source_name, telegram_message_id))
 
     async def release_notification_claim(self, item, source_name):
         self.released.append((item.id, source_name))
@@ -89,7 +90,7 @@ class MarketplacePipelineTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(stats.total_new, 1)
         self.assertEqual(stats.total_sent, 1)
-        self.assertEqual(repository.marked_sent, [("1", "OLX")])
+        self.assertEqual(repository.marked_sent, [("1", "OLX", None)])
         self.assertEqual(repository.released, [])
         self.assertIn(("1", True, "OLX"), repository.persisted)
         self.assertEqual(sent_messages, [("1", "OLX:Item", "OLX")])
@@ -100,7 +101,7 @@ class MarketplacePipelineTests(unittest.IsolatedAsyncioTestCase):
         item = DummyItem(id="2", name="Item", link="https://example.com", price_text="100 грн", price_int=100)
 
         async def _send_item(item, text, source_name):
-            return True
+            return DeliveryResult(delivered=True, telegram_message_id=5150, channel="photo")
 
         stats = await process_marketplace_items(
             source_kind="shafa",
@@ -140,7 +141,30 @@ class MarketplacePipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.total_sent, 0)
         self.assertEqual(repository.marked_sent, [])
         self.assertEqual(repository.released, [("3", "OLX")])
-        self.assertIn(("3", False, "OLX"), repository.persisted)
+        self.assertEqual(repository.persisted, [])
+
+    async def test_process_marketplace_items_stores_confirmed_telegram_message_id(self) -> None:
+        repository = DummyRepository()
+        duplicate_tracker = RunDuplicateTracker[DummyItem]()
+        item = DummyItem(id="tg-1", name="Item", link="https://example.com", price_text="100 UAH", price_int=100)
+
+        async def _send_item(item, text, source_name):
+            return DeliveryResult(delivered=True, telegram_message_id=4242, channel="photo")
+
+        stats = await process_marketplace_items(
+            source_kind="shafa",
+            source_name="SHAFA",
+            items=[item],
+            repository=repository,
+            duplicate_tracker=duplicate_tracker,
+            decide_item=lambda current, previous: ItemDecision(send_notification=True, is_new_item=True),
+            build_message=lambda current, previous, source_name: "message",
+            send_item=_send_item,
+        )
+
+        self.assertEqual(stats.total_sent, 1)
+        self.assertEqual(repository.marked_sent, [("tg-1", "SHAFA", 4242)])
+        self.assertEqual(repository.persisted, [("tg-1", True, "SHAFA")])
 
     async def test_process_marketplace_items_records_lifecycle_analytics(self) -> None:
         repository = DummyRepository()
@@ -148,7 +172,7 @@ class MarketplacePipelineTests(unittest.IsolatedAsyncioTestCase):
         item = DummyItem(id="analytics-1", name="Analytics Item", link="https://example.com/item?secret=1", price_text="100 ???", price_int=100)
 
         async def _send_item(item, text, source_name):
-            return True
+            return DeliveryResult(delivered=True, telegram_message_id=5150, channel="photo")
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             sink = AnalyticsSink(Path(tmp_dir), now_func=lambda: "2026-05-04T12:00:00Z")
@@ -171,6 +195,8 @@ class MarketplacePipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(events[0]["source_kind"], "olx")
             self.assertEqual(events[0]["source_name"], "OLX Source")
             self.assertEqual(events[0]["item_id_hash"][:7], "sha256:")
+            self.assertEqual(events[1]["telegram_message_id"], 5150)
+            self.assertEqual(events[1]["delivery_channel"], "photo")
             self.assertNotIn("secret", json.dumps(events))
 
             daily = json.loads((Path(tmp_dir) / "daily" / "2026-05-04.marketplace_items.json").read_text(encoding="utf-8"))

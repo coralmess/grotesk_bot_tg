@@ -23,6 +23,18 @@ class SourceStats:
 
 
 @dataclass(frozen=True)
+class DeliveryResult:
+    # Marketplace notifications are now considered delivered only when Telegram
+    # returns a concrete message id; this prevents timeout-only attempts from
+    # poisoning the duplicate ledger as "sent".
+    delivered: bool
+    telegram_message_id: Optional[int] = None
+    channel: str = ""
+    failure_reason: str = ""
+    retry_later: bool = False
+
+
+@dataclass(frozen=True)
 class SourceDecision:
     should_process: bool
     next_streak: int

@@ -9,6 +9,7 @@ import requests
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 from helpers.analytics_events import AnalyticsSink, fingerprint_url
+from helpers.marketplace_core import DeliveryResult
 
 _EDSR_LOCK = threading.Lock()
 _EDSR_SUPERRES = None
@@ -418,8 +419,8 @@ async def send_remote_photo_with_fallback(
     image_url: Optional[str],
     is_valid_image_url: Callable[[Optional[str]], bool],
     download_bytes: Callable[[str], Awaitable[Optional[bytes]]],
-    send_message: Callable[[object, str, str], Awaitable[bool]],
-    send_photo_by_bytes: Callable[[object, str, bytes, str], Awaitable[bool]],
+    send_message: Callable[[object, str, str], Awaitable[DeliveryResult]],
+    send_photo_by_bytes: Callable[[object, str, bytes, str], Awaitable[DeliveryResult]],
     run_cpu_bound_fn: Callable[..., Awaitable[Optional[bytes]]],
     logger,
     min_upscale_dim: int = 1500,
@@ -428,7 +429,7 @@ async def send_remote_photo_with_fallback(
     analytics_sink: Optional[AnalyticsSink] = None,
     source_kind: str = "",
     source_name: str = "",
-) -> bool:
+) -> DeliveryResult:
     # OLX and SHAFA ended up with almost identical send flows: download remote image,
     # optionally upscale it for Telegram, then fall back to plain text on failure.
     # Keeping that orchestration here avoids the two scrapers drifting again.
@@ -443,11 +444,33 @@ async def send_remote_photo_with_fallback(
             reason="invalid_or_missing_url",
         )
         result = await send_message(bot, chat_id, caption)
-        return bool(result)
+        return result or DeliveryResult(delivered=False, failure_reason="telegram_text_timeout", retry_later=True)
 
-    raw = await download_bytes(image_url)
+    try:
+        raw = await download_bytes(image_url)
+    except Exception as exc:
+        status = getattr(exc, "status", None)
+        if status in (404, 410):
+            if logger:
+                logger.warning("Image unavailable (%s); will retry item in a later run: %s", status, image_url)
+            _record_image_analytics(
+                analytics_sink,
+                event="image_unavailable_later",
+                source_kind=source_kind,
+                source_name=source_name,
+                image_url=image_url,
+                fallback_mode="retry_later",
+                reason=f"image_download_{status}",
+            )
+            return DeliveryResult(
+                delivered=False,
+                failure_reason=f"image_download_{status}",
+                retry_later=True,
+            )
+        raise
     if not raw:
-        logger.warning("Photo not downloaded; sending text")
+        if logger:
+            logger.warning("Photo not downloaded; sending text")
         _record_image_analytics(
             analytics_sink,
             event="text_fallback",
@@ -458,7 +481,7 @@ async def send_remote_photo_with_fallback(
             reason="download_failed",
         )
         result = await send_message(bot, chat_id, caption)
-        return bool(result)
+        return result or DeliveryResult(delivered=False, failure_reason="telegram_text_timeout", retry_later=True)
 
     photo_bytes = await run_cpu_bound_fn(
         upscale_image_bytes_for_telegram_sync,
@@ -484,10 +507,13 @@ async def send_remote_photo_with_fallback(
     )
 
     result = await send_photo_by_bytes(bot, chat_id, photo_bytes, caption)
-    if result is not None:
-        return bool(result)
+    if result is None:
+        return DeliveryResult(delivered=False, failure_reason="telegram_photo_timeout", retry_later=True)
+    if result.delivered:
+        return result
 
-    logger.warning("Photo not sent; sending text")
+    if logger:
+        logger.warning("Photo not sent; sending text")
     _record_image_analytics(
         analytics_sink,
         event="text_fallback",
@@ -500,7 +526,7 @@ async def send_remote_photo_with_fallback(
         reason="telegram_photo_send_failed",
     )
     result = await send_message(bot, chat_id, caption)
-    return bool(result)
+    return result or DeliveryResult(delivered=False, failure_reason="telegram_text_timeout", retry_later=True)
 
 
 def _record_image_send_analytics(

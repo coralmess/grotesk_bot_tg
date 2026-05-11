@@ -2,7 +2,6 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
-from telegram import Bot
 from telegram.error import RetryAfter, TimedOut
 import asyncio, re, sqlite3, aiohttp, random, logging
 from html import escape
@@ -28,6 +27,7 @@ from config_shafa_urls import SHAFA_URLS
 from helpers.analytics_events import AnalyticsSink
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
 from helpers.marketplace_core import (
+    DeliveryResult,
     MarketplaceItem,
     SourceStats,
     duplicate_key,
@@ -48,6 +48,7 @@ from helpers.marketplace_sender import (
     RetryableHttpStatus,
     async_retry,
     build_image_downloader,
+    build_marketplace_bot,
     build_media_sender,
     build_message_sender,
     build_photo_sender,
@@ -557,6 +558,7 @@ def _db_init_sync():
                 state TEXT NOT NULL,
                 claimed_at TEXT,
                 sent_at TEXT,
+                telegram_message_id INTEGER,
                 updated_at TEXT DEFAULT (datetime('now'))
             )
         """)
@@ -564,6 +566,12 @@ def _db_init_sync():
             cols = [row[1] for row in conn.execute("PRAGMA table_info(shafa_items)").fetchall()]
             if "first_image_url" not in cols:
                 conn.execute("ALTER TABLE shafa_items ADD COLUMN first_image_url TEXT")
+        except Exception:
+            pass
+        try:
+            notification_cols = [row[1] for row in conn.execute("PRAGMA table_info(shafa_notifications)").fetchall()]
+            if "telegram_message_id" not in notification_cols:
+                conn.execute("ALTER TABLE shafa_notifications ADD COLUMN telegram_message_id INTEGER")
         except Exception:
             pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shafa_items_source ON shafa_items(source);")
@@ -629,9 +637,9 @@ def _db_claim_notification_key_sync(item: ShafaItem, source_name: str) -> bool:
         conn.execute(
             """
             INSERT INTO shafa_notifications (
-                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, updated_at
+                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, telegram_message_id, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'), NULL, datetime('now'))
+            VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'), NULL, NULL, datetime('now'))
             ON CONFLICT(notification_key) DO UPDATE SET
                 item_id=excluded.item_id,
                 name=excluded.name,
@@ -640,6 +648,7 @@ def _db_claim_notification_key_sync(item: ShafaItem, source_name: str) -> bool:
                 state='pending',
                 claimed_at=datetime('now'),
                 sent_at=NULL,
+                telegram_message_id=NULL,
                 updated_at=datetime('now')
             """,
             (storage_key, item.id, item.name, item.price_int, source_name),
@@ -650,7 +659,7 @@ def _db_claim_notification_key_sync(item: ShafaItem, source_name: str) -> bool:
         conn.close()
 
 
-def _db_mark_notification_sent_sync(item: ShafaItem, source_name: str) -> None:
+def _db_mark_notification_sent_sync(item: ShafaItem, source_name: str, telegram_message_id: Optional[int] = None) -> None:
     key = _duplicate_key(item.name, item.price_int)
     if key is None:
         return
@@ -659,9 +668,9 @@ def _db_mark_notification_sent_sync(item: ShafaItem, source_name: str) -> None:
         conn.execute(
             """
             INSERT INTO shafa_notifications (
-                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, updated_at
+                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, telegram_message_id, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, 'sent', datetime('now'), datetime('now'), datetime('now'))
+            VALUES (?, ?, ?, ?, ?, 'sent', datetime('now'), datetime('now'), ?, datetime('now'))
             ON CONFLICT(notification_key) DO UPDATE SET
                 item_id=excluded.item_id,
                 name=excluded.name,
@@ -669,9 +678,10 @@ def _db_mark_notification_sent_sync(item: ShafaItem, source_name: str) -> None:
                 source=excluded.source,
                 state='sent',
                 sent_at=datetime('now'),
+                telegram_message_id=excluded.telegram_message_id,
                 updated_at=datetime('now')
             """,
-            (storage_key, item.id, item.name, item.price_int, source_name),
+            (storage_key, item.id, item.name, item.price_int, source_name, telegram_message_id),
         )
         conn.commit()
 
@@ -690,6 +700,7 @@ def _db_release_notification_claim_sync(item: ShafaItem, source_name: str) -> No
                 price_int = ?,
                 source = ?,
                 state = 'failed',
+                telegram_message_id = NULL,
                 updated_at = datetime('now')
             WHERE notification_key = ?
             """,
@@ -790,8 +801,8 @@ class ShafaRepository(MarketplaceRepository[ShafaItem]):
     async def claim_notification_key(self, item: ShafaItem, source_name: str) -> bool:
         return await asyncio.to_thread(_db_claim_notification_key_sync, item, source_name)
 
-    async def mark_notification_sent(self, item: ShafaItem, source_name: str) -> None:
-        await asyncio.to_thread(_db_mark_notification_sent_sync, item, source_name)
+    async def mark_notification_sent(self, item: ShafaItem, source_name: str, telegram_message_id: Optional[int] = None) -> None:
+        await asyncio.to_thread(_db_mark_notification_sent_sync, item, source_name, telegram_message_id)
 
     async def release_notification_claim(self, item: ShafaItem, source_name: str) -> None:
         await asyncio.to_thread(_db_release_notification_claim_sync, item, source_name)
@@ -890,30 +901,30 @@ async def run_shafa_scraper():
         _add_error(f"Playwright error: {exc}")
         return "; ".join(dict.fromkeys(errors))
 
-    bot = Bot(token=token)
+    bot = build_marketplace_bot(token)
     repository = ShafaRepository()
     duplicate_tracker = RunDuplicateTracker[ShafaItem]()
 
-    async def _send_item(item: ShafaItem, text: str, source_name: str) -> bool:
+    async def _send_item(item: ShafaItem, text: str, source_name: str) -> DeliveryResult:
         try:
-            sent = await send_photo_with_upscale(
+            delivery = await send_photo_with_upscale(
                 bot,
                 default_chat,
                 text,
                 item.first_image_url,
                 source_name=source_name,
             )
-            return bool(sent)
+            return delivery
         except RetryAfter as exc:
             logger.warning("Telegram rate limit hit; waiting %ss", exc.retry_after)
         except TimedOut:
             logger.warning("Timeout while sending")
             _add_error("Telegram send timeout")
-            return True
+            return DeliveryResult(delivered=False, failure_reason="telegram_timeout", retry_later=True)
         except Exception as exc:
             logger.error("Send failed: %s", exc)
             _add_error(f"Send failed: {exc}")
-        return False
+        return DeliveryResult(delivered=False, failure_reason="send_exception", retry_later=True)
 
     async def _process_entry(entry: Dict[str, Any]) -> None:
         nonlocal total_scraped, total_new, total_sent

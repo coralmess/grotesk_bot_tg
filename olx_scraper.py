@@ -31,6 +31,7 @@ from config_olx_urls import OLX_URLS
 from helpers.analytics_events import AnalyticsSink
 from helpers.dynamic_sources import load_dynamic_urls, merge_sources
 from helpers.marketplace_core import (
+    DeliveryResult,
     MarketplaceItem,
     SourceStats,
     duplicate_key,
@@ -50,6 +51,7 @@ from helpers.marketplace_sender import (
     RetryableHttpStatus,
     async_retry,
     build_image_downloader,
+    build_marketplace_bot,
     build_media_sender,
     build_message_sender,
     build_photo_sender,
@@ -623,6 +625,7 @@ def _db_init_sync():
                 state TEXT NOT NULL,
                 claimed_at TEXT,
                 sent_at TEXT,
+                telegram_message_id INTEGER,
                 updated_at TEXT DEFAULT (datetime('now'))
             )
         """)
@@ -634,6 +637,12 @@ def _db_init_sync():
                 logger.info("Added missing 'size' column to database")
         except Exception as e:
             logger.error(f"❌ Migration error: {e}")
+        try:
+            notification_cols = [row[1] for row in conn.execute("PRAGMA table_info(olx_notifications)").fetchall()]
+            if "telegram_message_id" not in notification_cols:
+                conn.execute("ALTER TABLE olx_notifications ADD COLUMN telegram_message_id INTEGER")
+        except Exception as e:
+            logger.error("Notification migration error: %s", e)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_items_source ON olx_items(source);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_items_price_name ON olx_items(price_int, name);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_olx_notifications_price_state ON olx_notifications(price_int, state);")
@@ -718,9 +727,9 @@ def _db_claim_notification_key_sync(item: OlxItem, source_name: str) -> bool:
         conn.execute(
             """
             INSERT INTO olx_notifications (
-                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, updated_at
+                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, telegram_message_id, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'), NULL, datetime('now'))
+            VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'), NULL, NULL, datetime('now'))
             ON CONFLICT(notification_key) DO UPDATE SET
                 item_id=excluded.item_id,
                 name=excluded.name,
@@ -729,6 +738,7 @@ def _db_claim_notification_key_sync(item: OlxItem, source_name: str) -> bool:
                 state='pending',
                 claimed_at=datetime('now'),
                 sent_at=NULL,
+                telegram_message_id=NULL,
                 updated_at=datetime('now')
             """,
             (storage_key, item.id, item.name, item.price_int, source_name),
@@ -743,7 +753,7 @@ async def db_claim_notification_key(item: OlxItem, source_name: str) -> bool:
     return await asyncio.to_thread(_db_claim_notification_key_sync, item, source_name)
 
 
-def _db_mark_notification_sent_sync(item: OlxItem, source_name: str) -> None:
+def _db_mark_notification_sent_sync(item: OlxItem, source_name: str, telegram_message_id: Optional[int] = None) -> None:
     key = _duplicate_key(item.name, item.price_int)
     if key is None:
         return
@@ -752,9 +762,9 @@ def _db_mark_notification_sent_sync(item: OlxItem, source_name: str) -> None:
         conn.execute(
             """
             INSERT INTO olx_notifications (
-                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, updated_at
+                notification_key, item_id, name, price_int, source, state, claimed_at, sent_at, telegram_message_id, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, 'sent', datetime('now'), datetime('now'), datetime('now'))
+            VALUES (?, ?, ?, ?, ?, 'sent', datetime('now'), datetime('now'), ?, datetime('now'))
             ON CONFLICT(notification_key) DO UPDATE SET
                 item_id=excluded.item_id,
                 name=excluded.name,
@@ -762,15 +772,16 @@ def _db_mark_notification_sent_sync(item: OlxItem, source_name: str) -> None:
                 source=excluded.source,
                 state='sent',
                 sent_at=datetime('now'),
+                telegram_message_id=excluded.telegram_message_id,
                 updated_at=datetime('now')
             """,
-            (storage_key, item.id, item.name, item.price_int, source_name),
+            (storage_key, item.id, item.name, item.price_int, source_name, telegram_message_id),
         )
         conn.commit()
 
 
-async def db_mark_notification_sent(item: OlxItem, source_name: str) -> None:
-    await asyncio.to_thread(_db_mark_notification_sent_sync, item, source_name)
+async def db_mark_notification_sent(item: OlxItem, source_name: str, telegram_message_id: Optional[int] = None) -> None:
+    await asyncio.to_thread(_db_mark_notification_sent_sync, item, source_name, telegram_message_id)
 
 
 def _db_release_notification_claim_sync(item: OlxItem, source_name: str) -> None:
@@ -787,6 +798,7 @@ def _db_release_notification_claim_sync(item: OlxItem, source_name: str) -> None
                 price_int = ?,
                 source = ?,
                 state = 'failed',
+                telegram_message_id = NULL,
                 updated_at = datetime('now')
             WHERE notification_key = ?
             """,
@@ -903,8 +915,8 @@ class OlxRepository(MarketplaceRepository[OlxItem]):
     async def claim_notification_key(self, item: OlxItem, source_name: str) -> bool:
         return await db_claim_notification_key(item, source_name)
 
-    async def mark_notification_sent(self, item: OlxItem, source_name: str) -> None:
-        await db_mark_notification_sent(item, source_name)
+    async def mark_notification_sent(self, item: OlxItem, source_name: str, telegram_message_id: Optional[int] = None) -> None:
+        await db_mark_notification_sent(item, source_name, telegram_message_id)
 
     async def release_notification_claim(self, item: OlxItem, source_name: str) -> None:
         await db_release_notification_claim(item, source_name)
@@ -1021,17 +1033,16 @@ async def _legacy_run_olx_scraper():
                 if not image_url:
                     logger.warning(f"No image available for item {item.id}")
                     total_without_images += 1
-            sent = await send_photo_with_upscale(bot, chat_id, text, image_url)
-            if sent:
-                await db_mark_notification_sent(item, source_name)
+            delivery = await send_photo_with_upscale(bot, chat_id, text, image_url)
+            if delivery.delivered:
+                await db_mark_notification_sent(item, source_name, delivery.telegram_message_id)
             else:
                 await db_release_notification_claim(item, source_name)
-            await _persist_item_state(item, source_name, bool(sent))
+            await _persist_item_state(item, source_name, delivery.delivered)
             await asyncio.sleep(0.2)
         except RetryAfter as e:
             logger.warning(f"Rate limited for item {item.id}, waiting {e.retry_after}s")
         except TimedOut:
-            await db_mark_notification_sent(item, source_name)
             logger.warning(f"Timeout sending item {item.id}")
             _add_error("Telegram send timeout")
         except Exception as e:
@@ -1214,7 +1225,7 @@ async def run_olx_scraper():
         _add_error(f"DB init failed: {exc}")
         return "; ".join(dict.fromkeys(errors))
 
-    bot = Bot(token=token)
+    bot = build_marketplace_bot(token)
     # The adapter still owns OLX fetch/parse quirks, but post-parse decisions now flow
     # through the shared marketplace pipeline for parity with SHAFA.
     repository = OlxRepository()
@@ -1223,7 +1234,7 @@ async def run_olx_scraper():
     total_without_images = 0
     pipeline_totals = PipelineStats()
 
-    async def _send_item(item: OlxItem, text: str, source_name: str) -> bool:
+    async def _send_item(item: OlxItem, text: str, source_name: str) -> DeliveryResult:
         nonlocal total_without_images
         try:
             image_url = item.first_image_url
@@ -1234,20 +1245,20 @@ async def run_olx_scraper():
             if not image_url:
                 logger.warning("No image available for item %s", item.id)
                 total_without_images += 1
-            sent = await send_photo_with_upscale(bot, default_chat, text, image_url, source_name=source_name)
+            delivery = await send_photo_with_upscale(bot, default_chat, text, image_url, source_name=source_name)
             await asyncio.sleep(0.2)
-            return bool(sent)
+            return delivery
         except RetryAfter as exc:
             logger.warning("Rate limited for item %s, waiting %ss", item.id, exc.retry_after)
             _add_error("Telegram rate limited")
         except TimedOut:
             logger.warning("Timeout sending item %s", item.id)
             _add_error("Telegram send timeout")
-            return True
+            return DeliveryResult(delivered=False, failure_reason="telegram_timeout", retry_later=True)
         except Exception as exc:
             logger.error("Failed to send item %s: %s", item.id, exc)
             _add_error(f"Send item error: {exc}")
-        return False
+        return DeliveryResult(delivered=False, failure_reason="send_exception", retry_later=True)
 
     async def _process_entry(entry: Dict[str, Any]) -> None:
         nonlocal total_scraped
