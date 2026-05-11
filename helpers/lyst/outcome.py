@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 
 class LystRunState(str, Enum):
@@ -153,6 +154,26 @@ def _blocked_reason_from_resume_outcomes(resume_outcomes: dict[str, str]) -> str
     return ""
 
 
+def _coverage_partial_note(
+    coverage: dict[str, Any] | None,
+    *,
+    cleanup_skipped: bool,
+    min_completed_percent: float,
+) -> str:
+    reasons: list[str] = []
+    coverage = coverage or {}
+    expected = int(coverage.get("expected") or 0)
+    blocked = int(coverage.get("blocked") or 0)
+    completed_percent = float(coverage.get("completed_percent") or 0.0)
+    if expected > 0 and completed_percent < float(min_completed_percent):
+        reasons.append(f"low_coverage {round(completed_percent, 3)}%<{round(float(min_completed_percent), 3)}%")
+    if blocked > 0:
+        reasons.append(f"blocked={blocked}")
+    if cleanup_skipped:
+        reasons.append("cleanup_skipped")
+    return "; ".join(reasons)
+
+
 def build_lyst_run_outcome(
     *,
     run_failed: bool,
@@ -161,6 +182,9 @@ def build_lyst_run_outcome(
     cloudflare_event: dict | None,
     fallback_note: str,
     resume_outcomes: dict[str, str] | None = None,
+    coverage: dict[str, Any] | None = None,
+    cleanup_skipped: bool = False,
+    full_success_min_completed_percent: float = 85.0,
 ) -> LystRunOutcome:
     """Convert low-level cycle flags into the single status model used by logs and Telegram.
 
@@ -201,6 +225,17 @@ def build_lyst_run_outcome(
         )
     if run_failed:
         return LystRunOutcome.failed(fallback_note or "failed")
+    coverage_note = _coverage_partial_note(
+        coverage,
+        cleanup_skipped=cleanup_skipped,
+        min_completed_percent=full_success_min_completed_percent,
+    )
+    if coverage_note:
+        return LystRunOutcome.partial_success(
+            note=f"Partial coverage: {coverage_note}",
+            items_seen=items_seen,
+            new_items=new_items,
+        )
     return LystRunOutcome.full_success(items_seen=items_seen, new_items=new_items)
 
 

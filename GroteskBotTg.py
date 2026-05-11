@@ -234,6 +234,7 @@ LYST_CLOUDFLARE_BACKOFF = CloudflareBackoff(
     LYST_CLOUDFLARE_BACKOFF_FILE,
     base_cooldown_sec=LYST_CLOUDFLARE_BASE_COOLDOWN_SEC,
     max_cooldown_sec=LYST_CLOUDFLARE_MAX_COOLDOWN_SEC,
+    analytics_sink=LYST_ANALYTICS_SINK,
 )
 
 # Statistics tracking
@@ -1486,6 +1487,8 @@ def _build_lyst_run_outcome(
     cloudflare_event: dict | None,
     fallback_note: str,
     resume_outcomes: dict[str, str] | None = None,
+    coverage: dict | None = None,
+    cleanup_skipped: bool = False,
 ) -> LystRunOutcome:
     return build_lyst_run_outcome(
         run_failed=run_failed,
@@ -1494,6 +1497,8 @@ def _build_lyst_run_outcome(
         cloudflare_event=cloudflare_event,
         fallback_note=fallback_note,
         resume_outcomes=resume_outcomes,
+        coverage=coverage,
+        cleanup_skipped=cleanup_skipped,
     )
 
 

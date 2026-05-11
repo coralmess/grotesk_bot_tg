@@ -146,6 +146,35 @@ class LystCycleRunner:
                 if hooks.get_run_failed()
                 else ""
             )
+            resume_counter = Counter(hooks.get_resume_outcomes().values())
+            expected_pairs = int(getattr(run_stats, "fields", {}).get("source_country_pairs_expected") or 0)
+            blocked = sum(
+                resume_counter.get(value, 0)
+                for value in ("cloudflare", "cloudflare_cooldown", "failed", "aborted")
+            )
+            completed = sum(
+                resume_counter.get(value, 0)
+                for value in ("scraped", "terminal", "empty", "terminal_only_resume")
+            )
+            attempted = max(completed + blocked, sum(resume_counter.values()))
+            coverage = {
+                "expected": expected_pairs,
+                "attempted": attempted,
+                "completed": completed,
+                "blocked": blocked,
+                "skipped": max(0, expected_pairs - attempted),
+                "attempted_percent": round((attempted / expected_pairs) * 100, 3) if expected_pairs else 0.0,
+                "completed_percent": round((completed / expected_pairs) * 100, 3) if expected_pairs else 0.0,
+            }
+            if hasattr(run_stats, "set_coverage"):
+                run_stats.set_coverage(
+                    expected=coverage["expected"],
+                    attempted=coverage["attempted"],
+                    completed=coverage["completed"],
+                    blocked=coverage["blocked"],
+                    skipped=coverage["skipped"],
+                )
+                coverage = dict(getattr(run_stats, "fields", {}).get("coverage") or coverage)
             outcome = hooks.build_outcome(
                 run_failed=hooks.get_run_failed(),
                 items_seen=len(all_shoes),
@@ -153,6 +182,8 @@ class LystCycleRunner:
                 cloudflare_event=hooks.get_cloudflare_event(),
                 fallback_note=fallback_note,
                 resume_outcomes=hooks.get_resume_outcomes(),
+                coverage=coverage,
+                cleanup_skipped=getattr(processing_stats, "cleanup_skipped", False),
             )
             # JSONL run summaries are the durable audit trail for diagnosing
             # Cloudflare, resume, and terminal-page behavior after the fact.
@@ -177,25 +208,7 @@ class LystCycleRunner:
                     failed=0,
                     skipped=max(0, len(all_shoes) - processing_stats.new_total),
                 )
-            if hasattr(run_stats, "set_coverage"):
-                resume_counter = Counter(hooks.get_resume_outcomes().values())
-                expected_pairs = int(getattr(run_stats, "fields", {}).get("source_country_pairs_expected") or 0)
-                blocked = sum(
-                    resume_counter.get(value, 0)
-                    for value in ("cloudflare", "cloudflare_cooldown", "failed", "aborted")
-                )
-                completed = sum(
-                    resume_counter.get(value, 0)
-                    for value in ("scraped", "terminal", "empty", "terminal_only_resume")
-                )
-                attempted = max(completed + blocked, sum(resume_counter.values()))
-                run_stats.set_coverage(
-                    expected=expected_pairs,
-                    attempted=attempted,
-                    completed=completed,
-                    blocked=blocked,
-                    skipped=max(0, expected_pairs - attempted),
-                )
+            run_stats.set_field("outcome_note", outcome.note)
             cloudflare_event = hooks.get_cloudflare_event()
             if cloudflare_event:
                 run_stats.set_field("cloudflare_event", dict(cloudflare_event))

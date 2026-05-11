@@ -7,7 +7,7 @@ from helpers.lyst.service import LystCycleHooks, LystCycleRunner, LystRuntimeSta
 
 class FakeRunStats:
     def __init__(self):
-        self.fields = {}
+        self.fields = {"source_country_pairs_expected": 2}
         self.writes = []
 
     def set_field(self, key, value):
@@ -19,11 +19,23 @@ class FakeRunStats:
     def write_jsonl(self, path, payload):
         self.writes.append((path, payload))
 
+    def set_coverage(self, *, expected, attempted, completed, blocked=0, skipped=0):
+        self.fields["coverage"] = {
+            "expected": expected,
+            "attempted": attempted,
+            "completed": completed,
+            "blocked": blocked,
+            "skipped": skipped,
+            "completed_percent": round((completed / expected) * 100, 3) if expected else 0.0,
+        }
+
 
 @dataclass
 class FakeProcessingStats:
     new_total: int
     removed_total: int
+    cleanup_skipped: bool = False
+    cleanup_skip_reason: str = ""
 
 
 class FakeStatusManager:
@@ -200,6 +212,32 @@ class LystCycleRunnerTests(unittest.IsolatedAsyncioTestCase):
             captured["resume_outcomes"],
             {"Main:US": "cloudflare", "Shoes:GB": "scraped"},
         )
+
+    async def test_runner_computes_coverage_before_building_outcome(self) -> None:
+        captured = {}
+
+        def build_outcome(**kwargs):
+            captured.update(kwargs)
+            return LystRunOutcome.partial_success(
+                note="Partial coverage: low_coverage",
+                items_seen=kwargs["items_seen"],
+                new_items=kwargs["new_items"],
+            )
+
+        hooks, _events, run_stats, _logger, _url_batch_calls = self._hooks(
+            run_failed=False,
+            resume_outcomes={"Main:US": "scraped", "Shoes:GB": "cloudflare_cooldown"},
+        )
+        hooks.build_outcome = build_outcome
+
+        await LystCycleRunner(hooks).run(object())
+
+        self.assertEqual(captured["coverage"]["expected"], 2)
+        self.assertEqual(captured["coverage"]["completed"], 1)
+        self.assertEqual(captured["coverage"]["blocked"], 1)
+        self.assertEqual(captured["coverage"]["completed_percent"], 50.0)
+        self.assertEqual(captured["cleanup_skipped"], False)
+        self.assertEqual(run_stats.writes[0][1]["outcome"], "success_partial")
 
 
 async def _async_value(value):

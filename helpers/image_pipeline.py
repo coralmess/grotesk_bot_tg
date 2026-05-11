@@ -316,6 +316,8 @@ def upscale_image_bytes_for_telegram_sync(
                 output_bytes=len(img_bytes),
                 output_size=(w, h),
                 upscale_factor=1.0,
+                method="none",
+                fallback_mode="photo_prepared",
                 reason="large_enough",
             )
             return None
@@ -346,6 +348,8 @@ def upscale_image_bytes_for_telegram_sync(
                     output_bytes=len(data),
                     output_size=im_up.size,
                     upscale_factor=factor,
+                    method="lanczos_enhanced",
+                    fallback_mode="photo_prepared",
                 )
                 return data
 
@@ -371,6 +375,8 @@ def upscale_image_bytes_for_telegram_sync(
                         output_bytes=len(data),
                         output_size=trial.size,
                         upscale_factor=factor,
+                        method="lanczos_enhanced",
+                        fallback_mode="photo_prepared",
                         reason="downscaled_to_fit",
                     )
                     return data
@@ -382,6 +388,8 @@ def upscale_image_bytes_for_telegram_sync(
             image_url=image_url,
             input_bytes=len(img_bytes),
             input_size=(w, h),
+            method="lanczos_enhanced",
+            fallback_mode="raw_photo_fallback",
             reason="no_factor_fit",
         )
         return None
@@ -395,6 +403,8 @@ def upscale_image_bytes_for_telegram_sync(
             source_name=source_name,
             image_url=image_url,
             input_bytes=len(img_bytes) if img_bytes else 0,
+            method="unknown",
+            fallback_mode="raw_photo_fallback",
             reason=str(exc)[:120],
         )
         return None
@@ -429,6 +439,7 @@ async def send_remote_photo_with_fallback(
             source_kind=source_kind,
             source_name=source_name,
             image_url=image_url,
+            fallback_mode="invalid_image",
             reason="invalid_or_missing_url",
         )
         result = await send_message(bot, chat_id, caption)
@@ -443,6 +454,7 @@ async def send_remote_photo_with_fallback(
             source_kind=source_kind,
             source_name=source_name,
             image_url=image_url,
+            fallback_mode="download_failed",
             reason="download_failed",
         )
         result = await send_message(bot, chat_id, caption)
@@ -455,6 +467,10 @@ async def send_remote_photo_with_fallback(
         min_upscale_dim=min_upscale_dim,
         upscale_factors=upscale_factors,
         logger=logger,
+        analytics_sink=analytics_sink,
+        source_kind=source_kind,
+        source_name=source_name,
+        image_url=image_url,
     )
     photo_bytes = photo_bytes or raw
     _record_image_send_analytics(
@@ -480,6 +496,7 @@ async def send_remote_photo_with_fallback(
         image_url=image_url,
         input_bytes=len(raw),
         output_bytes=len(photo_bytes),
+        fallback_mode="text_fallback",
         reason="telegram_photo_send_failed",
     )
     result = await send_message(bot, chat_id, caption)
@@ -509,6 +526,8 @@ def _record_image_send_analytics(
         input_size=input_size,
         output_size=output_size,
         upscale_factor=_factor_from_sizes(input_size, output_size),
+        method="upscaled" if upscaled else "raw",
+        fallback_mode="photo_sent",
         reason="upscaled" if upscaled else "raw",
     )
 
@@ -525,6 +544,8 @@ def _record_image_analytics(
     input_size: tuple[int, int] | None = None,
     output_size: tuple[int, int] | None = None,
     upscale_factor: float | None = None,
+    method: str = "",
+    fallback_mode: str = "",
     reason: str = "",
 ) -> None:
     if analytics_sink is None:
@@ -543,6 +564,10 @@ def _record_image_analytics(
             payload["output_width"], payload["output_height"] = output_size
         if upscale_factor is not None:
             payload["upscale_factor"] = round(float(upscale_factor), 3)
+        if method:
+            payload["method"] = method[:80]
+        if fallback_mode:
+            payload["fallback_mode"] = fallback_mode[:80]
         if reason:
             payload["reason"] = reason[:120]
             payload["fallback_reason"] = reason[:120]

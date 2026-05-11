@@ -84,6 +84,8 @@ class MarketplaceImageUpscaleTests(unittest.TestCase):
             self.assertEqual(event["input_width"], 100)
             self.assertEqual(event["output_width"], 200)
             self.assertEqual(event["upscale_factor"], 2.0)
+            self.assertEqual(event["method"], "lanczos_enhanced")
+            self.assertEqual(event["fallback_mode"], "photo_prepared")
             self.assertEqual(event["url_host"], "example.com")
             self.assertNotIn("hidden", json.dumps(event))
 
@@ -123,9 +125,32 @@ class MarketplaceImageUpscaleTests(unittest.TestCase):
                 event = json.loads((Path(tmp_dir) / "events" / "2026-05-04.image_pipeline.jsonl").read_text(encoding="utf-8").splitlines()[0])
                 self.assertEqual(event["event"], "text_fallback")
                 self.assertEqual(event["fallback_reason"], "invalid_or_missing_url")
+                self.assertEqual(event["fallback_mode"], "invalid_image")
                 self.assertEqual(sent_messages, ["caption"])
 
         asyncio.run(_run())
+
+    def test_skip_upscale_records_dimensions_method_and_fallback_mode(self):
+        data = self._image_bytes(1600, 1500)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sink = AnalyticsSink(Path(tmp_dir), now_func=lambda: "2026-05-04T13:02:00Z")
+            result = upscale_image_bytes_for_telegram_sync(
+                data,
+                min_upscale_dim=1500,
+                analytics_sink=sink,
+                source_kind="olx",
+                source_name="Large Source",
+            )
+
+            self.assertIsNone(result)
+            event = json.loads((Path(tmp_dir) / "events" / "2026-05-04.image_pipeline.jsonl").read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(event["input_width"], 1600)
+            self.assertEqual(event["input_height"], 1500)
+            self.assertEqual(event["output_width"], 1600)
+            self.assertEqual(event["output_height"], 1500)
+            self.assertEqual(event["method"], "none")
+            self.assertEqual(event["fallback_mode"], "photo_prepared")
 
     def test_marketplace_jpeg_encoder_uses_fixed_quality_98(self):
         qualities = []

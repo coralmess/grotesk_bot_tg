@@ -83,6 +83,69 @@ class LystOutcomeTests(unittest.TestCase):
         self.assertEqual(outcome.note, "Partial coverage: failed")
         self.assertEqual(outcome.service_state_fields()["lyst_blocked_reason"], "failed")
 
+    def test_build_outcome_downgrades_low_coverage_success_to_partial(self):
+        outcome = build_lyst_run_outcome(
+            run_failed=False,
+            items_seen=16,
+            new_items=0,
+            cloudflare_event=None,
+            fallback_note="",
+            resume_outcomes={"Main brands::US": "terminal"},
+            coverage={"expected": 28, "completed": 1, "blocked": 0, "completed_percent": 3.571},
+            cleanup_skipped=False,
+        )
+
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.state, LystRunState.SUCCESS_PARTIAL)
+        self.assertEqual(outcome.phase, "succeeded_partial")
+        self.assertIn("low_coverage", outcome.note)
+        self.assertIn("3.571%", outcome.note)
+
+    def test_build_outcome_keeps_high_coverage_unblocked_success_full(self):
+        outcome = build_lyst_run_outcome(
+            run_failed=False,
+            items_seen=280,
+            new_items=4,
+            cloudflare_event=None,
+            fallback_note="",
+            resume_outcomes={"Main brands::US": "terminal"},
+            coverage={"expected": 28, "completed": 28, "blocked": 0, "completed_percent": 100.0},
+            cleanup_skipped=False,
+        )
+
+        self.assertEqual(outcome.state, LystRunState.SUCCESS_FULL)
+        self.assertEqual(outcome.note, "")
+
+    def test_build_outcome_downgrades_blocked_coverage_success_to_partial(self):
+        outcome = build_lyst_run_outcome(
+            run_failed=False,
+            items_seen=120,
+            new_items=2,
+            cloudflare_event=None,
+            fallback_note="",
+            resume_outcomes={"Main brands::US": "terminal"},
+            coverage={"expected": 28, "completed": 27, "blocked": 1, "completed_percent": 96.429},
+            cleanup_skipped=False,
+        )
+
+        self.assertEqual(outcome.state, LystRunState.SUCCESS_PARTIAL)
+        self.assertIn("blocked=1", outcome.note)
+
+    def test_build_outcome_downgrades_cleanup_skipped_success_to_partial(self):
+        outcome = build_lyst_run_outcome(
+            run_failed=False,
+            items_seen=24,
+            new_items=0,
+            cloudflare_event=None,
+            fallback_note="",
+            resume_outcomes={"Main brands::US": "terminal"},
+            coverage={"expected": 28, "completed": 28, "blocked": 0, "completed_percent": 100.0},
+            cleanup_skipped=True,
+        )
+
+        self.assertEqual(outcome.state, LystRunState.SUCCESS_PARTIAL)
+        self.assertIn("cleanup_skipped", outcome.note)
+
     def test_build_outcome_keeps_zero_useful_cloudflare_as_failed(self):
         outcome = build_lyst_run_outcome(
             run_failed=True,
