@@ -1273,5 +1273,57 @@ OLX_URLS = [
     {
         "url": "https://www.olx.ua/uk/moda-i-stil/muzhskoe-bele-plavki/noski/q-Pantherella/?currency=UAH&search%5Border%5D=created_at:desc",
         "url_name": "Pantherella"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/muzhskoe-bele-plavki/noski/q-Marcoliani/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Marcoliani"
+    },
+    {
+        "url": "https://m.olx.ua/uk/list/user/2hBHUa",
+        "url_name": "User 2hBHUa"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/2hBHUa",
+        "url_name": "User 2hBHUa"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-AUBERGE/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "AUBERGE"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Project-TWLV/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Project TWLV"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Descamps/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Descamps"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/user/p1Tl2",
+        "url_name": "User p1Tl2"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Grenfell/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Grenfell"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-CDLP/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "CDLP"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Pantherella/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Pantherella"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-aeron-remastered/?search%5Border%5D=created_at:desc",
+        "url_name": "Aeron Remastered"
+    },
+    {
+        "url": "https://www.olx.ua/uk/list/q-Aeron-Remastered/?search%5Border%5D=created_at:desc",
+        "url_name": "Aeron Remastered"
+    },
+    {
+        "url": "https://www.olx.ua/uk/moda-i-stil/q-Oomingmak/?currency=UAH&search%5Border%5D=created_at:desc",
+        "url_name": "Oomingmak"
     }
 ]

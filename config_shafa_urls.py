@@ -844,5 +844,65 @@ SHAFA_URLS = [
     {
         "url": "https://shafa.ua/uk/men?conditions=1&search_text=Falke&sizes=242&sizes=177&sizes=241&sizes=240&sizes=175&sizes=176&sort=4",
         "url_name": "Falke"
+    },
+    {
+        "url": "https://shafa.ua/uk/men?search_text=Marcoliani%20&sort=4",
+        "url_name": "Marcoliani"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/nizhnee-bele/trusy?conditions=1&search_text=Falke&sizes=149",
+        "url_name": "Falke"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/nizhnee-bele/trusy?search_text=Bread%20Boxers&sort=4",
+        "url_name": "Bread Boxers"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/nizhnee-bele/trusy?conditions=1&search_text=Mey&sizes=149",
+        "url_name": "Mey"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/nizhnee-bele/trusy?conditions=1&search_text=Bj%C3%B6rn%20Borg&sizes=149&sort=2",
+        "url_name": "Björn Borg"
+    },
+    {
+        "url": "https://shafa.ua/uk/men/nizhnee-bele/trusy?conditions=1&search_text=Bjorn%20Borg&sizes=149&sort=4",
+        "url_name": "Bjorn Borg"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=AUBERGE&sort=4",
+        "url_name": "AUBERGE"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Project%20TWLV",
+        "url_name": "Project TWLV"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Descamps&sort=4",
+        "url_name": "Descamps"
+    },
+    {
+        "url": "https://shafa.ua/uk/women/nizhnee-bele-i-kupalniki?conditions=1&price_to=1501&search_text=Lise%20Charmel&sizes=377&sizes=267&sizes=266&sort=4",
+        "url_name": "Lise Charmel"
+    },
+    {
+        "url": "https://shafa.ua/uk/women/nizhnee-bele-i-kupalniki/lifchiki?conditions=1&search_text=aubade&sizes=262&sizes=377&sizes=267&sizes=266&sort=4",
+        "url_name": "Aubade"
+    },
+    {
+        "url": "https://shafa.ua/uk/women/nizhnee-bele-i-kupalniki/lifchiki?conditions=1&search_text=Empreinte&sizes=262&sizes=377&sizes=267&sizes=266&sort=4",
+        "url_name": "Empreinte"
+    },
+    {
+        "url": "https://shafa.ua/uk/women/nizhnee-bele-i-kupalniki/lifchiki?conditions=1&search_text=Marie%20Jo&sizes=262&sizes=377&sizes=266&sizes=267&sort=4",
+        "url_name": "Marie Jo"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Pantherella&sort=4",
+        "url_name": "Pantherella"
+    },
+    {
+        "url": "https://shafa.ua/uk/clothes?search_text=Oomingmak&sort=4",
+        "url_name": "Oomingmak"
     }
 ]
