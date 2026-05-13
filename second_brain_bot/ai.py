@@ -239,12 +239,16 @@ class AIOrchestrator:
         analytics_sink: AnalyticsSink | None = None,
         provider_cooldown_after: int = 2,
         provider_cooldown_sec: int = 180,
+        max_provider_attempts: int = 2,
     ) -> None:
         self.providers = providers or {}
         self.analytics_sink = analytics_sink or AnalyticsSink()
         self._provider_lock = asyncio.Lock()
         self.provider_cooldown_after = max(1, int(provider_cooldown_after))
         self.provider_cooldown_sec = max(1, int(provider_cooldown_sec))
+        # Free-tier APIs should not all be burned by one failed task; a small
+        # fallback budget keeps quota for later captures and asks.
+        self.max_provider_attempts = max(1, int(max_provider_attempts))
         self._provider_failures: dict[str, int] = {}
         self._provider_cooldown_until: dict[str, float] = {}
 
@@ -334,7 +338,8 @@ class AIOrchestrator:
         order.extend(["gemini", "modal_glm", "cerebras", "groq"])
         seen: set[str] = set()
         ordered = [name for name in order if not (name in seen or seen.add(name))]
-        return [name for name in ordered if not self._provider_is_cooling_down(name)]
+        available = [name for name in ordered if name in self.providers and not self._provider_is_cooling_down(name)]
+        return available[: self.max_provider_attempts]
 
     def _provider_is_cooling_down(self, name: str) -> bool:
         until = self._provider_cooldown_until.get(name, 0.0)
@@ -386,18 +391,23 @@ def local_enrichment(text: str) -> AIEnrichment:
 
 def local_relation_suggestions(note_text: str, candidates: list[SearchResult]) -> list[RelatedNoteSuggestion]:
     note_words = set(_keywords(note_text))
+    note_terms = {word.lower().lstrip("#") for word in note_words}
     suggestions: list[RelatedNoteSuggestion] = []
     for candidate in candidates:
         candidate_words = set(candidate.entities + candidate.tags + _keywords(candidate.body))
+        candidate_terms = {str(word).lower().lstrip("#") for word in candidate_words}
         overlap = note_words & candidate_words
-        if not overlap:
+        normalized_overlap = note_terms & candidate_terms
+        if not overlap and not normalized_overlap:
             continue
-        confidence = min(0.85, 0.45 + len(overlap) * 0.1)
+        confidence = min(0.85, 0.45 + max(len(overlap), len(normalized_overlap)) * 0.1)
+        if normalized_overlap & {str(item).lower().lstrip("#") for item in [*candidate.entities, *candidate.tags]}:
+            confidence = max(confidence, 0.85)
         suggestions.append(
             RelatedNoteSuggestion(
                 note_id=candidate.note_id,
                 title=candidate.title,
-                reason="Shared terms: " + ", ".join(sorted(overlap)[:5]),
+                reason="Shared terms: " + ", ".join(sorted(overlap or normalized_overlap)[:5]),
                 confidence=confidence,
             )
         )

@@ -12,6 +12,7 @@ from second_brain_bot.ai import (
     ProviderResult,
     clean_human_response,
     format_note_context,
+    local_relation_suggestions,
 )
 from second_brain_bot.models import SearchResult
 
@@ -139,6 +140,22 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(gemini.calls), 1)
         self.assertEqual(len(modal.calls), 0)
 
+    async def test_local_relation_suggestions_trust_exact_entity_overlap(self) -> None:
+        candidate = SearchResult(
+            note_id="n1",
+            title="Knife Wishlist",
+            path="4-Incubator/Purchases/Knife Wishlist.md",
+            tags=["#wishlist"],
+            entities=["knife"],
+            body="Buy knife",
+            status="Incubating",
+        )
+
+        relations = local_relation_suggestions("This knife brand is great\nEntities: knife", [candidate])
+
+        self.assertEqual(len(relations), 1)
+        self.assertGreaterEqual(relations[0].confidence, 0.85)
+
     async def test_falls_back_when_preferred_provider_fails(self) -> None:
         cerebras = FakeProvider("cerebras", error=RuntimeError("rate limited"))
         modal = FakeProvider(
@@ -194,6 +211,23 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enrichment.provider, "local_fallback")
         self.assertIn("#buy", enrichment.suggested_tags)
         self.assertEqual(enrichment.parent_moc, "Purchases MOC")
+
+    async def test_failed_task_uses_limited_provider_budget_before_local_fallback(self) -> None:
+        providers = {
+            "gemini": FakeProvider("gemini", error=RuntimeError("down")),
+            "modal_glm": FakeProvider("modal_glm", error=RuntimeError("down")),
+            "cerebras": FakeProvider("cerebras", error=RuntimeError("down")),
+            "groq": FakeProvider("groq", error=RuntimeError("down")),
+        }
+        ai = self._ai(providers=providers)
+
+        result = await ai.ask("What should I do?", context="Buy knife", heavy=True)
+
+        self.assertEqual(result.provider, "local_fallback")
+        self.assertEqual(len(providers["gemini"].calls), 1)
+        self.assertEqual(len(providers["modal_glm"].calls), 1)
+        self.assertEqual(len(providers["cerebras"].calls), 0)
+        self.assertEqual(len(providers["groq"].calls), 0)
 
     async def test_image_bytes_are_not_sent_to_ai_prompt(self) -> None:
         modal = FakeProvider(

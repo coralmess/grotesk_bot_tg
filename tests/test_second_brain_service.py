@@ -20,6 +20,7 @@ def make_test_service(tmp: str, ai) -> SecondBrainService:
 class FakeAI:
     def __init__(self) -> None:
         self.enrich_calls: list[str] = []
+        self.relation_calls = 0
         self.ask_calls: list[tuple[str, str, bool]] = []
 
     async def enrich_capture(self, text: str, *, image_bytes=None, preferred_provider=None, allow_web=False):
@@ -42,6 +43,7 @@ class FakeAI:
         )
 
     async def suggest_relations(self, note_text, candidates):
+        self.relation_calls += 1
         return [
             RelatedNoteSuggestion(
                 note_id=candidates[0].note_id,
@@ -109,6 +111,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(relations), 1)
             self.assertEqual(relations[0].target_note_id, first.note_id)
             self.assertIn("[[Knife Brand - Purchase Research Note]]", second.path.read_text(encoding="utf-8"))
+            self.assertEqual(service.ai.relation_calls, 0)
 
     async def test_retry_pending_ai_enrichments_updates_local_fallback_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
