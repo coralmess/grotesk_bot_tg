@@ -12,7 +12,6 @@ from second_brain_bot.ai import (
     ProviderResult,
     clean_human_response,
     format_note_context,
-    local_relation_suggestions,
 )
 from second_brain_bot.models import SearchResult
 
@@ -45,6 +44,21 @@ class PlainTextOnlyProvider(FakeProvider):
         if self.result is None:
             raise RuntimeError("missing result")
         return self.result
+
+
+class SequencedProvider(FakeProvider):
+    def __init__(self, name: str, results: list[ProviderResult | Exception]) -> None:
+        super().__init__(name)
+        self.results = list(results)
+
+    async def complete_json(self, *, task: str, prompt: str, max_tokens: int = 800) -> ProviderResult:
+        self.calls.append((task, prompt, max_tokens))
+        if not self.results:
+            raise RuntimeError("missing result")
+        item = self.results.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
@@ -140,7 +154,19 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(gemini.calls), 1)
         self.assertEqual(len(modal.calls), 0)
 
-    async def test_local_relation_suggestions_trust_exact_entity_overlap(self) -> None:
+    async def test_combined_enrichment_and_relations_uses_one_provider_request(self) -> None:
+        gemini = FakeProvider(
+            "gemini",
+            result=ProviderResult(
+                provider="gemini",
+                model="gemini-3-flash-preview",
+                payload={
+                    "title": "Knife Brand - Purchase Research Note",
+                    "summary": "A captured note about a good knife brand.",
+                    "related_notes": [{"note_id": "n1", "reason": "same purchase topic", "confidence": 0.9}],
+                },
+            ),
+        )
         candidate = SearchResult(
             note_id="n1",
             title="Knife Wishlist",
@@ -150,11 +176,41 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             body="Buy knife",
             status="Incubating",
         )
+        ai = self._ai(providers={"gemini": gemini})
 
-        relations = local_relation_suggestions("This knife brand is great\nEntities: knife", [candidate])
+        enrichment, relations = await ai.enrich_capture_with_relations("This knife brand is great", [candidate])
 
-        self.assertEqual(len(relations), 1)
-        self.assertGreaterEqual(relations[0].confidence, 0.85)
+        self.assertEqual(enrichment.provider, "gemini")
+        self.assertEqual(relations[0].note_id, "n1")
+        self.assertEqual(len(gemini.calls), 1)
+        self.assertEqual(gemini.calls[0][0], "enrich")
+        self.assertIn("Candidates", gemini.calls[0][1])
+
+    async def test_gemini_json_tasks_retry_before_fallback(self) -> None:
+        gemini = SequencedProvider(
+            "gemini",
+            [
+                RuntimeError("temporary 429"),
+                RuntimeError("temporary 429"),
+                ProviderResult(
+                    provider="gemini",
+                    model="gemini-3-flash-preview",
+                    payload={"title": "Retried Gemini note"},
+                ),
+            ],
+        )
+        modal = FakeProvider(
+            "modal_glm",
+            result=ProviderResult(provider="modal_glm", model="glm", payload={"title": "Fallback note"}),
+        )
+        ai = self._ai(providers={"gemini": gemini, "modal_glm": modal})
+
+        enrichment = await ai.enrich_capture("retry this")
+
+        self.assertEqual(enrichment.provider, "gemini")
+        self.assertEqual(enrichment.title, "Retried Gemini note")
+        self.assertEqual(len(gemini.calls), 3)
+        self.assertEqual(len(modal.calls), 0)
 
     async def test_falls_back_when_preferred_provider_fails(self) -> None:
         cerebras = FakeProvider("cerebras", error=RuntimeError("rate limited"))
@@ -199,7 +255,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first.provider, "modal_glm")
         self.assertEqual(second.provider, "modal_glm")
-        self.assertEqual(len(failing.calls), 1)
+        self.assertEqual(len(failing.calls), 3)
         self.assertEqual(len(fallback.calls), 2)
 
     async def test_non_ai_fallback_preserves_text_when_all_providers_fail(self) -> None:
@@ -211,23 +267,6 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enrichment.provider, "local_fallback")
         self.assertIn("#buy", enrichment.suggested_tags)
         self.assertEqual(enrichment.parent_moc, "Purchases MOC")
-
-    async def test_failed_task_uses_limited_provider_budget_before_local_fallback(self) -> None:
-        providers = {
-            "gemini": FakeProvider("gemini", error=RuntimeError("down")),
-            "modal_glm": FakeProvider("modal_glm", error=RuntimeError("down")),
-            "cerebras": FakeProvider("cerebras", error=RuntimeError("down")),
-            "groq": FakeProvider("groq", error=RuntimeError("down")),
-        }
-        ai = self._ai(providers=providers)
-
-        result = await ai.ask("What should I do?", context="Buy knife", heavy=True)
-
-        self.assertEqual(result.provider, "local_fallback")
-        self.assertEqual(len(providers["gemini"].calls), 1)
-        self.assertEqual(len(providers["modal_glm"].calls), 1)
-        self.assertEqual(len(providers["cerebras"].calls), 0)
-        self.assertEqual(len(providers["groq"].calls), 0)
 
     async def test_image_bytes_are_not_sent_to_ai_prompt(self) -> None:
         modal = FakeProvider(

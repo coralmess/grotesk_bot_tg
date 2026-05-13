@@ -20,6 +20,7 @@ def make_test_service(tmp: str, ai) -> SecondBrainService:
 class FakeAI:
     def __init__(self) -> None:
         self.enrich_calls: list[str] = []
+        self.enrich_with_relations_calls: list[tuple[str, int]] = []
         self.relation_calls = 0
         self.ask_calls: list[tuple[str, str, bool]] = []
 
@@ -53,6 +54,24 @@ class FakeAI:
             )
         ] if candidates else []
 
+    async def enrich_capture_with_relations(self, text, candidates, *, image_bytes=None, preferred_provider=None, allow_web=False):
+        self.enrich_with_relations_calls.append((text, len(candidates)))
+        enrichment = await self.enrich_capture(
+            text,
+            image_bytes=image_bytes,
+            preferred_provider=preferred_provider,
+            allow_web=allow_web,
+        )
+        related = [
+            RelatedNoteSuggestion(
+                note_id=candidates[0].note_id,
+                title=candidates[0].title,
+                reason="Both mention knives.",
+                confidence=0.9,
+            )
+        ] if candidates else []
+        return enrichment, related
+
     async def ask(self, question: str, *, context: str, heavy: bool = True, **kwargs):
         self.ask_calls.append((question, context, heavy))
         if "learning session" in question.lower():
@@ -83,6 +102,15 @@ class RetryAI:
     async def suggest_relations(self, note_text, candidates):
         return []
 
+    async def enrich_capture_with_relations(self, text, candidates, *, image_bytes=None, preferred_provider=None, allow_web=False):
+        enrichment = await self.enrich_capture(
+            text,
+            image_bytes=image_bytes,
+            preferred_provider=preferred_provider,
+            allow_web=allow_web,
+        )
+        return enrichment, await self.suggest_relations(text, candidates)
+
     async def ask(self, question: str, *, context: str, heavy: bool = True, **kwargs):
         return type("Result", (), {"text": "answer", "provider": "gemini"})()
 
@@ -111,6 +139,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(relations), 1)
             self.assertEqual(relations[0].target_note_id, first.note_id)
             self.assertIn("[[Knife Brand - Purchase Research Note]]", second.path.read_text(encoding="utf-8"))
+            self.assertEqual(len(service.ai.enrich_with_relations_calls), 2)
             self.assertEqual(service.ai.relation_calls, 0)
 
     async def test_retry_pending_ai_enrichments_updates_local_fallback_note(self) -> None:

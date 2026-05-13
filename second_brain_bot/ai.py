@@ -239,16 +239,18 @@ class AIOrchestrator:
         analytics_sink: AnalyticsSink | None = None,
         provider_cooldown_after: int = 2,
         provider_cooldown_sec: int = 180,
-        max_provider_attempts: int = 2,
+        gemini_retry_attempts: int = 3,
+        gemini_retry_delay_sec: float = 0.5,
     ) -> None:
         self.providers = providers or {}
         self.analytics_sink = analytics_sink or AnalyticsSink()
         self._provider_lock = asyncio.Lock()
         self.provider_cooldown_after = max(1, int(provider_cooldown_after))
         self.provider_cooldown_sec = max(1, int(provider_cooldown_sec))
-        # Free-tier APIs should not all be burned by one failed task; a small
-        # fallback budget keeps quota for later captures and asks.
-        self.max_provider_attempts = max(1, int(max_provider_attempts))
+        # Gemini is the main free-tier model, so transient 429/503/network
+        # errors get a small local retry budget before spending fallback quota.
+        self.gemini_retry_attempts = max(1, int(gemini_retry_attempts))
+        self.gemini_retry_delay_sec = max(0.0, float(gemini_retry_delay_sec))
         self._provider_failures: dict[str, int] = {}
         self._provider_cooldown_until: dict[str, float] = {}
 
@@ -268,7 +270,7 @@ class AIOrchestrator:
                 continue
             try:
                 async with self._provider_lock:
-                    result = await provider.complete_json(task="enrich", prompt=prompt, max_tokens=900)
+                    result = await self._complete_json_with_retries(name, provider, task="enrich", prompt=prompt, max_tokens=900)
                 self._record_provider_success(name)
                 return _enrichment_from_payload(result.payload, provider=result.provider, fallback_text=text)
             except Exception:
@@ -276,6 +278,40 @@ class AIOrchestrator:
                 LOGGER.warning("Second Brain AI provider failed for enrichment: %s", name)
                 continue
         return local_enrichment(text)
+
+    async def enrich_capture_with_relations(
+        self,
+        text: str,
+        candidates: list[SearchResult],
+        *,
+        image_bytes: bytes | None = None,
+        preferred_provider: str | None = None,
+        allow_web: bool = False,
+    ) -> tuple[AIEnrichment, list[RelatedNoteSuggestion]]:
+        del image_bytes  # Hosted v1 enrichment intentionally receives text/caption only.
+        prompt = _enrichment_with_relations_prompt(text, candidates, allow_web=allow_web)
+        for name in self._route(preferred_provider=preferred_provider, task="enrich"):
+            provider = self.providers.get(name)
+            if provider is None:
+                continue
+            try:
+                async with self._provider_lock:
+                    result = await self._complete_json_with_retries(
+                        name,
+                        provider,
+                        task="enrich",
+                        prompt=prompt,
+                        max_tokens=1200,
+                    )
+                self._record_provider_success(name)
+                enrichment = _enrichment_from_payload(result.payload, provider=result.provider, fallback_text=text)
+                return enrichment, _relations_from_payload(result.payload, candidates)
+            except Exception:
+                self._record_provider_failure(name)
+                LOGGER.warning("Second Brain AI provider failed for combined enrichment: %s", name)
+                continue
+        enrichment = local_enrichment(text)
+        return enrichment, local_relation_suggestions(text, candidates)
 
     async def suggest_relations(self, note_text: str, candidates: list[SearchResult]) -> list[RelatedNoteSuggestion]:
         if not candidates:
@@ -288,7 +324,13 @@ class AIOrchestrator:
                 continue
             try:
                 async with self._provider_lock:
-                    result = await provider.complete_json(task="relations", prompt=prompt, max_tokens=800)
+                    result = await self._complete_json_with_retries(
+                        name,
+                        provider,
+                        task="relations",
+                        prompt=prompt,
+                        max_tokens=800,
+                    )
                 self._record_provider_success(name)
                 return _relations_from_payload(result.payload, candidates)
             except Exception:
@@ -317,7 +359,7 @@ class AIOrchestrator:
                 continue
             try:
                 async with self._provider_lock:
-                    result = await provider.complete_text(task=task, prompt=prompt, max_tokens=1200)
+                    result = await self._complete_text_with_retries(name, provider, task=task, prompt=prompt, max_tokens=1200)
                 self._record_provider_success(name)
                 text = clean_human_response(str(result.text or result.payload.get("answer") or result.payload.get("text") or ""))
                 return ProviderResult(provider=result.provider, model=result.model, payload=result.payload, text=text)
@@ -338,8 +380,51 @@ class AIOrchestrator:
         order.extend(["gemini", "modal_glm", "cerebras", "groq"])
         seen: set[str] = set()
         ordered = [name for name in order if not (name in seen or seen.add(name))]
-        available = [name for name in ordered if name in self.providers and not self._provider_is_cooling_down(name)]
-        return available[: self.max_provider_attempts]
+        return [name for name in ordered if not self._provider_is_cooling_down(name)]
+
+    async def _complete_json_with_retries(
+        self,
+        name: str,
+        provider: ModelProvider,
+        *,
+        task: str,
+        prompt: str,
+        max_tokens: int,
+    ) -> ProviderResult:
+        attempts = self.gemini_retry_attempts if name == "gemini" else 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return await provider.complete_json(task=task, prompt=prompt, max_tokens=max_tokens)
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 >= attempts:
+                    break
+                await asyncio.sleep(self.gemini_retry_delay_sec)
+        assert last_error is not None
+        raise last_error
+
+    async def _complete_text_with_retries(
+        self,
+        name: str,
+        provider: ModelProvider,
+        *,
+        task: str,
+        prompt: str,
+        max_tokens: int,
+    ) -> ProviderResult:
+        attempts = self.gemini_retry_attempts if name == "gemini" else 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return await provider.complete_text(task=task, prompt=prompt, max_tokens=max_tokens)
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 >= attempts:
+                    break
+                await asyncio.sleep(self.gemini_retry_delay_sec)
+        assert last_error is not None
+        raise last_error
 
     def _provider_is_cooling_down(self, name: str) -> bool:
         until = self._provider_cooldown_until.get(name, 0.0)
@@ -391,23 +476,18 @@ def local_enrichment(text: str) -> AIEnrichment:
 
 def local_relation_suggestions(note_text: str, candidates: list[SearchResult]) -> list[RelatedNoteSuggestion]:
     note_words = set(_keywords(note_text))
-    note_terms = {word.lower().lstrip("#") for word in note_words}
     suggestions: list[RelatedNoteSuggestion] = []
     for candidate in candidates:
         candidate_words = set(candidate.entities + candidate.tags + _keywords(candidate.body))
-        candidate_terms = {str(word).lower().lstrip("#") for word in candidate_words}
         overlap = note_words & candidate_words
-        normalized_overlap = note_terms & candidate_terms
-        if not overlap and not normalized_overlap:
+        if not overlap:
             continue
-        confidence = min(0.85, 0.45 + max(len(overlap), len(normalized_overlap)) * 0.1)
-        if normalized_overlap & {str(item).lower().lstrip("#") for item in [*candidate.entities, *candidate.tags]}:
-            confidence = max(confidence, 0.85)
+        confidence = min(0.85, 0.45 + len(overlap) * 0.1)
         suggestions.append(
             RelatedNoteSuggestion(
                 note_id=candidate.note_id,
                 title=candidate.title,
-                reason="Shared terms: " + ", ".join(sorted(overlap or normalized_overlap)[:5]),
+                reason="Shared terms: " + ", ".join(sorted(overlap)[:5]),
                 confidence=confidence,
             )
         )
@@ -448,6 +528,28 @@ def _enrichment_prompt(text: str, *, allow_web: bool) -> str:
         "enrichment_notes, scored_suggestions. scored_suggestions must be a list of objects with title, score, reason. "
         "suggested_folder must be one of 1-Projects, 2-Areas, 3-Resources, 4-Incubator. "
         f"Public web lookup allowed by policy: {allow_web}.\n\nCapture:\n{text[:8000]}"
+    )
+
+
+def _enrichment_with_relations_prompt(text: str, candidates: list[SearchResult], *, allow_web: bool) -> str:
+    packed = [
+        {
+            "note_id": item.note_id,
+            "title": item.title,
+            "path": item.path,
+            "tags": item.tags,
+            "entities": item.entities,
+            "excerpt": item.body[:700],
+        }
+        for item in candidates[:10]
+    ]
+    return (
+        _enrichment_prompt(text, allow_web=allow_web)
+        + "\n\nRelationship judging rules:\n"
+        "- Also judge genuinely useful links between this new capture and the existing candidate notes below.\n"
+        "- Return related_notes in the same JSON object, as a list of objects with note_id, reason, confidence.\n"
+        "- Only include notes with confidence >= 0.55.\n\n"
+        f"Candidates:\n{json.dumps(packed, ensure_ascii=False)}"
     )
 
 

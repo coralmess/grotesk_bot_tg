@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from helpers.analytics_events import AnalyticsSink
-from second_brain_bot.ai import AIEnrichment, AIOrchestrator, RelatedNoteSuggestion, format_note_context, local_relation_suggestions
+from second_brain_bot.ai import AIOrchestrator, RelatedNoteSuggestion, format_note_context
 from second_brain_bot.index import SecondBrainIndex
 from second_brain_bot.models import ActionRecord, NoteRecord, RelationRecord
 from second_brain_bot.vault import CaptureInput, NoteFile, SecondBrainVault, utc_now_iso
@@ -50,11 +50,14 @@ class SecondBrainService:
         if should_allow_public_lookup(text, explicit=allow_web):
             lookup_notes = await self._public_lookup_notes(text)
         enrichment_text = text + ("\n\nPublic lookup notes:\n" + lookup_notes if lookup_notes else "")
-        enrichment = await self.ai.enrich_capture(enrichment_text, allow_web=bool(lookup_notes or allow_web))
-        candidates = self._candidate_notes(enrichment_text, enrichment.entities + enrichment.suggested_tags)
-        # Capture is the hottest path: keep relation linking local so one saved
-        # note does not spend a second provider request after enrichment.
-        related = local_relation_suggestions(_relation_source_text(enrichment_text, enrichment), candidates)
+        initial_candidates = self._candidate_notes(enrichment_text, [])
+        # Enrichment and relation judging share one model request so capture
+        # keeps AI quality without spending a second provider call.
+        enrichment, related = await self.ai.enrich_capture_with_relations(
+            enrichment_text,
+            initial_candidates,
+            allow_web=bool(lookup_notes or allow_web),
+        )
         note = self.vault.create_capture_note(
             CaptureInput(
                 capture_type=capture_type,
@@ -190,12 +193,11 @@ class SecondBrainService:
     async def retry_pending_ai_enrichments(self, *, limit: int = 2) -> list[NoteFile]:
         updated: list[NoteFile] = []
         for note_id, metadata, source_text in self.vault.pending_ai_retry_notes(limit=limit):
-            enrichment = await self.ai.enrich_capture(source_text)
-            # Retry may run unattended; local linking avoids multiplying API
-            # calls when providers are already degraded or rate-limited.
-            related = local_relation_suggestions(
-                _relation_source_text(source_text, enrichment),
-                self._candidate_notes(source_text, enrichment.entities + enrichment.suggested_tags),
+            # Retry uses the same combined AI request as live capture so it
+            # refreshes structure and links without doubling provider usage.
+            enrichment, related = await self.ai.enrich_capture_with_relations(
+                source_text,
+                self._candidate_notes(source_text, []),
             )
             note = self.vault.rewrite_capture_note(
                 note_id,
@@ -433,11 +435,6 @@ def _looks_task_question(question: str) -> bool:
             "to do",
         )
     )
-
-
-def _relation_source_text(text: str, enrichment: AIEnrichment) -> str:
-    terms = [*enrichment.entities, *enrichment.suggested_tags, *enrichment.related_links]
-    return (text + "\n\nRelation terms: " + ", ".join(str(term) for term in terms if term)).strip()
 
 
 def _looks_weak_title(title: str) -> bool:
