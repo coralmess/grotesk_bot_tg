@@ -38,8 +38,30 @@ Rules:
 - For wellbeing or mental-performance captures, suggest evidence-informed methods without diagnosing the user or pretending to provide therapy.
 """.strip()
 
+TASK_SYSTEM_INSTRUCTIONS = {
+    "ask": (
+        SECOND_BRAIN_SYSTEM_INSTRUCTIONS
+        + "\n\nTask: answering questions from the user's saved vault. Require evidence from notes, cite note titles or paths, "
+        "separate assumptions from saved facts, and say clearly when the vault does not support an answer."
+    ),
+    "learn": (
+        SECOND_BRAIN_SYSTEM_INSTRUCTIONS
+        + "\n\nTask: creating learning sessions from saved notes. Teach clearly, explain why the concept matters, include examples, "
+        "misconceptions, recall questions, flashcards, practice, and scored next steps."
+    ),
+    "enrich": (
+        SECOND_BRAIN_SYSTEM_INSTRUCTIONS
+        + "\n\nTask: cataloging captured notes. Preserve the raw capture, add only useful high-confidence enrichment, "
+        "avoid noisy guesses, and return structured metadata for the vault."
+    ),
+    "relations": (
+        SECOND_BRAIN_SYSTEM_INSTRUCTIONS
+        + "\n\nTask: judging relationships between notes. Link only genuinely related notes and prefer precise reasons over broad topic overlap."
+    ),
+}
+
 JSON_SYSTEM_INSTRUCTIONS = (
-    SECOND_BRAIN_SYSTEM_INSTRUCTIONS
+    TASK_SYSTEM_INSTRUCTIONS["enrich"]
     + "\n\nFor this task, return only valid JSON matching the requested schema. "
     "Do not wrap it in markdown. Do not include chain-of-thought."
 )
@@ -128,7 +150,7 @@ class OpenAICompatibleProvider:
                         "messages": [
                             {
                                 "role": "system",
-                                "content": JSON_SYSTEM_INSTRUCTIONS,
+                                "content": self._system_instructions_for_task(task, json_mode=True),
                             },
                             {"role": "user", "content": prompt},
                         ],
@@ -162,7 +184,7 @@ class OpenAICompatibleProvider:
                         "messages": [
                             {
                                 "role": "system",
-                                "content": SECOND_BRAIN_SYSTEM_INSTRUCTIONS,
+                                "content": self._system_instructions_for_task(task),
                             },
                             {"role": "user", "content": prompt},
                         ],
@@ -180,6 +202,12 @@ class OpenAICompatibleProvider:
         except Exception as exc:
             self._record("failed", task, started, error=str(exc)[:160])
             raise
+
+    def _system_instructions_for_task(self, task: str, *, json_mode: bool = False) -> str:
+        base = TASK_SYSTEM_INSTRUCTIONS.get(task, SECOND_BRAIN_SYSTEM_INSTRUCTIONS)
+        if json_mode:
+            return base + "\n\nReturn only valid JSON matching the requested schema. Do not wrap it in markdown."
+        return base
 
     def _record(self, event: str, task: str, started: float, *, error: str = "") -> None:
         try:
@@ -265,9 +293,8 @@ class AIOrchestrator:
                 continue
         return local_relation_suggestions(note_text, candidates)
 
-    async def ask(self, question: str, *, context: str, heavy: bool = True) -> ProviderResult:
+    async def ask(self, question: str, *, context: str, heavy: bool = True, task: str = "ask") -> ProviderResult:
         prompt = (
-            f"{SECOND_BRAIN_SYSTEM_INSTRUCTIONS}\n\n"
             "Answer the user's question using the collected Second Brain context first. "
             "Cite note titles or paths when possible. If the context does not support an answer, say so. "
             "Return a human-readable Telegram answer, not JSON. For task questions, use a short bullet list.\n"
@@ -286,7 +313,7 @@ class AIOrchestrator:
                 continue
             try:
                 async with self._provider_lock:
-                    result = await provider.complete_text(task="ask", prompt=prompt, max_tokens=1200)
+                    result = await provider.complete_text(task=task, prompt=prompt, max_tokens=1200)
                 self._record_provider_success(name)
                 text = clean_human_response(str(result.text or result.payload.get("answer") or result.payload.get("text") or ""))
                 return ProviderResult(provider=result.provider, model=result.model, payload=result.payload, text=text)

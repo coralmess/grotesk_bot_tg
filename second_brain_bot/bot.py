@@ -190,7 +190,7 @@ class SecondBrainTelegramBot:
         thinking = await update.effective_message.reply_text(THINKING_MESSAGE)
         try:
             result = await self.service.learn(selector)
-            await _edit_or_reply(thinking, _format_learning_result(result))
+            await _edit_or_reply(thinking, _format_learning_result(result), parse_mode="HTML")
         except KeyError:
             await _edit_or_reply(thinking, "I could not find a matching note to learn from.")
         except Exception as exc:
@@ -504,7 +504,7 @@ def _display_vault_group(path_value: str) -> str:
     return "Vault"
 
 
-def _format_learning_result(result) -> str:
+def _legacy_plain_learning_result(result) -> str:
     path = _display_note_breadcrumb(getattr(result.note, "path", ""))
     provider = _display_provider_name(str(getattr(result, "provider", "") or getattr(result.note, "provider", "")))
     suffix = f" ({provider})" if provider else ""
@@ -631,15 +631,15 @@ def _display_provider_name(provider: str) -> str:
     return mapping.get(provider.strip(), provider.strip())
 
 
-async def _edit_or_reply(message, text: str) -> None:
+async def _edit_or_reply(message, text: str, *, parse_mode: str | None = None) -> None:
     parts = _split_for_telegram(text)
     try:
-        await message.edit_text(parts[0])
+        await message.edit_text(parts[0], parse_mode=parse_mode)
         for part in parts[1:]:
-            await message.reply_text(part)
+            await message.reply_text(part, parse_mode=parse_mode)
     except Exception:
         for part in parts:
-            await message.reply_text(part)
+            await message.reply_text(part, parse_mode=parse_mode)
 
 
 def _shorten_for_telegram(text: str, *, limit: int = 3900) -> str:
@@ -675,6 +675,29 @@ def _split_for_telegram(text: str, *, limit: int = 3900) -> list[str]:
         allowed = max(1, limit - len(prefix))
         result.append(prefix + _shorten_for_telegram(chunk, limit=allowed))
     return result
+
+
+def _learning_text_to_html_with_spoilers(text: str) -> str:
+    lines: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if re.match(r"(?i)^a:\s+", line):
+            answer = re.sub(r"(?i)^a:\s+", "", line).strip()
+            lines.append(f'A: <span class="tg-spoiler">{html.escape(answer)}</span>')
+        else:
+            lines.append(html.escape(raw_line))
+    return "\n".join(lines).strip()
+
+
+def _format_learning_result(result) -> str:
+    path = _display_note_breadcrumb(getattr(result.note, "path", ""))
+    provider = _display_provider_name(str(getattr(result, "provider", "") or getattr(result.note, "provider", "")))
+    suffix = f" ({provider})" if provider else ""
+    header = (
+        f"ðŸ§  <b>Learning saved:</b> {html.escape(path)}\n"
+        f"ðŸ“„ <b>ID:</b> {html.escape(str(result.note.note_id))}{html.escape(suffix)}"
+    )
+    return _shorten_for_telegram(header + "\n\n" + _learning_text_to_html_with_spoilers(str(result.text or "").strip()))
 
 
 if __name__ == "__main__":

@@ -145,15 +145,16 @@ class SecondBrainIndex:
             if current is None or score > current[0]:
                 ranked[result.note_id] = (score, result)
 
+        terms = _query_terms(query)
         for item in self._exact_search(query, limit=max(limit, 10), exclude_note_id=exclude_note_id):
-            add(item, 300)
+            add(item, 300 + _note_relevance_score(item, terms))
         for item in self.search(query, limit=max(limit, 10), exclude_note_id=exclude_note_id):
-            add(item, 200)
+            add(item, 200 + _note_relevance_score(item, terms))
 
         seed_ids = [item.note_id for _score, item in sorted(ranked.values(), key=lambda pair: pair[0], reverse=True)[:limit]]
         if seed_ids:
             for item in self._related_notes(seed_ids, limit=max(limit, 10), exclude_note_id=exclude_note_id):
-                add(item, 100)
+                add(item, 100 + _note_relevance_score(item, terms))
 
         ordered = [item for _score, item in sorted(ranked.values(), key=lambda pair: pair[0], reverse=True)]
         return ordered[: int(limit)]
@@ -347,7 +348,7 @@ class SecondBrainIndex:
 
 
 def _fts_query(query: str) -> str:
-    parts = [part.replace('"', "") for part in query.split() if part.strip()]
+    parts = [part.replace('"', "") for part in _query_terms(query)]
     if not parts:
         return '""'
     return " OR ".join(f'"{part}"' for part in parts[:8])
@@ -359,3 +360,49 @@ def _looks_generic_task_query(query: str) -> bool:
         phrase in lowered
         for phrase in ("what should i do", "what do i need", "need to do", "things i need", "tasks", "actions")
     )
+
+
+def _query_terms(query: str) -> list[str]:
+    stop = {
+        "what",
+        "where",
+        "when",
+        "about",
+        "know",
+        "need",
+        "should",
+        "things",
+        "please",
+        "vault",
+    }
+    return [
+        part.strip().lower()
+        for part in (query or "").split()
+        if len(part.strip()) >= 3 and part.strip().lower() not in stop
+    ][:8]
+
+
+def _note_relevance_score(note: SearchResult, terms: list[str]) -> int:
+    title = note.title.lower()
+    path = note.path.lower()
+    tags = " ".join(note.tags).lower()
+    entities = " ".join(note.entities).lower()
+    body = note.body[:2000].lower()
+    score = 0
+    for term in terms:
+        if term in title:
+            score += 120
+        if term in entities:
+            score += 100
+        if term in tags:
+            score += 60
+        if term in path:
+            score += 40
+        if term in body:
+            score += 20
+    phrase = " ".join(terms)
+    if phrase and phrase in title:
+        score += 160
+    if phrase and phrase in entities:
+        score += 120
+    return score

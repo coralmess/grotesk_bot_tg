@@ -41,7 +41,7 @@ class FakeAI:
             )
         ] if candidates else []
 
-    async def ask(self, question: str, *, context: str, heavy: bool = True):
+    async def ask(self, question: str, *, context: str, heavy: bool = True, **kwargs):
         self.ask_calls.append((question, context, heavy))
         if "learning session" in question.lower():
             return type("Result", (), {"text": "Lesson body with examples, answers, and scored next steps.", "provider": "fake"})()
@@ -130,6 +130,16 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Open Actions", context)
             self.assertIn("Compare with wishlist", context)
 
+    async def test_ask_returns_not_found_without_ai_when_no_evidence_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ai = FakeAI()
+            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+
+            answer = await service.ask("what do I know about sailing?")
+
+            self.assertIn("could not find", answer.lower())
+            self.assertEqual(ai.ask_calls, [])
+
     async def test_digest_writes_daily_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = SecondBrainService(vault_dir=Path(tmp), ai=FakeAI())
@@ -160,6 +170,9 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             report = service.vault_health()
 
             self.assertIn("Vault Health", report)
+            self.assertIn("Overall score:", report)
+            self.assertIn("Title score:", report)
+            self.assertIn("Link score:", report)
             self.assertIn("Weak titles: 1", report)
             self.assertIn("Missing parent MOC links: 1", report)
             self.assertIn("Non-English metadata: 1", report)
@@ -191,6 +204,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("Lesson body with examples", lesson.text)
             self.assertIn("recall questions", ai.ask_calls[-1][0].lower())
+            self.assertIn("flashcards", ai.ask_calls[-1][0].lower())
             self.assertIn("practice exercise", ai.ask_calls[-1][0].lower())
             self.assertIn("Learning", lesson.note.title)
             self.assertTrue(lesson.note.path.exists())

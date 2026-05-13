@@ -91,6 +91,41 @@ class SecondBrainIndexTests(unittest.TestCase):
 
             self.assertEqual([item.note_id for item in results], ["representativeness", "thinking-fast-slow"])
 
+    def test_deep_search_ranks_title_and_entity_matches_before_body_only_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            index = SecondBrainIndex(Path(tmp) / "brain.db")
+            index.upsert_note(
+                NoteRecord(
+                    note_id="body-only",
+                    title="General Psychology Notes",
+                    path="3-Resources/Psychology/General Psychology Notes.md",
+                    tags=["#psychology"],
+                    entities=[],
+                    body="Representativeness heuristic appears in this long body excerpt.",
+                    status="Reference",
+                    created_at="2026-05-13T10:00:00Z",
+                    updated_at="2026-05-13T10:00:00Z",
+                )
+            )
+            index.upsert_note(
+                NoteRecord(
+                    note_id="direct-title",
+                    title="Representativeness Heuristic",
+                    path="3-Resources/Psychology/Representativeness Heuristic.md",
+                    tags=["#psychology"],
+                    entities=["Representativeness Heuristic"],
+                    body="Short note.",
+                    status="Reference",
+                    created_at="2026-05-13T09:00:00Z",
+                    updated_at="2026-05-13T09:00:00Z",
+                )
+            )
+
+            results = index.deep_search("representativeness heuristic", limit=2)
+
+            self.assertEqual(results[0].note_id, "direct-title")
+            self.assertEqual(results[1].note_id, "body-only")
+
     def test_actions_are_indexed_and_searchable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             index = SecondBrainIndex(Path(tmp) / "brain.db")

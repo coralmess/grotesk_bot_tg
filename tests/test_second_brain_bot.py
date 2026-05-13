@@ -2,6 +2,7 @@ import unittest
 
 from second_brain_bot.bot import (
     _format_capture_confirmation,
+    _format_learning_result,
     _format_note_preview_html,
     _format_vault_results,
     _shorten_for_telegram,
@@ -95,6 +96,31 @@ class SecondBrainBotTests(unittest.TestCase):
         self.assertNotIn("/home/ubuntu", text)
         self.assertNotIn(".md", text)
         self.assertNotIn("Captured:", text)
+
+    def test_learning_result_formats_flashcard_answers_as_telegram_spoilers(self) -> None:
+        note = type(
+            "Note",
+            (),
+            {
+                "note_id": "learn-1",
+                "path": "3-Resources/Learning/Learning - Bias.md",
+                "provider": "gemini",
+            },
+        )()
+        result = type(
+            "Result",
+            (),
+            {
+                "note": note,
+                "provider": "gemini",
+                "text": "Flashcards\nQ: What is bias?\nA: A systematic thinking error.",
+            },
+        )()
+
+        text = _format_learning_result(result)
+
+        self.assertIn("Q: What is bias?", text)
+        self.assertIn('<span class="tg-spoiler">A systematic thinking error.</span>', text)
 
     def test_note_preview_uses_telegram_html_not_raw_markdown_headings(self) -> None:
         result = SearchResult(

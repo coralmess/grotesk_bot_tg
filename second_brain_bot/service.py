@@ -99,6 +99,9 @@ class SecondBrainService:
         action_context = self._action_context(question)
         if action_context:
             context = (context + "\n\n" + action_context).strip()
+        if not context.strip():
+            self._record_command("ask", provider="local_no_evidence")
+            return "I could not find saved notes or open actions that support an answer yet."
         result = await self.ai.ask(question, context=context, heavy=True)
         self._record_command("ask", provider=result.provider)
         return result.text
@@ -139,12 +142,13 @@ class SecondBrainService:
             raise KeyError(selector)
         prompt = (
             "Create a practical learning session from this note. "
-            "Explain the key concept, answer the note's open questions, expand useful suggestions/actions, "
-            "give concrete examples, list common misconceptions, add recall questions, add a short practice exercise, "
-            "and score next steps from 1 to 100. "
+            "Start with a better explanation in simple language, then explain why it matters. "
+            "Answer the note's open questions, expand useful suggestions/actions, give concrete examples, "
+            "list common misconceptions, add recall questions, add flashcards as Q: and A: pairs, "
+            "add a short practice exercise, and score next steps from 1 to 100. "
             "Keep it readable in Telegram and useful enough to save as a linked Obsidian note."
         )
-        result = await self.ai.ask(prompt, context=format_note_context(source, max_chars=5000), heavy=True)
+        result = await self.ai.ask(prompt, context=format_note_context(source, max_chars=5000), heavy=True, task="learn")
         note = self.vault.write_learning_note(
             source_note_id=source.note_id,
             source_title=source.title,
@@ -227,9 +231,25 @@ class SecondBrainService:
             if _has_non_english_metadata(note.tags + note.entities):
                 non_english_metadata.append(note)
         duplicate_groups = sum(1 for count in title_counts.values() if count > 1)
+        total = max(1, len(notes))
+        title_score = _quality_score(len(notes) - len(weak_titles), total)
+        link_score = _quality_score(len(notes) - len(missing_parent), total)
+        metadata_score = _quality_score(len(notes) - len(non_english_metadata), total)
+        duplicate_score = _quality_score(total - duplicate_groups, total)
+        structure_score = _quality_score(
+            sum(1 for note in notes if "## Executive Summary" in note.body or "## Source Capture" in note.body),
+            total,
+        )
+        overall_score = round((title_score + link_score + metadata_score + duplicate_score + structure_score) / 5)
         lines = [
             "Vault Health",
             f"Notes scanned: {len(notes)}",
+            f"Overall score: {overall_score}/100",
+            f"Title score: {title_score}/100",
+            f"Link score: {link_score}/100",
+            f"Metadata score: {metadata_score}/100",
+            f"Duplicate score: {duplicate_score}/100",
+            f"Structure score: {structure_score}/100",
             f"Weak titles: {len(weak_titles)}",
             f"Missing parent MOC links: {len(missing_parent)}",
             f"Non-English metadata: {len(non_english_metadata)}",
@@ -399,3 +419,8 @@ def _normalized_duplicate_title(title: str) -> str:
 
 def _has_non_english_metadata(values: list[str]) -> bool:
     return any(any(ord(ch) > 127 for ch in str(value or "")) for value in values)
+
+
+def _quality_score(good: int, total: int) -> int:
+    total = max(1, total)
+    return max(0, min(100, round((good / total) * 100)))

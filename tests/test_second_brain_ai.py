@@ -5,6 +5,7 @@ from second_brain_bot.ai import (
     AIEnrichment,
     AIOrchestrator,
     ModelProvider,
+    OpenAICompatibleProvider,
     ProviderResult,
     clean_human_response,
     format_note_context,
@@ -283,6 +284,31 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Assumptions", prompt)
         self.assertIn("Confidence", prompt)
         self.assertIn("Next actions", prompt)
+
+    async def test_ask_prompt_does_not_duplicate_global_system_prompt(self) -> None:
+        gemini = PlainTextOnlyProvider(
+            "gemini",
+            result=ProviderResult(provider="gemini", model="gemini", payload={}, text="Answer"),
+        )
+        ai = AIOrchestrator(providers={"gemini": gemini})
+
+        await ai.ask("What is in my vault?", context="Title: Test\nPath: test.md\nExcerpt: saved fact")
+
+        prompt = gemini.calls[0][1]
+        self.assertNotIn("You are Grotesk Brain", prompt)
+        self.assertIn("Evidence from notes", prompt)
+
+    async def test_provider_uses_task_specific_system_instructions(self) -> None:
+        provider = OpenAICompatibleProvider(
+            name="test",
+            api_key="key",
+            base_url="https://example.test/v1",
+            model="model",
+        )
+
+        self.assertIn("answering questions", provider._system_instructions_for_task("ask"))
+        self.assertIn("creating learning sessions", provider._system_instructions_for_task("learn"))
+        self.assertIn("cataloging captured notes", provider._system_instructions_for_task("enrich"))
 
     async def test_ask_accepts_plain_text_provider_response(self) -> None:
         gemini = PlainTextOnlyProvider(
