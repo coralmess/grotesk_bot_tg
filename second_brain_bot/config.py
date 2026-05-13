@@ -21,12 +21,15 @@ class SecondBrainConfig:
     modal_glm_api_key: str
     cerebras_api_key: str
     groq_api_key: str
+    gemini_api_key: str = ""
     modal_glm_base_url: str = "https://api.us-west-2.modal.direct/v1"
     modal_glm_model: str = "zai-org/GLM-5.1-FP8"
     cerebras_base_url: str = "https://api.cerebras.ai/v1"
     cerebras_model: str = "qwen-3-235b-a22b-instruct-2507"
     groq_base_url: str = "https://api.groq.com/openai/v1"
     groq_model: str = "qwen/qwen3-32b"
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    gemini_model: str = "gemini-3-flash-preview"
 
 
 def load_config() -> SecondBrainConfig:
@@ -50,12 +53,17 @@ def load_config() -> SecondBrainConfig:
         modal_glm_api_key=os.getenv("MODAL_GLM_API_KEY", "").strip(),
         cerebras_api_key=os.getenv("CEREBRAS_API_KEY", "").strip(),
         groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
+        gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
         modal_glm_base_url=os.getenv("MODAL_GLM_BASE_URL", "https://api.us-west-2.modal.direct/v1").strip(),
         modal_glm_model=os.getenv("MODAL_GLM_MODEL", "zai-org/GLM-5.1-FP8").strip(),
         cerebras_base_url=os.getenv("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1").strip(),
         cerebras_model=os.getenv("CEREBRAS_MODEL", "qwen-3-235b-a22b-instruct-2507").strip(),
         groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").strip(),
         groq_model=os.getenv("GROQ_MODEL", "qwen/qwen3-32b").strip(),
+        gemini_base_url=os.getenv(
+            "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
+        ).strip(),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview").strip(),
     )
 
 

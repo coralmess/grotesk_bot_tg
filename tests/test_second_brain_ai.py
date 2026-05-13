@@ -29,7 +29,24 @@ class FakeProvider(ModelProvider):
 
 
 class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
-    async def test_heavy_tasks_prefer_modal_glm(self) -> None:
+    async def test_heavy_tasks_prefer_gemini_when_available(self) -> None:
+        gemini = FakeProvider(
+            "gemini",
+            result=ProviderResult(provider="gemini", model="gemini-3-flash-preview", payload={"answer": "from gemini"}),
+        )
+        modal = FakeProvider(
+            "modal_glm",
+            result=ProviderResult(provider="modal_glm", model="glm", payload={"answer": "from glm"}),
+        )
+        ai = AIOrchestrator(providers={"gemini": gemini, "modal_glm": modal})
+
+        result = await ai.ask("What should I buy?", context="Buy knife", heavy=True)
+
+        self.assertEqual(result.provider, "gemini")
+        self.assertEqual(len(gemini.calls), 1)
+        self.assertEqual(len(modal.calls), 0)
+
+    async def test_heavy_tasks_fall_back_to_modal_when_gemini_missing(self) -> None:
         modal = FakeProvider(
             "modal_glm",
             result=ProviderResult(provider="modal_glm", model="glm", payload={"answer": "from glm"}),
@@ -45,6 +62,53 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.provider, "modal_glm")
         self.assertEqual(len(modal.calls), 1)
         self.assertEqual(len(groq.calls), 0)
+
+    async def test_default_enrichment_prefers_gemini_when_available(self) -> None:
+        gemini = FakeProvider(
+            "gemini",
+            result=ProviderResult(provider="gemini", model="gemini-3-flash-preview", payload={"title": "Gemini note"}),
+        )
+        cerebras = FakeProvider(
+            "cerebras",
+            result=ProviderResult(provider="cerebras", model="qwen", payload={"title": "Cerebras note"}),
+        )
+        ai = AIOrchestrator(providers={"gemini": gemini, "cerebras": cerebras})
+
+        enrichment = await ai.enrich_capture("I want COPX stocks")
+
+        self.assertEqual(enrichment.provider, "gemini")
+        self.assertEqual(enrichment.title, "Gemini note")
+        self.assertEqual(len(cerebras.calls), 0)
+
+    async def test_relation_judging_prefers_gemini_when_available(self) -> None:
+        gemini = FakeProvider(
+            "gemini",
+            result=ProviderResult(
+                provider="gemini",
+                model="gemini-3-flash-preview",
+                payload={"related_notes": [{"note_id": "n1", "reason": "same topic", "confidence": 0.8}]},
+            ),
+        )
+        modal = FakeProvider(
+            "modal_glm",
+            result=ProviderResult(provider="modal_glm", model="glm", payload={"related_notes": []}),
+        )
+        candidate = SearchResult(
+            note_id="n1",
+            title="COPX - ETF Note",
+            path="4-Incubator/Investments/COPX - ETF Note.md",
+            tags=["#investment"],
+            entities=["COPX"],
+            body="Copper miners ETF",
+            status="Incubating",
+        )
+        ai = AIOrchestrator(providers={"gemini": gemini, "modal_glm": modal})
+
+        relations = await ai.suggest_relations("I want COPX stocks", [candidate])
+
+        self.assertEqual(relations[0].note_id, "n1")
+        self.assertEqual(len(gemini.calls), 1)
+        self.assertEqual(len(modal.calls), 0)
 
     async def test_falls_back_when_preferred_provider_fails(self) -> None:
         cerebras = FakeProvider("cerebras", error=RuntimeError("rate limited"))

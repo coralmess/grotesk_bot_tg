@@ -288,6 +288,16 @@ class SecondBrainTelegramBot:
 def build_ai_orchestrator(config: SecondBrainConfig, *, analytics_sink: AnalyticsSink | None = None) -> AIOrchestrator:
     sink = analytics_sink or AnalyticsSink()
     providers = {}
+    if config.gemini_api_key:
+        # Gemini Flash is the preferred free-tier route for the personal brain:
+        # strong enough for synthesis while keeping Modal GLM as a slower fallback.
+        providers["gemini"] = OpenAICompatibleProvider(
+            name="gemini",
+            api_key=config.gemini_api_key,
+            base_url=config.gemini_base_url,
+            model=config.gemini_model,
+            analytics_sink=sink,
+        )
     if config.modal_glm_api_key:
         providers["modal_glm"] = OpenAICompatibleProvider(
             name="modal_glm",

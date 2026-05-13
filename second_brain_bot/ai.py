@@ -197,7 +197,8 @@ class AIOrchestrator:
         if not candidates:
             return []
         prompt = _relations_prompt(note_text, candidates)
-        for name in self._route(preferred_provider="modal_glm", task="relations"):
+        preferred = "gemini" if "gemini" in self.providers else "modal_glm"
+        for name in self._route(preferred_provider=preferred, task="relations"):
             provider = self.providers.get(name)
             if provider is None:
                 continue
@@ -218,7 +219,7 @@ class AIOrchestrator:
             "Return a human-readable Telegram answer, not JSON. For task questions, use a short bullet list.\n\n"
             f"Question:\n{question}\n\nContext:\n{context[:12000]}"
         )
-        preferred = "modal_glm" if heavy else "cerebras"
+        preferred = "gemini" if "gemini" in self.providers else ("modal_glm" if heavy else "cerebras")
         for name in self._route(preferred_provider=preferred, task="ask"):
             provider = self.providers.get(name)
             if provider is None:
@@ -238,10 +239,10 @@ class AIOrchestrator:
         if preferred_provider:
             order.append(preferred_provider)
         elif task == "enrich":
-            order.extend(["cerebras", "groq", "modal_glm"])
+            order.extend(["gemini", "cerebras", "groq", "modal_glm"])
         elif task in {"ask", "relations"}:
-            order.extend(["modal_glm", "cerebras", "groq"])
-        order.extend(["modal_glm", "cerebras", "groq"])
+            order.extend(["gemini", "modal_glm", "cerebras", "groq"])
+        order.extend(["gemini", "modal_glm", "cerebras", "groq"])
         seen: set[str] = set()
         return [name for name in order if not (name in seen or seen.add(name))]
 
