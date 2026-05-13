@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -405,8 +406,74 @@ def build_help_text() -> str:
 def _format_note_preview_html(result) -> str:
     title = html.escape(str(result.title or "Untitled note"))
     path = html.escape(str(result.path or ""))
-    excerpt = html.escape(clean_note_excerpt(result.body)[:1400].strip() or "No note body.")
-    return _shorten_for_telegram(f"<b>{title}</b>\n<u>{path}</u>\n\n<i>Preview</i>\n{excerpt}")
+    body = str(result.body or "")
+    sections = _note_preview_sections(body)
+    preview = "\n\n".join([f"<b>{title}</b>", f"<u>{path}</u>", *sections])
+    return _shorten_for_telegram(preview or f"<b>{title}</b>\n<u>{path}</u>\n\nNo note body.")
+
+
+def _note_preview_sections(body: str) -> list[str]:
+    sections: list[str] = []
+    summary = _markdown_section(body, "Executive Summary")
+    capture = _markdown_section(body, "Polished Capture") or _markdown_section(body, "Source Capture") or _markdown_section(body, "Raw Capture")
+    useful_context = _markdown_section(body, "Useful Context")
+    actions = _markdown_section(body, "Action Items")
+    questions = _markdown_section(body, "Questions")
+    suggestions = _markdown_section(body, "Scored Suggestions")
+    fallback = clean_note_excerpt(body)
+    if summary:
+        sections.append(_html_section("Summary", summary))
+    if capture:
+        sections.append(_html_section("Capture", capture))
+    if useful_context:
+        sections.append(_html_section("Useful Context", useful_context, bullets=True))
+    if actions:
+        sections.append(_html_section("Actions", actions, bullets=True))
+    if questions:
+        sections.append(_html_section("Questions", questions, bullets=True))
+    if suggestions:
+        sections.append(_html_section("Suggestions", suggestions, bullets=True))
+    if not sections and fallback:
+        sections.append(_html_section("Preview", fallback[:1400]))
+    return sections
+
+
+def _markdown_section(body: str, heading: str) -> str:
+    pattern = rf"(?ms)^#+\s+{re.escape(heading)}\s*\n(?P<body>.*?)(?=^#+\s+|\Z)"
+    match = re.search(pattern, body or "")
+    if not match:
+        return ""
+    return _telegram_plaintext_markdown(match.group("body")).strip()
+
+
+def _html_section(label: str, text: str, *, bullets: bool = False) -> str:
+    cleaned = _telegram_plaintext_markdown(text)
+    if bullets:
+        cleaned = _html_bullets(cleaned)
+    return f"<b>{html.escape(label)}</b>\n{html.escape(cleaned)}"
+
+
+def _html_bullets(text: str) -> str:
+    lines: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[-*]\s+", "", line)
+        line = "• " + line if not re.match(r"^\d+\.", line) and not line.startswith("• ") else line
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _telegram_plaintext_markdown(text: str) -> str:
+    text = re.sub(r"(?m)^\s*#{1,6}\s+", "", str(text or ""))
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__(.*?)__", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"!\[\[([^\]]+)\]\]", r"[attachment: \1]", text)
+    text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _format_capture_confirmation(note) -> str:

@@ -187,6 +187,8 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("polished_text", prompt)
         self.assertIn("split inline numbered steps", prompt)
         self.assertIn("score from 1 to 100", prompt)
+        self.assertIn("Catalog metadata must be English-only", prompt)
+        self.assertIn("Keep the user's visible note content in the user's language", prompt)
 
     async def test_enrichment_parses_useful_context_and_scored_suggestions(self) -> None:
         modal = FakeProvider(

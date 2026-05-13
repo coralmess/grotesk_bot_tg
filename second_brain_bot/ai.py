@@ -29,6 +29,7 @@ Rules:
 - Prefer concrete next actions over abstract advice.
 - Cite note titles or paths when useful.
 - Separate facts from assumptions.
+- Keep the user's visible note content in the user's language unless they ask otherwise.
 - Never output raw JSON to the user unless they explicitly ask for JSON.
 - Enrich captures only when the enrichment is useful and not noisy.
 - Never invent missing specifics such as a scarf brand, product model, ticker, person, or source when the user did not provide enough evidence.
@@ -350,9 +351,12 @@ def _enrichment_prompt(text: str, *, allow_web: bool) -> str:
         "- Create a descriptive searchable title, never a generic title like Another idea or Note.\n"
         "- Choose a parent MOC name like Investments MOC, Purchases MOC, Plans to Do MOC, Recipes MOC, or Software Knowledge MOC.\n"
         "- Choose a short moc_category folder name matching the MOC topic, such as Investments or Purchases.\n"
+        "- Catalog metadata must be English-only: aliases, suggested_tags, entities, parent_moc, moc_category, related_links, "
+        "action_items, questions, enrichment_notes labels, and scored_suggestions titles/reasons must use English names/terms.\n"
+        "- Keep the user's visible note content in the user's language, but catalog/index/search metadata must be English.\n"
         "- type must be one of MOC, Concept, Plan, Purchase, Idea.\n"
         "- status must be one of Active, Incubating, Completed, Reference.\n"
-        "- tags must be 2-4 Obsidian tags with a # prefix.\n"
+        "- tags must be 2-4 English Obsidian tags with a # prefix, lowercase words, and hyphens instead of spaces.\n"
         "- related_links must be useful existing or likely MOC/concept note titles without brackets.\n\n"
         "Return JSON with keys: title, summary, polished_text, suggested_folder, suggested_tags, entities, aliases, "
         "note_type, note_status, parent_moc, moc_category, moc_description, related_links, action_items, questions, "

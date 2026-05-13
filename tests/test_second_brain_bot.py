@@ -60,8 +60,59 @@ class SecondBrainBotTests(unittest.TestCase):
 
         self.assertIn("<b>Money &lt;strategy&gt;</b>", preview)
         self.assertIn("<u>00_Inbox/money.md</u>", preview)
-        self.assertIn("<i>Preview</i>", preview)
+        self.assertIn("<b>Capture</b>", preview)
         self.assertNotIn("## Raw Capture", preview)
+
+    def test_note_preview_formats_structured_note_for_telegram(self) -> None:
+        result = SearchResult(
+            note_id="n1",
+            title="Репрезентативна евристика",
+            path="3-Resources/Psychology/Репрезентативна евристика.md",
+            tags=[],
+            entities=[],
+            body=(
+                "# Репрезентативна евристика\n\n"
+                "Parent: [[Psychology MOC]]\n\n"
+                "Related: [[Cognitive Biases MOC]], [[Decision Making]]\n\n"
+                "## Executive Summary\n"
+                "Запит на пояснення когнітивного упередження.\n\n"
+                "## Polished Capture\n"
+                "🧠 **Репрезентативна евристика**\n"
+                "Хотів би дізнатись, що це таке.\n\n"
+                "## Source Capture\n"
+                "Репрезентативная эвристика - хотів би дізнатись що це\n\n"
+                "## Catalog\n"
+                "- Type: Concept\n"
+                "- Tags: #психологія, #когнітивні_упередження\n"
+                "- Entities: Репрезентативна евристика, Амос Тверські\n\n"
+                "### Action Items\n"
+                "- Вивчити основні приклади.\n\n"
+                "### Questions\n"
+                "- Чим вона відрізняється від евристики доступності?\n\n"
+                "### Useful Context\n"
+                "- Репрезентативна евристика — це ментальне скорочення.\n\n"
+                "### Scored Suggestions\n"
+                "- Прочитати Thinking Fast and Slow (Score: 95/100) - Першоджерело.\n"
+            ),
+            status="Reference",
+        )
+
+        preview = _format_note_preview_html(result)
+
+        self.assertIn("<b>Summary</b>", preview)
+        self.assertIn("Запит на пояснення когнітивного упередження.", preview)
+        self.assertIn("<b>Capture</b>", preview)
+        self.assertIn("🧠 Репрезентативна евристика", preview)
+        self.assertIn("<b>Useful Context</b>", preview)
+        self.assertIn("• Репрезентативна евристика", preview)
+        self.assertIn("<b>Actions</b>", preview)
+        self.assertIn("• Вивчити основні приклади.", preview)
+        self.assertIn("<b>Questions</b>", preview)
+        self.assertIn("<b>Suggestions</b>", preview)
+        self.assertNotIn("**", preview)
+        self.assertNotIn("Catalog", preview)
+        self.assertNotIn("#психологія", preview)
+        self.assertNotIn("Entities:", preview)
 
 
 if __name__ == "__main__":
