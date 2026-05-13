@@ -1,7 +1,13 @@
 import asyncio
 import unittest
 
-from second_brain_bot.ai import AIEnrichment, AIOrchestrator, ModelProvider, ProviderResult
+from second_brain_bot.ai import (
+    AIEnrichment,
+    AIOrchestrator,
+    ModelProvider,
+    ProviderResult,
+    clean_human_response,
+)
 
 
 class FakeProvider(ModelProvider):
@@ -84,6 +90,35 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(modal.calls), 1)
         self.assertNotIn("private-image-bytes", modal.calls[0][1])
+
+    async def test_ask_returns_readable_answer_not_thinking_or_json(self) -> None:
+        modal = FakeProvider(
+            "modal_glm",
+            result=ProviderResult(
+                provider="modal_glm",
+                model="glm",
+                payload={
+                    "answer": "<think>private chain</think>{\"action_items\":[{\"task\":\"Buy knife\",\"source\":\"Wishlist\"}]}"
+                },
+            ),
+        )
+        ai = AIOrchestrator(providers={"modal_glm": modal})
+
+        result = await ai.ask("what do I need to do?", context="Buy knife", heavy=True)
+
+        self.assertNotIn("<think>", result.text)
+        self.assertNotIn("action_items", result.text)
+        self.assertIn("Buy knife", result.text)
+        self.assertIn("Wishlist", result.text)
+
+    def test_clean_human_response_removes_thinking_and_formats_json_tasks(self) -> None:
+        raw = '<think>hidden</think>{"action_items":[{"task":"Buy scarf","source":"Wishlist"}]}'
+
+        cleaned = clean_human_response(raw)
+
+        self.assertNotIn("<think>", cleaned)
+        self.assertIn("🧭 Things to do", cleaned)
+        self.assertIn("Buy scarf", cleaned)
 
 
 if __name__ == "__main__":

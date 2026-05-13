@@ -15,6 +15,29 @@ from second_brain_bot.models import SearchResult
 
 LOGGER = logging.getLogger(__name__)
 
+SECOND_BRAIN_SYSTEM_INSTRUCTIONS = """
+You are Grotesk Brain: a private personal helper and second brain for one person.
+Your job is to help the user capture, organize, distill, express, and retrieve their own knowledge.
+
+Rules:
+- Use the user's collected notes as the primary source of truth.
+- If the notes do not support an answer, say that clearly instead of guessing.
+- Do not reveal chain-of-thought, hidden reasoning, scratchpads, or <think> blocks.
+- Keep answers concise, practical, and easy to scan in Telegram.
+- Use short headings and bullets for lists.
+- Use emojis rarely, only when they help identify the section before reading it.
+- Prefer concrete next actions over abstract advice.
+- Cite note titles or paths when useful.
+- Separate facts from assumptions.
+- Never output raw JSON to the user unless they explicitly ask for JSON.
+""".strip()
+
+JSON_SYSTEM_INSTRUCTIONS = (
+    SECOND_BRAIN_SYSTEM_INSTRUCTIONS
+    + "\n\nFor this task, return only valid JSON matching the requested schema. "
+    "Do not wrap it in markdown. Do not include chain-of-thought."
+)
+
 
 @dataclass(frozen=True)
 class ProviderResult:
@@ -86,7 +109,7 @@ class OpenAICompatibleProvider:
                         "messages": [
                             {
                                 "role": "system",
-                                "content": "Return only valid JSON. Do not wrap JSON in markdown.",
+                                "content": JSON_SYSTEM_INSTRUCTIONS,
                             },
                             {"role": "user", "content": prompt},
                         ],
@@ -174,8 +197,10 @@ class AIOrchestrator:
 
     async def ask(self, question: str, *, context: str, heavy: bool = True) -> ProviderResult:
         prompt = (
+            f"{SECOND_BRAIN_SYSTEM_INSTRUCTIONS}\n\n"
             "Answer the user's question using the collected Second Brain context first. "
-            "Cite note titles or paths when possible. If the context does not support an answer, say so.\n\n"
+            "Cite note titles or paths when possible. If the context does not support an answer, say so. "
+            "Return a human-readable Telegram answer, not JSON. For task questions, use a short bullet list.\n\n"
             f"Question:\n{question}\n\nContext:\n{context[:12000]}"
         )
         preferred = "modal_glm" if heavy else "cerebras"
@@ -186,7 +211,7 @@ class AIOrchestrator:
             try:
                 async with self._provider_lock:
                     result = await provider.complete_json(task="ask", prompt=prompt, max_tokens=1200)
-                text = str(result.payload.get("answer") or result.payload.get("text") or result.text)
+                text = clean_human_response(str(result.payload.get("answer") or result.payload.get("text") or result.text))
                 return ProviderResult(provider=result.provider, model=result.model, payload=result.payload, text=text)
             except Exception:
                 LOGGER.warning("Second Brain AI provider failed for ask: %s", name)
@@ -243,6 +268,7 @@ def local_relation_suggestions(note_text: str, candidates: list[SearchResult]) -
 
 def _enrichment_prompt(text: str, *, allow_web: bool) -> str:
     return (
+        f"{SECOND_BRAIN_SYSTEM_INSTRUCTIONS}\n\n"
         "Enrich this personal Second Brain capture. Use model knowledge only unless web facts are already supplied. "
         "Return JSON with keys: title, summary, suggested_folder, suggested_tags, entities, action_items, questions. "
         "suggested_folder must be one of 00_Inbox, 01_Projects, 02_Areas, 03_Resources, 99_Archive. "
@@ -263,6 +289,7 @@ def _relations_prompt(note_text: str, candidates: list[SearchResult]) -> str:
         for item in candidates[:10]
     ]
     return (
+        f"{SECOND_BRAIN_SYSTEM_INSTRUCTIONS}\n\n"
         "Find genuinely useful links between the new note and existing notes. "
         "Return JSON {\"related_notes\": [{\"note_id\": str, \"reason\": str, \"confidence\": 0..1}]}. "
         "Only include notes with confidence >= 0.55.\n\n"
@@ -271,6 +298,7 @@ def _relations_prompt(note_text: str, candidates: list[SearchResult]) -> str:
 
 
 def _parse_json_object(content: str) -> dict[str, Any]:
+    content = _strip_thinking(content)
     content = content.strip()
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?\s*", "", content)
@@ -357,3 +385,71 @@ def _local_answer(question: str, context: str) -> str:
     if not context.strip():
         return "I could not find collected notes that answer this yet."
     return f"Based on local notes, relevant context exists for: {question}\n\n{context[:1200]}"
+
+
+def clean_human_response(text: str) -> str:
+    cleaned = _strip_thinking(text).strip()
+    if not cleaned:
+        return ""
+    parsed = _try_parse_json(cleaned)
+    if parsed is not None:
+        converted = _json_to_human_text(parsed)
+        if converted:
+            return converted
+    cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+    cleaned = cleaned.replace("```", "").strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned[:3900]
+
+
+def _strip_thinking(text: str) -> str:
+    text = str(text or "")
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.S)
+    text = re.sub(r"<analysis>.*?</analysis>", "", text, flags=re.IGNORECASE | re.S)
+    return text
+
+
+def _try_parse_json(text: str) -> dict[str, Any] | None:
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate)
+        candidate = re.sub(r"\s*```$", "", candidate)
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start >= 0 and end >= start:
+        candidate = candidate[start : end + 1]
+    try:
+        payload = json.loads(candidate)
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _json_to_human_text(payload: dict[str, Any]) -> str:
+    if isinstance(payload.get("answer"), str):
+        return clean_human_response(payload["answer"])
+    if isinstance(payload.get("text"), str):
+        return clean_human_response(payload["text"])
+    action_items = payload.get("action_items")
+    if isinstance(action_items, list):
+        lines = ["🧭 Things to do"]
+        for item in action_items[:20]:
+            if isinstance(item, dict):
+                task = str(item.get("task") or item.get("title") or "").strip()
+                source = str(item.get("source") or "").strip()
+            else:
+                task = str(item).strip()
+                source = ""
+            if not task:
+                continue
+            line = f"- {task}"
+            if source:
+                line += f" — {source}"
+            lines.append(line)
+        return "\n".join(lines) if len(lines) > 1 else ""
+    bullets = payload.get("bullets") or payload.get("items")
+    if isinstance(bullets, list):
+        lines = ["🧠 Summary"]
+        lines.extend(f"- {str(item).strip()}" for item in bullets[:20] if str(item).strip())
+        return "\n".join(lines) if len(lines) > 1 else ""
+    return ""
