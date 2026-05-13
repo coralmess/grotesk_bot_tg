@@ -206,6 +206,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("recall questions", ai.ask_calls[-1][0].lower())
             self.assertIn("flashcards", ai.ask_calls[-1][0].lower())
             self.assertIn("practice exercise", ai.ask_calls[-1][0].lower())
+            self.assertIn("two real-life application examples", ai.ask_calls[-1][0].lower())
             self.assertIn("Learning", lesson.note.title)
             self.assertTrue(lesson.note.path.exists())
             body = lesson.note.path.read_text(encoding="utf-8")

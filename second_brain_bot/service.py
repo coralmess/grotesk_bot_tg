@@ -144,6 +144,7 @@ class SecondBrainService:
             "Create a practical learning session from this note. "
             "Start with a better explanation in simple language, then explain why it matters. "
             "Answer the note's open questions, expand useful suggestions/actions, give concrete examples, "
+            "include two real-life application examples showing exactly how the user could apply it, "
             "list common misconceptions, add recall questions, add flashcards as Q: and A: pairs, "
             "add a short practice exercise, and score next steps from 1 to 100. "
             "Keep it readable in Telegram and useful enough to save as a linked Obsidian note."
