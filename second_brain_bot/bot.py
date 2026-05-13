@@ -96,7 +96,7 @@ class SecondBrainTelegramBot:
             else:
                 note = await self.service.capture_text(message.text or "", telegram_message_id=message.message_id)
             self.service_health.record_success("capture", note=f"id={note.note_id}")
-            await _edit_or_reply(thinking, f"Captured: {note.title}\nID: {note.note_id}")
+            await _edit_or_reply(thinking, _format_capture_confirmation(note))
         except Exception as exc:
             self.service_health.record_failure("capture", exc)
             LOGGER.exception("Second Brain capture failed")
@@ -407,6 +407,14 @@ def _format_note_preview_html(result) -> str:
     path = html.escape(str(result.path or ""))
     excerpt = html.escape(clean_note_excerpt(result.body)[:1400].strip() or "No note body.")
     return _shorten_for_telegram(f"<b>{title}</b>\n<u>{path}</u>\n\n<i>Preview</i>\n{excerpt}")
+
+
+def _format_capture_confirmation(note) -> str:
+    # The saved file path is more useful than the AI title because it shows
+    # where the note landed in the vault and avoids misleading title-only echoes.
+    saved_path = str(getattr(note, "path", "") or getattr(note, "title", "") or "saved note")
+    note_id = str(getattr(note, "note_id", "") or "")
+    return f"🧠 Memorized: {saved_path}\n📄 ID: {note_id}"
 
 
 async def _edit_or_reply(message, text: str) -> None:

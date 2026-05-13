@@ -1,7 +1,7 @@
 import unittest
 
-from second_brain_bot.bot import _format_note_preview_html, _shorten_for_telegram, build_help_text
-from second_brain_bot.models import SearchResult
+from second_brain_bot.bot import _format_capture_confirmation, _format_note_preview_html, _shorten_for_telegram, build_help_text
+from second_brain_bot.models import NoteRecord, SearchResult
 
 
 class SecondBrainBotTests(unittest.TestCase):
@@ -20,6 +20,28 @@ class SecondBrainBotTests(unittest.TestCase):
         self.assertIn("/brain_accept <id> - accept AI title/tags/folder for a note.", text)
         self.assertIn("🧠Thinking🧠", text)
 
+
+    def test_capture_confirmation_uses_saved_markdown_path(self) -> None:
+        note = NoteRecord(
+            note_id="20260513120957-ff4dea61",
+            title="rockyou.txt - Password List Reference",
+            path="3-Resources/Security Research/rockyou.txt - Password List Reference.md",
+            tags=[],
+            entities=[],
+            body="",
+            status="Reference",
+            created_at="2026-05-13T12:09:57Z",
+            updated_at="2026-05-13T12:09:57Z",
+        )
+
+        text = _format_capture_confirmation(note)
+
+        self.assertEqual(
+            text,
+            "🧠 Memorized: 3-Resources/Security Research/rockyou.txt - Password List Reference.md\n"
+            "📄 ID: 20260513120957-ff4dea61",
+        )
+        self.assertNotIn("Captured:", text)
 
     def test_note_preview_uses_telegram_html_not_raw_markdown_headings(self) -> None:
         result = SearchResult(
