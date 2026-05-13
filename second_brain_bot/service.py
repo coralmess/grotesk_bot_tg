@@ -24,8 +24,8 @@ class SecondBrainService:
         self.index = SecondBrainIndex(Path(vault_dir) / ".second_brain_index.db")
         self.ai = ai
         self.analytics_sink = analytics_sink or AnalyticsSink()
-        if self.vault.migrate_legacy_vault():
-            self._reindex_all_notes()
+        self.vault.migrate_legacy_vault()
+        self._reindex_all_notes()
 
     async def capture_text(
         self,
