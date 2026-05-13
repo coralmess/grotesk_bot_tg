@@ -8,7 +8,7 @@ from pathlib import Path
 from helpers.analytics_events import AnalyticsSink
 from second_brain_bot.ai import AIOrchestrator, RelatedNoteSuggestion, format_note_context
 from second_brain_bot.index import SecondBrainIndex
-from second_brain_bot.models import NoteRecord, RelationRecord
+from second_brain_bot.models import ActionRecord, NoteRecord, RelationRecord
 from second_brain_bot.vault import CaptureInput, NoteFile, SecondBrainVault, utc_now_iso
 from second_brain_bot.web_lookup import fetch_public_page_summary, should_allow_public_lookup
 
@@ -66,6 +66,7 @@ class SecondBrainService:
         )
         self._index_note(note.note_id)
         self._store_relations(note, related)
+        self._store_actions(note, enrichment.action_items)
         self._record_capture(capture_type=capture_type, related_count=len(related), provider=enrichment.provider)
         return note
 
@@ -91,8 +92,13 @@ class SecondBrainService:
         )
 
     async def ask(self, question: str) -> str:
-        results = self.index.search(question, limit=8)
+        # Deep retrieval gives the model direct matches plus linked context, which
+        # makes answers less brittle than plain keyword search.
+        results = self.index.deep_search(question, limit=8)
         context = "\n\n".join(format_note_context(item, max_chars=900) for item in results)
+        action_context = self._action_context(question)
+        if action_context:
+            context = (context + "\n\n" + action_context).strip()
         result = await self.ai.ask(question, context=context, heavy=True)
         self._record_command("ask", provider=result.provider)
         return result.text
@@ -110,6 +116,20 @@ class SecondBrainService:
         self._record_command("distill", provider=result.provider)
         return result.text
 
+    async def consolidate(self, selector: str = "week", *, now_iso: str | None = None) -> str:
+        notes = self.index.recent_notes(limit=40 if selector == "week" else 20)
+        context = "\n\n".join(format_note_context(item, max_chars=900) for item in notes)
+        result = await self.ai.ask(
+            "Consolidate these Second Brain notes into durable insights, merged themes, open loops, and suggested next links. "
+            "Do not rewrite old notes. Produce a clean review that can be saved as a new Obsidian note.",
+            context=context,
+            heavy=True,
+        )
+        date_key = (now_iso or utc_now_iso())[:10]
+        self.vault.write_consolidation_note(date_key, result.text)
+        self._record_command("consolidate", provider=result.provider)
+        return result.text
+
     async def learn(self, selector: str) -> LearningResult:
         source = self.index.get_note(selector)
         if source is None:
@@ -120,7 +140,8 @@ class SecondBrainService:
         prompt = (
             "Create a practical learning session from this note. "
             "Explain the key concept, answer the note's open questions, expand useful suggestions/actions, "
-            "give concrete examples, add a short practice exercise, and score next steps from 1 to 100. "
+            "give concrete examples, list common misconceptions, add recall questions, add a short practice exercise, "
+            "and score next steps from 1 to 100. "
             "Keep it readable in Telegram and useful enough to save as a linked Obsidian note."
         )
         result = await self.ai.ask(prompt, context=format_note_context(source, max_chars=5000), heavy=True)
@@ -190,6 +211,43 @@ class SecondBrainService:
             "counts": counts,
         }
 
+    def vault_health(self) -> str:
+        notes = self.index.recent_notes(limit=1000)
+        weak_titles = []
+        missing_parent = []
+        non_english_metadata = []
+        title_counts: dict[str, int] = {}
+        for note in notes:
+            normalized_title = _normalized_duplicate_title(note.title)
+            title_counts[normalized_title] = title_counts.get(normalized_title, 0) + 1
+            if _looks_weak_title(note.title):
+                weak_titles.append(note)
+            if not note.path.endswith(" MOC.md") and "Parent: [[" not in note.body:
+                missing_parent.append(note)
+            if _has_non_english_metadata(note.tags + note.entities):
+                non_english_metadata.append(note)
+        duplicate_groups = sum(1 for count in title_counts.values() if count > 1)
+        lines = [
+            "Vault Health",
+            f"Notes scanned: {len(notes)}",
+            f"Weak titles: {len(weak_titles)}",
+            f"Missing parent MOC links: {len(missing_parent)}",
+            f"Non-English metadata: {len(non_english_metadata)}",
+            f"Duplicate-looking title groups: {duplicate_groups}",
+        ]
+        examples = weak_titles[:3] + missing_parent[:3] + non_english_metadata[:3]
+        if examples:
+            lines.append("")
+            lines.append("Examples")
+            seen: set[str] = set()
+            for note in examples:
+                if note.note_id in seen:
+                    continue
+                seen.add(note.note_id)
+                lines.append(f"- {note.title} ({note.path})")
+        self._record_command("review")
+        return "\n".join(lines)
+
     def _candidate_notes(self, text: str, terms: list[str]) -> list:
         query = " ".join([*terms, *re.findall(r"[\w'-]{3,}", text.lower())[:8]])
         return self.index.search(query, limit=10)
@@ -240,6 +298,39 @@ class SecondBrainService:
                     reason=item.reason,
                 )
 
+    def _store_actions(self, note: NoteFile, actions: list[str]) -> None:
+        records: list[ActionRecord] = []
+        try:
+            source_path = note.path.relative_to(self.vault.root_dir).as_posix()
+        except ValueError:
+            source_path = str(note.path)
+        for action in actions or []:
+            text = str(action or "").strip()
+            if not text:
+                continue
+            records.append(
+                ActionRecord(
+                    note_id=note.note_id,
+                    action_text=text,
+                    source_title=note.title,
+                    source_path=source_path,
+                    status="open",
+                    priority=70,
+                )
+            )
+        self.index.upsert_actions_for_note(note.note_id, records)
+
+    def _action_context(self, question: str) -> str:
+        if not _looks_task_question(question):
+            return ""
+        actions = self.index.search_actions(question, limit=12)
+        if not actions:
+            return ""
+        lines = ["Open Actions"]
+        for action in actions:
+            lines.append(f"- {action.action_text} ({action.source_title}; {action.source_path})")
+        return "\n".join(lines)
+
     async def _public_lookup_notes(self, text: str) -> str:
         urls = re.findall(r"https?://[^\s)>\]]+", text)
         summaries: list[str] = []
@@ -276,3 +367,35 @@ class SecondBrainService:
             )
         except Exception:
             return
+
+
+def _looks_task_question(question: str) -> bool:
+    lowered = (question or "").lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "what should i do",
+            "what do i need",
+            "things i need",
+            "need to do",
+            "tasks",
+            "actions",
+            "to do",
+        )
+    )
+
+
+def _looks_weak_title(title: str) -> bool:
+    lowered = (title or "").strip().lower()
+    if len(lowered) < 6:
+        return True
+    return lowered.startswith("2026-") or lowered in {"a note", "note", "untitled", "capture"}
+
+
+def _normalized_duplicate_title(title: str) -> str:
+    lowered = re.sub(r"\s+\d+$", "", (title or "").strip().lower())
+    return re.sub(r"\s+", " ", lowered)
+
+
+def _has_non_english_metadata(values: list[str]) -> bool:
+    return any(any(ord(ch) > 127 for ch in str(value or "")) for value in values)

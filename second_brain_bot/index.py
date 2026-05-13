@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from helpers.sqlite_runtime import apply_runtime_pragmas
-from second_brain_bot.models import NoteRecord, RelationRecord, SearchResult
+from second_brain_bot.models import ActionRecord, NoteRecord, RelationRecord, SearchResult
 
 
 class SecondBrainIndex:
@@ -52,6 +52,19 @@ class SecondBrainIndex:
                     reason TEXT NOT NULL,
                     confidence REAL NOT NULL,
                     PRIMARY KEY (source_note_id, target_note_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS actions (
+                    note_id TEXT NOT NULL,
+                    action_text TEXT NOT NULL,
+                    source_title TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    priority INTEGER NOT NULL,
+                    PRIMARY KEY (note_id, action_text)
                 )
                 """
             )
@@ -119,6 +132,32 @@ class SecondBrainIndex:
             ).fetchall()
         return [self._row_to_result(row) for row in rows]
 
+    def deep_search(self, query: str, *, limit: int = 10, exclude_note_id: str | None = None) -> list[SearchResult]:
+        query = (query or "").strip()
+        if not query:
+            return []
+        ranked: dict[str, tuple[int, SearchResult]] = {}
+
+        def add(result: SearchResult, score: int) -> None:
+            if exclude_note_id and result.note_id == exclude_note_id:
+                return
+            current = ranked.get(result.note_id)
+            if current is None or score > current[0]:
+                ranked[result.note_id] = (score, result)
+
+        for item in self._exact_search(query, limit=max(limit, 10), exclude_note_id=exclude_note_id):
+            add(item, 300)
+        for item in self.search(query, limit=max(limit, 10), exclude_note_id=exclude_note_id):
+            add(item, 200)
+
+        seed_ids = [item.note_id for _score, item in sorted(ranked.values(), key=lambda pair: pair[0], reverse=True)[:limit]]
+        if seed_ids:
+            for item in self._related_notes(seed_ids, limit=max(limit, 10), exclude_note_id=exclude_note_id):
+                add(item, 100)
+
+        ordered = [item for _score, item in sorted(ranked.values(), key=lambda pair: pair[0], reverse=True)]
+        return ordered[: int(limit)]
+
     def recent_notes(self, *, limit: int = 10, status: str | None = None) -> list[SearchResult]:
         with self._connect() as conn:
             if status:
@@ -175,6 +214,125 @@ class SecondBrainIndex:
             for row in rows
         ]
 
+    def upsert_actions_for_note(self, note_id: str, actions: list[ActionRecord]) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM actions WHERE note_id = ?", (note_id,))
+            for action in actions:
+                conn.execute(
+                    """
+                    INSERT INTO actions(note_id, action_text, source_title, source_path, status, priority)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(note_id, action_text) DO UPDATE SET
+                        source_title=excluded.source_title,
+                        source_path=excluded.source_path,
+                        status=excluded.status,
+                        priority=excluded.priority
+                    """,
+                    (
+                        action.note_id,
+                        action.action_text,
+                        action.source_title,
+                        action.source_path,
+                        action.status,
+                        int(action.priority),
+                    ),
+                )
+
+    def search_actions(self, query: str = "", *, limit: int = 10, status: str = "open") -> list[ActionRecord]:
+        terms = [part.strip().lower() for part in (query or "").split() if len(part.strip()) >= 3][:8]
+        with self._connect() as conn:
+            if terms and not _looks_generic_task_query(query):
+                clauses = []
+                params: list[object] = []
+                for term in terms:
+                    like = f"%{term}%"
+                    clauses.append("(lower(action_text) LIKE ? OR lower(source_title) LIKE ? OR lower(source_path) LIKE ?)")
+                    params.extend([like, like, like])
+                params.extend([status, int(limit)])
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM actions
+                    WHERE ({' OR '.join(clauses)})
+                      AND status = ?
+                    ORDER BY priority DESC, source_title ASC
+                    LIMIT ?
+                    """,
+                    tuple(params),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT *
+                    FROM actions
+                    WHERE status = ?
+                    ORDER BY priority DESC, source_title ASC
+                    LIMIT ?
+                    """,
+                    (status, int(limit)),
+                ).fetchall()
+        return [
+            ActionRecord(
+                note_id=row["note_id"],
+                action_text=row["action_text"],
+                source_title=row["source_title"],
+                source_path=row["source_path"],
+                status=row["status"],
+                priority=int(row["priority"]),
+            )
+            for row in rows
+        ]
+
+    def _exact_search(self, query: str, *, limit: int, exclude_note_id: str | None) -> list[SearchResult]:
+        terms = [part.strip().lower() for part in query.split() if part.strip()][:8]
+        if not terms:
+            return []
+        clauses = []
+        params: list[object] = []
+        for term in terms:
+            like = f"%{term}%"
+            clauses.append(
+                "(lower(title) LIKE ? OR lower(path) LIKE ? OR lower(tags_json) LIKE ? OR lower(entities_json) LIKE ?)"
+            )
+            params.extend([like, like, like, like])
+        params.extend([exclude_note_id, exclude_note_id, int(limit)])
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM notes
+                WHERE {' OR '.join(clauses)}
+                  AND (? IS NULL OR note_id != ?)
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        return [self._row_to_result(row) for row in rows]
+
+    def _related_notes(self, note_ids: list[str], *, limit: int, exclude_note_id: str | None) -> list[SearchResult]:
+        note_ids = [note_id for note_id in note_ids if note_id]
+        if not note_ids:
+            return []
+        placeholders = ",".join("?" for _ in note_ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT notes.*
+                FROM relations
+                JOIN notes
+                  ON notes.note_id = relations.target_note_id
+                  OR notes.note_id = relations.source_note_id
+                WHERE (relations.source_note_id IN ({placeholders}) OR relations.target_note_id IN ({placeholders}))
+                  AND notes.note_id NOT IN ({placeholders})
+                  AND (? IS NULL OR notes.note_id != ?)
+                ORDER BY relations.confidence DESC
+                LIMIT ?
+                """,
+                tuple([*note_ids, *note_ids, *note_ids, exclude_note_id, exclude_note_id, int(limit)]),
+            ).fetchall()
+        return [self._row_to_result(row) for row in rows]
+
     @staticmethod
     def _row_to_result(row: sqlite3.Row) -> SearchResult:
         return SearchResult(
@@ -193,3 +351,11 @@ def _fts_query(query: str) -> str:
     if not parts:
         return '""'
     return " OR ".join(f'"{part}"' for part in parts[:8])
+
+
+def _looks_generic_task_query(query: str) -> bool:
+    lowered = (query or "").lower()
+    return any(
+        phrase in lowered
+        for phrase in ("what should i do", "what do i need", "need to do", "things i need", "tasks", "actions")
+    )

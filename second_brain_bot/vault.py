@@ -233,6 +233,19 @@ class SecondBrainVault:
         self._write_note(path, metadata, content)
         return path
 
+    def write_consolidation_note(self, date_key: str, content: str) -> Path:
+        path = self.root_dir / "2-Areas" / "Vault Reviews" / f"{date_key} - Vault Consolidation.md"
+        metadata = {
+            "aliases": [f"Vault consolidation {date_key}"],
+            "tags": ["#vault-review", "#consolidation", "#second-brain"],
+            "type": "Concept",
+            "status": "Reference",
+            "date_created": date_key,
+        }
+        body = "# Vault Consolidation\n\n" + content.strip() + "\n"
+        self._write_note(path, metadata, body)
+        return path
+
     def write_learning_note(
         self,
         *,

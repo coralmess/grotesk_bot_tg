@@ -34,3 +34,13 @@ class RelationRecord:
     target_title: str
     reason: str
     confidence: float
+
+
+@dataclass(frozen=True)
+class ActionRecord:
+    note_id: str
+    action_text: str
+    source_title: str
+    source_path: str
+    status: str = "open"
+    priority: int = 50

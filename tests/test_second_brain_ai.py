@@ -150,6 +150,26 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enrichment.provider, "modal_glm")
         self.assertEqual(enrichment.title, "Knife brand")
 
+    async def test_failed_provider_is_temporarily_cooled_down(self) -> None:
+        failing = FakeProvider("gemini", error=RuntimeError("temporary outage"))
+        fallback = FakeProvider(
+            "modal_glm",
+            result=ProviderResult(provider="modal_glm", model="glm", payload={"answer": "fallback answer"}),
+        )
+        ai = AIOrchestrator(
+            providers={"gemini": failing, "modal_glm": fallback},
+            provider_cooldown_after=1,
+            provider_cooldown_sec=300,
+        )
+
+        first = await ai.ask("What should I do?", context="Buy knife", heavy=True)
+        second = await ai.ask("What should I do next?", context="Buy scarf", heavy=True)
+
+        self.assertEqual(first.provider, "modal_glm")
+        self.assertEqual(second.provider, "modal_glm")
+        self.assertEqual(len(failing.calls), 1)
+        self.assertEqual(len(fallback.calls), 2)
+
     async def test_non_ai_fallback_preserves_text_when_all_providers_fail(self) -> None:
         ai = AIOrchestrator(providers={"modal_glm": FakeProvider("modal_glm", error=RuntimeError("down"))})
 
@@ -247,6 +267,22 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("action_items", result.text)
         self.assertIn("Buy knife", result.text)
         self.assertIn("Wishlist", result.text)
+
+    async def test_ask_prompt_requires_grounded_answer_sections(self) -> None:
+        gemini = PlainTextOnlyProvider(
+            "gemini",
+            result=ProviderResult(provider="gemini", model="gemini", payload={}, text="Answer"),
+        )
+        ai = AIOrchestrator(providers={"gemini": gemini})
+
+        await ai.ask("What should I do?", context="Title: Buy knife\nPath: note.md\nExcerpt: Buy knife")
+
+        prompt = gemini.calls[0][1]
+        self.assertIn("Answer", prompt)
+        self.assertIn("Evidence from notes", prompt)
+        self.assertIn("Assumptions", prompt)
+        self.assertIn("Confidence", prompt)
+        self.assertIn("Next actions", prompt)
 
     async def test_ask_accepts_plain_text_provider_response(self) -> None:
         gemini = PlainTextOnlyProvider(

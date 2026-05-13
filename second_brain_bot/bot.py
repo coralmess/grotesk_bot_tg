@@ -43,6 +43,8 @@ class SecondBrainTelegramBot:
         application.add_handler(CommandHandler("note", self.note_command))
         application.add_handler(CommandHandler("ask", self.ask_command))
         application.add_handler(CommandHandler("learn", self.learn_command))
+        application.add_handler(CommandHandler("review", self.review_command))
+        application.add_handler(CommandHandler("consolidate", self.consolidate_command))
         application.add_handler(CommandHandler("brain_status", self.status_command))
         application.add_handler(CommandHandler("brain_inbox", self.inbox_command))
         application.add_handler(CommandHandler("brain_note", self.note_command))
@@ -52,6 +54,8 @@ class SecondBrainTelegramBot:
         application.add_handler(CommandHandler("brain_ask", self.ask_command))
         application.add_handler(CommandHandler("brain_distill", self.distill_command))
         application.add_handler(CommandHandler("brain_digest_now", self.digest_now_command))
+        application.add_handler(CommandHandler("brain_review", self.review_command))
+        application.add_handler(CommandHandler("brain_consolidate", self.consolidate_command))
         application.add_handler(CommandHandler("brain_ai_retry", self.ai_retry_command))
         application.add_handler(CommandHandler("brain_web_enrich", self.web_enrich_command))
         application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, self.capture_message))
@@ -193,6 +197,24 @@ class SecondBrainTelegramBot:
             self.service_health.record_failure("learn", exc)
             LOGGER.exception("Second Brain learn failed")
             await _edit_or_reply(thinking, "Learning mode failed. Check service logs.")
+
+    async def review_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._allowed(update):
+            return
+        await update.effective_message.reply_text(self.service.vault_health())
+
+    async def consolidate_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._allowed(update):
+            return
+        selector = _arg_text(context.args) or "week"
+        thinking = await update.effective_message.reply_text(THINKING_MESSAGE)
+        try:
+            result = await self.service.consolidate(selector)
+            await _edit_or_reply(thinking, result)
+        except Exception as exc:
+            self.service_health.record_failure("consolidate", exc)
+            LOGGER.exception("Second Brain consolidate failed")
+            await _edit_or_reply(thinking, "Consolidation failed. Check service logs.")
 
     async def distill_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
@@ -447,6 +469,9 @@ def build_help_text() -> str:
             "/learn <id or topic>",
             "Turn a note or topic into a learning session, save it, and show the lesson.",
             "",
+            "/review",
+            "Check vault quality: weak names, missing MOC links, duplicate-looking notes, and metadata issues.",
+            "",
             "Status:",
             "/status",
             "Show vault count and connected AI.",
@@ -607,11 +632,14 @@ def _display_provider_name(provider: str) -> str:
 
 
 async def _edit_or_reply(message, text: str) -> None:
-    safe_text = _shorten_for_telegram(text)
+    parts = _split_for_telegram(text)
     try:
-        await message.edit_text(safe_text)
+        await message.edit_text(parts[0])
+        for part in parts[1:]:
+            await message.reply_text(part)
     except Exception:
-        await message.reply_text(safe_text)
+        for part in parts:
+            await message.reply_text(part)
 
 
 def _shorten_for_telegram(text: str, *, limit: int = 3900) -> str:
@@ -620,6 +648,33 @@ def _shorten_for_telegram(text: str, *, limit: int = 3900) -> str:
         return text
     marker = "\n\n..."
     return text[: max(0, limit - len(marker))].rstrip() + marker
+
+
+def _split_for_telegram(text: str, *, limit: int = 3900) -> list[str]:
+    text = str(text or "")
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text.strip()
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        candidate = remaining[:limit]
+        split_at = max(candidate.rfind("\n\n"), candidate.rfind("\n"), candidate.rfind(". "), candidate.rfind(" "))
+        if split_at < max(200, limit // 3):
+            split_at = limit
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    total = len(chunks)
+    if total <= 1:
+        return chunks
+    result: list[str] = []
+    for index, chunk in enumerate(chunks, start=1):
+        prefix = f"Part {index}/{total}\n"
+        allowed = max(1, limit - len(prefix))
+        result.append(prefix + _shorten_for_telegram(chunk, limit=allowed))
+    return result
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from second_brain_bot.bot import (
     _format_note_preview_html,
     _format_vault_results,
     _shorten_for_telegram,
+    _split_for_telegram,
     build_help_text,
 )
 from second_brain_bot.models import NoteRecord, SearchResult
@@ -19,6 +20,16 @@ class SecondBrainBotTests(unittest.TestCase):
         self.assertLessEqual(len(text), 20)
         self.assertTrue(text.endswith("..."))
 
+    def test_split_for_telegram_splits_long_text_into_numbered_parts(self) -> None:
+        text = "\n\n".join(["paragraph " + str(i) + " " + ("x" * 80) for i in range(8)])
+
+        parts = _split_for_telegram(text, limit=220)
+
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(parts[0].startswith("Part 1/"))
+        self.assertTrue(parts[1].startswith("Part 2/"))
+        self.assertTrue(all(len(part) <= 220 for part in parts))
+
     def test_help_text_shows_simple_daily_commands(self) -> None:
         text = build_help_text()
 
@@ -26,6 +37,7 @@ class SecondBrainBotTests(unittest.TestCase):
         self.assertIn("/vault [query]", text)
         self.assertIn("/note <id>", text)
         self.assertIn("/learn <id or topic>", text)
+        self.assertIn("/review", text)
         self.assertIn("/status", text)
         self.assertNotIn("/brain_ask", text)
         self.assertNotIn("/brain_accept", text)

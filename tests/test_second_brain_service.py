@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from second_brain_bot.ai import AIEnrichment, RelatedNoteSuggestion
+from second_brain_bot.models import NoteRecord, RelationRecord
 from second_brain_bot.service import SecondBrainService
 
 
@@ -76,6 +77,59 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("## Raw Capture", ai.ask_calls[0][1])
             self.assertIn("Use the collected", answer)
 
+    async def test_ask_uses_related_notes_from_deep_retrieval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ai = FakeAI()
+            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            source = await service.capture_text(
+                "Representativeness heuristic",
+                telegram_message_id=1,
+                created_at="2026-05-13T09:00:00Z",
+            )
+            related = await service.capture_text(
+                "Thinking Fast and Slow explains cognitive bias examples.",
+                telegram_message_id=2,
+                created_at="2026-05-13T10:00:00Z",
+            )
+            service.index.upsert_relation(
+                RelationRecord(
+                    source_note_id=source.note_id,
+                    target_note_id=related.note_id,
+                    target_title=related.title,
+                    reason="Useful source for learning.",
+                    confidence=0.9,
+                )
+            )
+
+            await service.ask("Representativeness")
+
+            context = ai.ask_calls[-1][1]
+            self.assertIn(source.title, context)
+            self.assertIn(related.title, context)
+
+    async def test_capture_stores_action_items_for_task_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ai = FakeAI()
+            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            await service.capture_text("Buy knife", telegram_message_id=1)
+
+            actions = service.index.search_actions("what should I do?", limit=5)
+
+            self.assertEqual(len(actions), 1)
+            self.assertIn("Compare with wishlist", actions[0].action_text)
+
+    async def test_ask_includes_open_actions_for_task_questions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ai = FakeAI()
+            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            await service.capture_text("Buy knife", telegram_message_id=1)
+
+            await service.ask("what are the things I need to do?")
+
+            context = ai.ask_calls[-1][1]
+            self.assertIn("Open Actions", context)
+            self.assertIn("Compare with wishlist", context)
+
     async def test_digest_writes_daily_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = SecondBrainService(vault_dir=Path(tmp), ai=FakeAI())
@@ -85,6 +139,43 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("Daily Second Brain Digest", digest)
             self.assertTrue((Path(tmp) / "2-Areas" / "Daily Reviews" / "2026-05-13 - Daily Second Brain Digest.md").exists())
+
+    async def test_vault_health_reports_weak_and_orphan_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = SecondBrainService(vault_dir=Path(tmp), ai=FakeAI())
+            service.index.upsert_note(
+                NoteRecord(
+                    note_id="bad-note",
+                    title="A note",
+                    path="3-Resources/Knowledge/A note.md",
+                    tags=["#знання"],
+                    entities=["Репрезентативна евристика"],
+                    body="# A note\n\nNo parent MOC link.",
+                    status="Reference",
+                    created_at="2026-05-13T10:00:00Z",
+                    updated_at="2026-05-13T10:00:00Z",
+                )
+            )
+
+            report = service.vault_health()
+
+            self.assertIn("Vault Health", report)
+            self.assertIn("Weak titles: 1", report)
+            self.assertIn("Missing parent MOC links: 1", report)
+            self.assertIn("Non-English metadata: 1", report)
+
+    async def test_consolidate_writes_new_review_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ai = FakeAI()
+            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            await service.capture_text("Buy knife", telegram_message_id=1, created_at="2026-05-13T09:00:00Z")
+
+            text = await service.consolidate("week", now_iso="2026-05-13T13:00:00Z")
+
+            self.assertIn("Use the collected", text)
+            review_path = Path(tmp) / "2-Areas" / "Vault Reviews" / "2026-05-13 - Vault Consolidation.md"
+            self.assertTrue(review_path.exists())
+            self.assertIn("Vault Consolidation", review_path.read_text(encoding="utf-8"))
 
     async def test_learn_creates_linked_learning_note_from_note_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,6 +190,8 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             lesson = await service.learn(source.note_id)
 
             self.assertIn("Lesson body with examples", lesson.text)
+            self.assertIn("recall questions", ai.ask_calls[-1][0].lower())
+            self.assertIn("practice exercise", ai.ask_calls[-1][0].lower())
             self.assertIn("Learning", lesson.note.title)
             self.assertTrue(lesson.note.path.exists())
             body = lesson.note.path.read_text(encoding="utf-8")

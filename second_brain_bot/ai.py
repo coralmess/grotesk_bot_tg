@@ -204,10 +204,21 @@ class OpenAICompatibleProvider:
 
 
 class AIOrchestrator:
-    def __init__(self, *, providers: dict[str, ModelProvider] | None = None, analytics_sink: AnalyticsSink | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        providers: dict[str, ModelProvider] | None = None,
+        analytics_sink: AnalyticsSink | None = None,
+        provider_cooldown_after: int = 2,
+        provider_cooldown_sec: int = 180,
+    ) -> None:
         self.providers = providers or {}
         self.analytics_sink = analytics_sink or AnalyticsSink()
         self._provider_lock = asyncio.Lock()
+        self.provider_cooldown_after = max(1, int(provider_cooldown_after))
+        self.provider_cooldown_sec = max(1, int(provider_cooldown_sec))
+        self._provider_failures: dict[str, int] = {}
+        self._provider_cooldown_until: dict[str, float] = {}
 
     async def enrich_capture(
         self,
@@ -226,8 +237,10 @@ class AIOrchestrator:
             try:
                 async with self._provider_lock:
                     result = await provider.complete_json(task="enrich", prompt=prompt, max_tokens=900)
+                self._record_provider_success(name)
                 return _enrichment_from_payload(result.payload, provider=result.provider, fallback_text=text)
             except Exception:
+                self._record_provider_failure(name)
                 LOGGER.warning("Second Brain AI provider failed for enrichment: %s", name)
                 continue
         return local_enrichment(text)
@@ -244,8 +257,10 @@ class AIOrchestrator:
             try:
                 async with self._provider_lock:
                     result = await provider.complete_json(task="relations", prompt=prompt, max_tokens=800)
+                self._record_provider_success(name)
                 return _relations_from_payload(result.payload, candidates)
             except Exception:
+                self._record_provider_failure(name)
                 LOGGER.warning("Second Brain AI provider failed for relation judging: %s", name)
                 continue
         return local_relation_suggestions(note_text, candidates)
@@ -255,7 +270,13 @@ class AIOrchestrator:
             f"{SECOND_BRAIN_SYSTEM_INSTRUCTIONS}\n\n"
             "Answer the user's question using the collected Second Brain context first. "
             "Cite note titles or paths when possible. If the context does not support an answer, say so. "
-            "Return a human-readable Telegram answer, not JSON. For task questions, use a short bullet list.\n\n"
+            "Return a human-readable Telegram answer, not JSON. For task questions, use a short bullet list.\n"
+            "Use this structure when useful:\n"
+            "Answer - direct answer in the user's language.\n"
+            "Evidence from notes - cite the note titles or paths that support the answer.\n"
+            "Assumptions - separate any inference from saved facts.\n"
+            "Confidence - one practical score from 1 to 100.\n"
+            "Next actions - only concrete steps that follow from the notes.\n\n"
             f"Question:\n{question}\n\nContext:\n{context[:12000]}"
         )
         preferred = "gemini" if "gemini" in self.providers else ("modal_glm" if heavy else "cerebras")
@@ -266,9 +287,11 @@ class AIOrchestrator:
             try:
                 async with self._provider_lock:
                     result = await provider.complete_text(task="ask", prompt=prompt, max_tokens=1200)
+                self._record_provider_success(name)
                 text = clean_human_response(str(result.text or result.payload.get("answer") or result.payload.get("text") or ""))
                 return ProviderResult(provider=result.provider, model=result.model, payload=result.payload, text=text)
             except Exception:
+                self._record_provider_failure(name)
                 LOGGER.warning("Second Brain AI provider failed for ask: %s", name)
                 continue
         return ProviderResult(provider="local_fallback", model="local", payload={}, text=_local_answer(question, context))
@@ -283,7 +306,32 @@ class AIOrchestrator:
             order.extend(["gemini", "modal_glm", "cerebras", "groq"])
         order.extend(["gemini", "modal_glm", "cerebras", "groq"])
         seen: set[str] = set()
-        return [name for name in order if not (name in seen or seen.add(name))]
+        ordered = [name for name in order if not (name in seen or seen.add(name))]
+        return [name for name in ordered if not self._provider_is_cooling_down(name)]
+
+    def _provider_is_cooling_down(self, name: str) -> bool:
+        until = self._provider_cooldown_until.get(name, 0.0)
+        if until <= time.monotonic():
+            self._provider_cooldown_until.pop(name, None)
+            return False
+        return True
+
+    def _record_provider_success(self, name: str) -> None:
+        self._provider_failures.pop(name, None)
+        self._provider_cooldown_until.pop(name, None)
+
+    def _record_provider_failure(self, name: str) -> None:
+        failures = self._provider_failures.get(name, 0) + 1
+        self._provider_failures[name] = failures
+        if failures >= self.provider_cooldown_after:
+            self._provider_cooldown_until[name] = time.monotonic() + self.provider_cooldown_sec
+            try:
+                self.analytics_sink.append_event(
+                    "second_brain_ai_provider_cooldown",
+                    {"provider": name, "failures": failures, "cooldown_sec": self.provider_cooldown_sec},
+                )
+            except Exception:
+                return
 
 
 def local_enrichment(text: str) -> AIEnrichment:
