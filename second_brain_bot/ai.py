@@ -689,8 +689,18 @@ def clean_human_response(text: str) -> str:
             return converted
     cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
     cleaned = cleaned.replace("```", "").strip()
+    cleaned = _telegram_plaintext_markdown(cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned[:3900]
+
+
+def _telegram_plaintext_markdown(text: str) -> str:
+    text = re.sub(r"(?m)^\s*#{1,6}\s+", "", text)
+    text = re.sub(r"(?m)^\s*[*+]\s+", "- ", text)
+    text = re.sub(r"(?m)^\s*-\s{2,}", "- ", text)
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__(.*?)__", r"\1", text)
+    return text.strip()
 
 
 def _strip_thinking(text: str) -> str:

@@ -332,6 +332,17 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Suggested options", cleaned)
         self.assertIn("Cognitive Defusion (Score: 92/100)", cleaned)
 
+    def test_clean_human_response_removes_raw_markdown_for_telegram(self) -> None:
+        raw = "### 🧠 Основна інформація\n*   **Визначення:** текст\n1. **Крок:** зробити"
+
+        cleaned = clean_human_response(raw)
+
+        self.assertIn("🧠 Основна інформація", cleaned)
+        self.assertIn("- Визначення: текст", cleaned)
+        self.assertIn("1. Крок: зробити", cleaned)
+        self.assertNotIn("###", cleaned)
+        self.assertNotIn("**", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()
