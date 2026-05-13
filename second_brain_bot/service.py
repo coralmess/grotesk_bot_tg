@@ -216,6 +216,11 @@ class SecondBrainService:
             updated.append(note)
         return updated
 
+    def has_pending_ai_retry_notes(self) -> bool:
+        # The background loop uses this cheap state check to avoid waking AI
+        # providers when there are no local-fallback captures to repair.
+        return bool(self.vault.pending_ai_retry_notes(limit=1))
+
     def accept(self, note_id: str) -> NoteFile:
         note = self.vault.accept_suggestion(note_id)
         self._index_note(note_id)

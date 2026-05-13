@@ -163,6 +163,25 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(metadata["ai_retry_status"], "complete")
             self.assertIn("Global X Copper Miners ETF", body)
 
+    async def test_has_pending_ai_retry_notes_only_true_for_fallback_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = make_test_service(tmp, FakeAI())
+
+            self.assertFalse(service.has_pending_ai_retry_notes())
+
+            fallback = service.vault.create_capture_note(
+                CaptureInput(capture_type="text", text="COPX stock idea"),
+                enrichment=AIEnrichment(title="COPX stock idea", provider="local_fallback"),
+            )
+            service._index_note(fallback.note_id)
+
+            self.assertTrue(service.has_pending_ai_retry_notes())
+
+            service.ai = RetryAI()
+            await service.retry_pending_ai_enrichments(limit=2)
+
+            self.assertFalse(service.has_pending_ai_retry_notes())
+
     async def test_ask_uses_local_retrieval_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ai = FakeAI()

@@ -1,6 +1,9 @@
 import unittest
+from types import SimpleNamespace
 
 from second_brain_bot.bot import (
+    AI_RETRY_INTERVAL_SEC,
+    SecondBrainTelegramBot,
     _format_capture_confirmation,
     _format_learning_result,
     _format_note_preview_html,
@@ -10,6 +13,32 @@ from second_brain_bot.bot import (
     build_help_text,
 )
 from second_brain_bot.models import NoteRecord, SearchResult
+
+
+class FakeRetryService:
+    def __init__(self, *, pending: bool, updated_count: int = 0) -> None:
+        self.pending = pending
+        self.updated_count = updated_count
+        self.retry_calls = 0
+
+    def has_pending_ai_retry_notes(self) -> bool:
+        return self.pending
+
+    async def retry_pending_ai_enrichments(self, *, limit: int = 2):
+        self.retry_calls += 1
+        return [object()] * self.updated_count
+
+
+class FakeServiceHealth:
+    def __init__(self) -> None:
+        self.successes: list[tuple[str, str]] = []
+        self.failures: list[tuple[str, Exception]] = []
+
+    def record_success(self, operation: str, *, note: str = "") -> None:
+        self.successes.append((operation, note))
+
+    def record_failure(self, operation: str, exc: Exception) -> None:
+        self.failures.append((operation, exc))
 
 
 class SecondBrainBotTests(unittest.TestCase):
@@ -188,6 +217,41 @@ class SecondBrainBotTests(unittest.TestCase):
         self.assertNotIn("Catalog", preview)
         self.assertNotIn("#psychology", preview)
         self.assertNotIn("Entities:", preview)
+
+    def test_ai_retry_interval_is_two_hours(self) -> None:
+        self.assertEqual(AI_RETRY_INTERVAL_SEC, 7200)
+
+
+class SecondBrainBotAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_automatic_ai_retry_skips_service_work_when_no_pending_notes(self) -> None:
+        service = FakeRetryService(pending=False)
+        health = FakeServiceHealth()
+        bot = SecondBrainTelegramBot(
+            config=SimpleNamespace(),
+            service=service,
+            service_health=health,
+        )
+
+        updated = await bot._run_ai_retry_once()
+
+        self.assertEqual(updated, 0)
+        self.assertEqual(service.retry_calls, 0)
+        self.assertEqual(health.successes, [])
+
+    async def test_automatic_ai_retry_runs_and_records_success_when_pending_notes_exist(self) -> None:
+        service = FakeRetryService(pending=True, updated_count=2)
+        health = FakeServiceHealth()
+        bot = SecondBrainTelegramBot(
+            config=SimpleNamespace(),
+            service=service,
+            service_health=health,
+        )
+
+        updated = await bot._run_ai_retry_once()
+
+        self.assertEqual(updated, 2)
+        self.assertEqual(service.retry_calls, 1)
+        self.assertEqual(health.successes, [("ai_retry", "updated=2")])
 
 
 if __name__ == "__main__":

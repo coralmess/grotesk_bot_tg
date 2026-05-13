@@ -24,6 +24,7 @@ from second_brain_bot.config import SecondBrainConfig, load_config
 from second_brain_bot.service import SecondBrainService
 
 LOGGER = logging.getLogger(__name__)
+AI_RETRY_INTERVAL_SEC = 7200
 THINKING_MESSAGE = "🧠Thinking🧠"
 
 
@@ -325,20 +326,28 @@ class SecondBrainTelegramBot:
                 await asyncio.sleep(300)
 
     async def _ai_retry_loop(self) -> None:
-        await asyncio.sleep(600)
+        await asyncio.sleep(AI_RETRY_INTERVAL_SEC)
         while True:
             try:
-                updated = await self.service.retry_pending_ai_enrichments(limit=2)
-                if updated:
-                    self.service_health.record_success("ai_retry", note=f"updated={len(updated)}")
-                    LOGGER.info("Second Brain AI retry updated %s fallback notes", len(updated))
-                await asyncio.sleep(1800)
+                await self._run_ai_retry_once()
+                await asyncio.sleep(AI_RETRY_INTERVAL_SEC)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self.service_health.record_failure("ai_retry", exc)
                 LOGGER.exception("Second Brain AI retry loop failed")
-                await asyncio.sleep(1800)
+                await asyncio.sleep(AI_RETRY_INTERVAL_SEC)
+
+    async def _run_ai_retry_once(self) -> int:
+        # Retry is intentionally gated by local vault state so the background
+        # task only spends provider requests when fallback notes actually exist.
+        if not self.service.has_pending_ai_retry_notes():
+            return 0
+        updated = await self.service.retry_pending_ai_enrichments(limit=2)
+        if updated:
+            self.service_health.record_success("ai_retry", note=f"updated={len(updated)}")
+            LOGGER.info("Second Brain AI retry updated %s fallback notes", len(updated))
+        return len(updated)
 
     async def _allowed(self, update: Update) -> bool:
         chat = update.effective_chat
