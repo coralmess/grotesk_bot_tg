@@ -27,6 +27,20 @@ class FakeProvider(ModelProvider):
             raise RuntimeError("missing result")
         return self.result
 
+    async def complete_text(self, *, task: str, prompt: str, max_tokens: int = 1200) -> ProviderResult:
+        return await self.complete_json(task=task, prompt=prompt, max_tokens=max_tokens)
+
+
+class PlainTextOnlyProvider(FakeProvider):
+    async def complete_json(self, *, task: str, prompt: str, max_tokens: int = 800) -> ProviderResult:
+        raise AssertionError("ask should not use JSON completion")
+
+    async def complete_text(self, *, task: str, prompt: str, max_tokens: int = 1200) -> ProviderResult:
+        self.calls.append((task, prompt, max_tokens))
+        if self.result is None:
+            raise RuntimeError("missing result")
+        return self.result
+
 
 class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_heavy_tasks_prefer_gemini_when_available(self) -> None:
@@ -232,6 +246,23 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Buy knife", result.text)
         self.assertIn("Wishlist", result.text)
 
+    async def test_ask_accepts_plain_text_provider_response(self) -> None:
+        gemini = PlainTextOnlyProvider(
+            "gemini",
+            result=ProviderResult(
+                provider="gemini",
+                model="gemini-3-flash-preview",
+                payload={},
+                text="🧠 У vault є нотатка про репрезентативну евристику.",
+            ),
+        )
+        ai = AIOrchestrator(providers={"gemini": gemini})
+
+        result = await ai.ask("Що в мене є про Репрезентативна евристика?", context="Title: Репрезентативна евристика")
+
+        self.assertEqual(result.provider, "gemini")
+        self.assertIn("репрезентативну евристику", result.text.lower())
+
     async def test_ask_local_fallback_does_not_dump_raw_markdown(self) -> None:
         ai = AIOrchestrator(providers={"modal_glm": FakeProvider("modal_glm", error=RuntimeError("down"))})
         context = (
@@ -249,6 +280,24 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("00_Inbox/money.md", result.text)
         self.assertNotIn("## Raw Capture", result.text)
         self.assertNotIn("Extra context " * 20, result.text)
+
+    async def test_ask_local_fallback_prefers_executive_summary(self) -> None:
+        ai = AIOrchestrator(providers={"gemini": FakeProvider("gemini", error=RuntimeError("down"))})
+        context = (
+            "Title: Репрезентативна евристика\n"
+            "Path: 3-Resources/Psychology/Репрезентативна евристика.md\n"
+            "Tags: #psychology\n"
+            "Excerpt: Репрезентативна евристика Parent: Psychology MOC Related: Cognitive Biases MOC "
+            "Executive Summary Запит на пояснення когнітивного упередження. "
+            "Source Capture Репрезентативна евристика"
+        )
+
+        result = await ai.ask("Що в мене є?", context=context, heavy=True)
+
+        self.assertIn("Репрезентативна евристика", result.text)
+        self.assertIn("Запит на пояснення когнітивного упередження", result.text)
+        self.assertNotIn("Parent:", result.text)
+        self.assertNotIn("Related:", result.text)
 
     def test_format_note_context_strips_obsidian_headings(self) -> None:
         item = SearchResult(

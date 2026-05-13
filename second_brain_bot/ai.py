@@ -89,6 +89,9 @@ class ModelProvider(Protocol):
     async def complete_json(self, *, task: str, prompt: str, max_tokens: int = 800) -> ProviderResult:
         ...
 
+    async def complete_text(self, *, task: str, prompt: str, max_tokens: int = 1200) -> ProviderResult:
+        ...
+
 
 class OpenAICompatibleProvider:
     def __init__(
@@ -138,6 +141,41 @@ class OpenAICompatibleProvider:
             payload = _parse_json_object(content)
             self._record("success", task, started)
             return ProviderResult(provider=self.name, model=self.model, payload=payload, text=content)
+        except Exception as exc:
+            self._record("failed", task, started, error=str(exc)[:160])
+            raise
+
+    async def complete_text(self, *, task: str, prompt: str, max_tokens: int = 1200) -> ProviderResult:
+        started = time.monotonic()
+        try:
+            timeout = aiohttp.ClientTimeout(total=self.timeout_sec)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    f"{self.base_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": SECOND_BRAIN_SYSTEM_INSTRUCTIONS,
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.2,
+                        "max_tokens": max_tokens,
+                    },
+                ) as response:
+                    response.raise_for_status()
+                    data = await response.json()
+            content = str(data["choices"][0]["message"].get("content") or "")
+            if not content.strip():
+                raise ValueError("AI response was empty")
+            self._record("success", task, started)
+            return ProviderResult(provider=self.name, model=self.model, payload={}, text=content)
         except Exception as exc:
             self._record("failed", task, started, error=str(exc)[:160])
             raise
@@ -226,8 +264,8 @@ class AIOrchestrator:
                 continue
             try:
                 async with self._provider_lock:
-                    result = await provider.complete_json(task="ask", prompt=prompt, max_tokens=1200)
-                text = clean_human_response(str(result.payload.get("answer") or result.payload.get("text") or result.text))
+                    result = await provider.complete_text(task="ask", prompt=prompt, max_tokens=1200)
+                text = clean_human_response(str(result.text or result.payload.get("answer") or result.payload.get("text") or ""))
                 return ProviderResult(provider=result.provider, model=result.model, payload=result.payload, text=text)
             except Exception:
                 LOGGER.warning("Second Brain AI provider failed for ask: %s", name)
@@ -564,7 +602,7 @@ def _local_answer(question: str, context: str) -> str:
     for note in notes[:5]:
         lines.append("")
         lines.append(f"- {note['title']} ({note['path']})")
-        excerpt = _truncate_clean(note["excerpt"], 320)
+        excerpt = _fallback_note_excerpt(note["excerpt"])
         if excerpt:
             lines.append(f"  {excerpt}")
     return "\n".join(lines).strip()
@@ -621,6 +659,23 @@ def _truncate_clean(text: str, limit: int) -> str:
         if space >= max(40, limit // 3):
             candidate = candidate[:space]
     return candidate.rstrip(" ,;:-") + "..."
+
+
+def _fallback_note_excerpt(excerpt: str) -> str:
+    text = clean_note_excerpt(excerpt)
+    summary = _extract_flat_section(text, "Executive Summary", stop_labels=("Source Capture", "Catalog", "Polished Capture"))
+    if summary:
+        return _truncate_clean(summary, 260)
+    text = re.sub(r"\bParent:\s*.*?(?=\bRelated:|\bExecutive Summary\b|\bSource Capture\b|\Z)", "", text)
+    text = re.sub(r"\bRelated:\s*.*?(?=\bExecutive Summary\b|\bSource Capture\b|\Z)", "", text)
+    text = re.sub(r"\b(Source Capture|Catalog|Polished Capture|Executive Summary)\b", "", text)
+    return _truncate_clean(text, 260)
+
+
+def _extract_flat_section(text: str, label: str, *, stop_labels: tuple[str, ...]) -> str:
+    pattern = re.escape(label) + r"\s+(?P<body>.*?)(?=" + "|".join(re.escape(item) for item in stop_labels) + r"|\Z)"
+    match = re.search(pattern, text, flags=re.S)
+    return re.sub(r"\s+", " ", match.group("body")).strip(" .:-") if match else ""
 
 
 def clean_human_response(text: str) -> str:
