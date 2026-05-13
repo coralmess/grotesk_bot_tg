@@ -7,7 +7,9 @@ from second_brain_bot.ai import (
     ModelProvider,
     ProviderResult,
     clean_human_response,
+    format_note_context,
 )
+from second_brain_bot.models import SearchResult
 
 
 class FakeProvider(ModelProvider):
@@ -103,6 +105,8 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         prompt = modal.calls[0][1]
         self.assertIn("recognizable ticker", prompt)
         self.assertIn("Do not add noisy guesses", prompt)
+        self.assertIn("polished_text", prompt)
+        self.assertIn("split inline numbered steps", prompt)
         self.assertIn("score from 1 to 100", prompt)
 
     async def test_enrichment_parses_useful_context_and_scored_suggestions(self) -> None:
@@ -114,6 +118,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 payload={
                     "title": "Improve mental resilience",
                     "summary": "Goal note.",
+                    "polished_text": "I want to improve my mental resilience.",
                     "enrichment_notes": ["Cognitive defusion means noticing thoughts as thoughts."],
                     "scored_suggestions": [
                         {
@@ -130,7 +135,17 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         enrichment = await ai.enrich_capture("I care too much about opinions", preferred_provider="modal_glm")
 
         self.assertEqual(enrichment.enrichment_notes, ["Cognitive defusion means noticing thoughts as thoughts."])
+        self.assertEqual(enrichment.polished_text, "I want to improve my mental resilience.")
         self.assertEqual(enrichment.scored_suggestions[0]["score"], 95)
+
+    async def test_local_enrichment_formats_inline_steps_without_adding_knowledge(self) -> None:
+        ai = AIOrchestrator(providers={})
+
+        enrichment = await ai.enrich_capture("Steps: 1) Open account 2) Compare fees 3) Save notes")
+
+        self.assertIn("1. Open account", enrichment.polished_text)
+        self.assertIn("\n2. Compare fees", enrichment.polished_text)
+        self.assertNotIn("AI Suggestions", enrichment.polished_text)
 
     async def test_ask_returns_readable_answer_not_thinking_or_json(self) -> None:
         modal = FakeProvider(
@@ -151,6 +166,40 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("action_items", result.text)
         self.assertIn("Buy knife", result.text)
         self.assertIn("Wishlist", result.text)
+
+    async def test_ask_local_fallback_does_not_dump_raw_markdown(self) -> None:
+        ai = AIOrchestrator(providers={"modal_glm": FakeProvider("modal_glm", error=RuntimeError("down"))})
+        context = (
+            "Title: Money strategy\n"
+            "Path: 00_Inbox/money.md\n"
+            "Tags: inbox\n"
+            "Excerpt: ## Raw Capture\n"
+            "Amazon FBA strategy. 1) Open LLC 2) Research niche 3) Test ads. "
+            + "Extra context " * 80
+        )
+
+        result = await ai.ask("ways to earn money?", context=context, heavy=True)
+
+        self.assertIn("Money strategy", result.text)
+        self.assertIn("00_Inbox/money.md", result.text)
+        self.assertNotIn("## Raw Capture", result.text)
+        self.assertNotIn("Extra context " * 20, result.text)
+
+    def test_format_note_context_strips_obsidian_headings(self) -> None:
+        item = SearchResult(
+            note_id="n1",
+            title="Money strategy",
+            path="00_Inbox/money.md",
+            tags=["inbox"],
+            entities=[],
+            body="# Money strategy\n\n## Raw Capture\nAmazon FBA strategy.",
+            status="inbox",
+        )
+
+        context = format_note_context(item)
+
+        self.assertIn("Money strategy", context)
+        self.assertNotIn("## Raw Capture", context)
 
     def test_clean_human_response_removes_thinking_and_formats_json_tasks(self) -> None:
         raw = '<think>hidden</think>{"action_items":[{"task":"Buy scarf","source":"Wishlist"}]}'

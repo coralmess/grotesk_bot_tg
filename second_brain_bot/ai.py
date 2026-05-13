@@ -56,6 +56,7 @@ class ProviderResult:
 class AIEnrichment:
     title: str = ""
     summary: str = ""
+    polished_text: str = ""
     suggested_folder: str = "00_Inbox"
     suggested_tags: list[str] = field(default_factory=list)
     entities: list[str] = field(default_factory=list)
@@ -244,6 +245,7 @@ def local_enrichment(text: str) -> AIEnrichment:
     return AIEnrichment(
         title=title,
         summary=text.strip()[:280],
+        polished_text=_polish_capture_text(text),
         suggested_folder="00_Inbox",
         suggested_tags=["inbox", *keywords[:4]],
         entities=keywords[:8],
@@ -279,6 +281,10 @@ def _enrichment_prompt(text: str, *, allow_web: bool) -> str:
         "Enrich this personal Second Brain capture. Use model knowledge only unless web facts are already supplied.\n"
         "Universal enrichment rules:\n"
         "- Preserve everything the user provided; never replace the raw capture.\n"
+        "- Create polished_text by improving style, order, typo cleanup, and readability while preserving the user's meaning.\n"
+        "- In polished_text, split inline numbered steps such as 1), 2), 3) onto separate lines.\n"
+        "- In polished_text, use rare helpful emoji section markers only when they make the note easier to scan.\n"
+        "- Do not add new facts, guesses, or model knowledge into polished_text; put extra context only in enrichment_notes or scored_suggestions.\n"
         "- Add useful context only when it is high-confidence and helpful for future recall or decisions.\n"
         "- Do not add noisy guesses. If the user says they want to buy a scarf, do not guess a brand or material unless provided.\n"
         "- If the user gives a recognizable ticker, acronym, company, product, method, book, person, or concept, add a compact definition.\n"
@@ -286,7 +292,7 @@ def _enrichment_prompt(text: str, *, allow_web: bool) -> str:
         "- Scores mean practical usefulness/confidence for this capture, not scientific certainty.\n"
         "- For health or mental wellbeing topics, keep it educational, do not diagnose, and prefer evidence-informed methods.\n"
         "- Keep enrichment small: usually 2-6 bullets.\n\n"
-        "Return JSON with keys: title, summary, suggested_folder, suggested_tags, entities, action_items, questions, "
+        "Return JSON with keys: title, summary, polished_text, suggested_folder, suggested_tags, entities, action_items, questions, "
         "enrichment_notes, scored_suggestions. scored_suggestions must be a list of objects with title, score, reason. "
         "suggested_folder must be one of 00_Inbox, 01_Projects, 02_Areas, 03_Resources, 99_Archive. "
         f"Public web lookup allowed by policy: {allow_web}.\n\nCapture:\n{text[:8000]}"
@@ -334,6 +340,12 @@ def _enrichment_from_payload(payload: dict[str, Any], *, provider: str, fallback
     return AIEnrichment(
         title=str(payload.get("title") or _first_line(fallback_text)),
         summary=str(payload.get("summary") or fallback_text[:280]),
+        polished_text=str(
+            payload.get("polished_text")
+            or payload.get("cleaned_text")
+            or payload.get("rewritten_capture")
+            or _polish_capture_text(fallback_text)
+        ).strip(),
         suggested_folder=str(payload.get("suggested_folder") or "00_Inbox"),
         suggested_tags=_string_list(payload.get("suggested_tags")),
         entities=_string_list(payload.get("entities")),
@@ -422,10 +434,85 @@ def _keywords(text: str) -> list[str]:
     return result[:20]
 
 
+def _polish_capture_text(text: str) -> str:
+    polished = (text or "").strip()
+    if not polished:
+        return ""
+    # Local fallback only does mechanical readability cleanup; model-added knowledge belongs in enrichment notes.
+    polished = re.sub(r"([:\.])\s+([1-9]\d*)[\).]\s+", r"\1\n\2. ", polished)
+    polished = re.sub(r"\s+([1-9]\d*)[\).]\s+", r"\n\1. ", polished)
+    polished = re.sub(r"\n{3,}", "\n\n", polished)
+    return polished.strip()
+
+
 def _local_answer(question: str, context: str) -> str:
     if not context.strip():
         return "I could not find collected notes that answer this yet."
-    return f"Based on local notes, relevant context exists for: {question}\n\n{context[:1200]}"
+    notes = _parse_context_notes(context)
+    if not notes:
+        excerpt = _truncate_clean(clean_note_excerpt(context), 600)
+        return "🧠 I could not reach the AI models, so here is the most relevant saved context I found:\n\n" + excerpt
+    lines = ["🧠 I could not reach the AI models, so here are the most relevant saved notes I found:"]
+    for note in notes[:5]:
+        lines.append("")
+        lines.append(f"- {note['title']} ({note['path']})")
+        excerpt = _truncate_clean(note["excerpt"], 320)
+        if excerpt:
+            lines.append(f"  {excerpt}")
+    return "\n".join(lines).strip()
+
+
+def format_note_context(item: SearchResult, *, max_chars: int = 800) -> str:
+    return (
+        f"Title: {item.title}\n"
+        f"Path: {item.path}\n"
+        f"Tags: {', '.join(item.tags)}\n"
+        f"Excerpt: {_truncate_clean(clean_note_excerpt(item.body), max_chars)}"
+    )
+
+
+def clean_note_excerpt(text: str) -> str:
+    cleaned = str(text or "")
+    cleaned = re.sub(r"^---\n.*?\n---\n", "", cleaned, flags=re.S)
+    cleaned = re.sub(r"^#{1,6}\s+", "", cleaned, flags=re.M)
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = re.sub(r"!\[\[([^\]]+)\]\]", r"[attachment: \1]", cleaned)
+    cleaned = re.sub(r"\[\[([^\]]+)\]\]", r"\1", cleaned)
+    cleaned = re.sub(r"\n{2,}", "\n", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _parse_context_notes(context: str) -> list[dict[str, str]]:
+    notes: list[dict[str, str]] = []
+    pattern = re.compile(
+        r"(?:^|\n\n)Title:\s*(?P<title>.*?)\nPath:\s*(?P<path>.*?)\nTags:\s*(?P<tags>.*?)\nExcerpt:\s*(?P<excerpt>.*?)(?=\n\nTitle:|\Z)",
+        flags=re.S,
+    )
+    for match in pattern.finditer(context.strip()):
+        notes.append(
+            {
+                "title": match.group("title").strip() or "Untitled note",
+                "path": match.group("path").strip(),
+                "excerpt": clean_note_excerpt(match.group("excerpt")),
+            }
+        )
+    return notes
+
+
+def _truncate_clean(text: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) <= limit:
+        return text
+    candidate = text[: max(0, limit - 3)].rstrip()
+    boundary = max(candidate.rfind(". "), candidate.rfind("; "), candidate.rfind("! "), candidate.rfind("? "))
+    if boundary >= max(80, limit // 2):
+        candidate = candidate[: boundary + 1]
+    else:
+        space = candidate.rfind(" ")
+        if space >= max(40, limit // 3):
+            candidate = candidate[:space]
+    return candidate.rstrip(" ,;:-") + "..."
 
 
 def clean_human_response(text: str) -> str:

@@ -146,6 +146,7 @@ class SecondBrainVault:
             "ai_suggested_folder": enrichment.suggested_folder if enrichment else "",
             "ai_suggested_tags": enrichment.suggested_tags if enrichment else [],
             "ai_summary": enrichment.summary if enrichment else "",
+            "ai_polished_text": enrichment.polished_text if enrichment else "",
             "ai_enrichment_notes": enrichment.enrichment_notes if enrichment else [],
             "related_notes": [item.note_id for item in related_notes or []],
         }
@@ -270,6 +271,8 @@ class SecondBrainVault:
         parts = ["# " + sanitize_filename((enrichment.title if enrichment else "") or _title_from_text(capture.text)), ""]
         if capture.attachment_relpath:
             parts.extend(["## Attachment", f"![[{capture.attachment_relpath}]]", ""])
+        if enrichment and _should_render_polished_text(enrichment.polished_text, capture.text):
+            parts.extend(["## Polished Capture", enrichment.polished_text.strip(), ""])
         parts.extend(["## Raw Capture", capture.text.strip() or "_No text caption._", ""])
         if enrichment:
             parts.extend(
@@ -361,6 +364,14 @@ def _render_related_notes(related_notes: list[RelatedNoteSuggestion]) -> str:
     for item in related_notes:
         lines.append(f"- [[{item.title}]] - {item.reason} ({item.confidence:.2f})")
     return "\n".join(lines) + "\n"
+
+
+def _should_render_polished_text(polished_text: str, raw_text: str) -> bool:
+    polished = (polished_text or "").strip()
+    raw = (raw_text or "").strip()
+    if not polished:
+        return False
+    return re.sub(r"\s+", " ", polished) != re.sub(r"\s+", " ", raw)
 
 
 def _title_from_text(text: str) -> str:

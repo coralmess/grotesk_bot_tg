@@ -65,6 +65,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             answer = await service.ask("What should I buy?")
 
             self.assertIn("knife", ai.ask_calls[0][1].lower())
+            self.assertNotIn("## Raw Capture", ai.ask_calls[0][1])
             self.assertIn("Use the collected", answer)
 
     async def test_digest_writes_daily_note(self) -> None:

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from helpers.analytics_events import AnalyticsSink
-from second_brain_bot.ai import AIOrchestrator, RelatedNoteSuggestion
+from second_brain_bot.ai import AIOrchestrator, RelatedNoteSuggestion, format_note_context
 from second_brain_bot.index import SecondBrainIndex
 from second_brain_bot.models import NoteRecord, RelationRecord
 from second_brain_bot.vault import CaptureInput, NoteFile, SecondBrainVault, utc_now_iso
@@ -82,10 +82,7 @@ class SecondBrainService:
 
     async def ask(self, question: str) -> str:
         results = self.index.search(question, limit=8)
-        context = "\n\n".join(
-            f"Title: {item.title}\nPath: {item.path}\nTags: {', '.join(item.tags)}\nExcerpt: {item.body[:1400]}"
-            for item in results
-        )
+        context = "\n\n".join(format_note_context(item, max_chars=900) for item in results)
         result = await self.ai.ask(question, context=context, heavy=True)
         self._record_command("ask", provider=result.provider)
         return result.text

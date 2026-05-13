@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -17,7 +18,7 @@ if str(ROOT_DIR) not in sys.path:
 from helpers.analytics_events import AnalyticsSink
 from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.service_health import build_service_health
-from second_brain_bot.ai import AIOrchestrator, OpenAICompatibleProvider
+from second_brain_bot.ai import AIOrchestrator, OpenAICompatibleProvider, clean_note_excerpt
 from second_brain_bot.config import SecondBrainConfig, load_config
 from second_brain_bot.service import SecondBrainService
 
@@ -135,7 +136,7 @@ class SecondBrainTelegramBot:
         if result is None:
             await update.effective_message.reply_text("Note not found.")
             return
-        await update.effective_message.reply_text(f"{result.title}\n{result.path}\n\n{result.body[:1200]}")
+        await update.effective_message.reply_text(_format_note_preview_html(result), parse_mode="HTML")
 
     async def accept_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await self._note_action(update, context, action="accept")
@@ -389,6 +390,13 @@ def build_help_text() -> str:
             "Tip: when AI is working, I first show \"🧠Thinking🧠\" and then edit that message with the answer.",
         ]
     )
+
+
+def _format_note_preview_html(result) -> str:
+    title = html.escape(str(result.title or "Untitled note"))
+    path = html.escape(str(result.path or ""))
+    excerpt = html.escape(clean_note_excerpt(result.body)[:1400].strip() or "No note body.")
+    return _shorten_for_telegram(f"<b>{title}</b>\n<u>{path}</u>\n\n<i>Preview</i>\n{excerpt}")
 
 
 async def _edit_or_reply(message, text: str) -> None:

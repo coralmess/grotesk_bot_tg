@@ -1,6 +1,7 @@
 import unittest
 
-from second_brain_bot.bot import _shorten_for_telegram, build_help_text
+from second_brain_bot.bot import _format_note_preview_html, _shorten_for_telegram, build_help_text
+from second_brain_bot.models import SearchResult
 
 
 class SecondBrainBotTests(unittest.TestCase):
@@ -18,6 +19,25 @@ class SecondBrainBotTests(unittest.TestCase):
         self.assertIn("/brain_ask <question> - ask something based on your saved notes.", text)
         self.assertIn("/brain_accept <id> - accept AI title/tags/folder for a note.", text)
         self.assertIn("🧠Thinking🧠", text)
+
+
+    def test_note_preview_uses_telegram_html_not_raw_markdown_headings(self) -> None:
+        result = SearchResult(
+            note_id="n1",
+            title="Money <strategy>",
+            path="00_Inbox/money.md",
+            tags=[],
+            entities=[],
+            body="## Raw Capture\nAmazon FBA strategy.",
+            status="inbox",
+        )
+
+        preview = _format_note_preview_html(result)
+
+        self.assertIn("<b>Money &lt;strategy&gt;</b>", preview)
+        self.assertIn("<u>00_Inbox/money.md</u>", preview)
+        self.assertIn("<i>Preview</i>", preview)
+        self.assertNotIn("## Raw Capture", preview)
 
 
 if __name__ == "__main__":

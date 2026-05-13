@@ -25,6 +25,7 @@ class SecondBrainVaultTests(unittest.TestCase):
                 enrichment=AIEnrichment(
                     title="Buy knife later",
                     summary="A purchase reminder about a knife.",
+                    polished_text="Buy knife later\n\n1. Compare knife brands.",
                     suggested_folder="01_Projects",
                     suggested_tags=["wishlist", "knife"],
                     entities=["knife"],
@@ -54,6 +55,9 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertIn("status: inbox", text)
             self.assertIn("capture_type: text", text)
             self.assertIn("ai_suggested_title: Buy knife later", text)
+            self.assertIn("ai_polished_text:", text)
+            self.assertIn("## Polished Capture", text)
+            self.assertIn("1. Compare knife brands.", text)
             self.assertIn("- wishlist", text)
             self.assertIn("### Useful Context", text)
             self.assertIn("COPX is the Global X Copper Miners ETF.", text)
