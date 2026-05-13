@@ -173,6 +173,61 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertFalse(legacy_dir.exists())
             self.assertTrue((root / "4-Incubator" / "Business Ideas" / "Business Ideas MOC.md").exists())
 
+    def test_migration_normalizes_date_prefixed_cataloged_notes_and_mocs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_dir = root / "4-Incubator" / "Purchases"
+            old_dir.mkdir(parents=True)
+            old_path = old_dir / "2026-05-13 Herman Miller Gaming Embody Office Chair Evaluation.md"
+            old_path.write_text(
+                "---\n"
+                "aliases:\n"
+                "  - old chair note\n"
+                "tags:\n"
+                "  - \"#purchases\"\n"
+                "type: Purchase\n"
+                "status: Incubating\n"
+                "date_created: 2026-05-13\n"
+                "---\n"
+                "# 2026-05-13 Herman Miller Gaming Embody Office Chair Evaluation\n\n"
+                "Parent: [[Purchases MOC]]\n\n"
+                "## Source Capture\n"
+                "Herman Miller Gaming Embody is the best office chair. It's expensive and hard to find.\n",
+                encoding="utf-8",
+            )
+            moc = old_dir / "Purchases MOC.md"
+            moc.write_text(
+                "---\naliases: [Purchases]\ntags: [\"#moc\"]\ntype: MOC\nstatus: Active\ndate_created: 2026-05-13\n---\n"
+                "# Purchases MOC\n\n## Notes\n"
+                "- [[2026-05-13 Herman Miller Gaming Embody Office Chair Evaluation]] - old title.\n",
+                encoding="utf-8",
+            )
+            (root / ".second_brain_state.json").write_text(
+                json.dumps(
+                    {
+                        "notes": {
+                            "chair-note": {
+                                "path": "4-Incubator/Purchases/2026-05-13 Herman Miller Gaming Embody Office Chair Evaluation.md",
+                                "title": "2026-05-13 Herman Miller Gaming Embody Office Chair Evaluation",
+                                "status": "Incubating",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            vault = SecondBrainVault(root)
+
+            migrated = vault.migrate_legacy_vault()
+
+            new_path = root / "4-Incubator" / "Purchases" / "Herman Miller Gaming Embody - Office Chair Purchase Evaluation.md"
+            self.assertEqual(migrated, 1)
+            self.assertTrue(new_path.exists())
+            self.assertFalse(old_path.exists())
+            moc_text = moc.read_text(encoding="utf-8")
+            self.assertIn("[[Herman Miller Gaming Embody - Office Chair Purchase Evaluation]]", moc_text)
+            self.assertNotIn("[[2026-05-13 Herman Miller Gaming Embody Office Chair Evaluation]]", moc_text)
+
 
 if __name__ == "__main__":
     unittest.main()

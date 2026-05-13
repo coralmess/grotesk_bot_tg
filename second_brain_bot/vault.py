@@ -253,18 +253,24 @@ class SecondBrainVault:
         migrated = 0
         for note_id, info in list(state.get("notes", {}).items()):
             relpath = str(info.get("path") or "")
-            if not relpath or relpath.split("/", 1)[0] not in LEGACY_PARA_FOLDERS:
+            if not relpath:
                 continue
             old_path = self.root_dir / relpath
             if not old_path.exists() or old_path.suffix.lower() != ".md":
                 continue
             metadata, body = _extract_frontmatter(old_path.read_text(encoding="utf-8"))
+            is_legacy_path = relpath.split("/", 1)[0] in LEGACY_PARA_FOLDERS
+            old_title = old_path.stem
+            if not is_legacy_path and not _needs_catalog_normalization(old_title):
+                continue
             created_at = str(metadata.get("created_at") or metadata.get("date_created") or utc_now_iso())
-            text_for_catalog = body or old_path.stem
+            text_for_catalog = _clean_legacy_body(body) or old_path.stem
             legacy_enrichment = _legacy_enrichment_from_text(old_path.stem, text_for_catalog)
             capture = CaptureInput(capture_type="text", text=text_for_catalog.strip(), created_at=created_at)
             catalog = _catalog_plan(capture, legacy_enrichment)
             new_path = self._unique_note_path(catalog.folder, catalog.category, f"{catalog.title}.md")
+            if new_path == old_path:
+                continue
             new_metadata = {
                 "aliases": catalog.aliases,
                 "tags": catalog.tags,
@@ -274,6 +280,7 @@ class SecondBrainVault:
             }
             new_body = self._render_capture_body(capture, enrichment=legacy_enrichment, related_notes=[], catalog=catalog)
             self._write_note(new_path, new_metadata, new_body)
+            self._remove_moc_link(old_title)
             self._ensure_moc(catalog, note_title=catalog.title)
             old_path.unlink()
             self._record_state(note_id, new_path, title=catalog.title, status=catalog.status)
@@ -371,6 +378,16 @@ class SecondBrainVault:
             description = catalog.moc_description.rstrip(".")
             body = body.rstrip() + f"\n- {link} - {description}.\n"
         self._write_note(moc_path, metadata, body)
+
+    def _remove_moc_link(self, note_title: str) -> None:
+        if not note_title:
+            return
+        escaped = re.escape(f"[[{note_title}]]")
+        for moc_path in self.root_dir.rglob("* MOC.md"):
+            metadata, body = _extract_frontmatter(moc_path.read_text(encoding="utf-8"))
+            updated = re.sub(rf"^- .*{escaped}.*(?:\n|$)", "", body, flags=re.M)
+            if updated != body:
+                self._write_note(moc_path, metadata, updated)
 
     def _write_note(self, path: Path, metadata: dict[str, Any], body: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -518,13 +535,34 @@ def _dedupe_strings(values: list[str] | tuple[str, ...] | None) -> list[str]:
 
 def _looks_generic_title(title: str) -> bool:
     lowered = title.lower()
-    return any(token in lowered for token in ("another potential", "potential earning", "a note", "state note", "untitled"))
+    return _needs_catalog_normalization(title)
+
+
+def _needs_catalog_normalization(title: str) -> bool:
+    lowered = title.lower()
+    return lowered.startswith("2026-") or any(
+        token in lowered for token in ("another potential", "potential earning", "a note", "state note", "untitled")
+    )
 
 
 def _descriptive_title_from_text(text: str, *, fallback: str) -> str:
     lowered = (text or "").lower()
     if "amazon fba" in lowered and "wyoming" in lowered:
         return "Amazon FBA and Wyoming LLC - Business Idea"
+    if "мікро-придбання" in lowered or "acquire.com" in lowered or "micro-acquisition" in lowered:
+        return "Micro SaaS Acquisition via Acquire.com - Business Idea"
+    if "дистрес" in lowered or "євробонди" in lowered or "eurobond" in lowered:
+        return "Ukrainian Eurobonds Distressed Assets - Investment Idea"
+    if "земл" in lowered and ("кордон" in lowered or "логісти" in lowered):
+        return "EU Border Land Purchase for Logistics Hub"
+    if "herman miller" in lowered and "embody" in lowered:
+        return "Herman Miller Gaming Embody - Office Chair Purchase Evaluation"
+    if "invincible" in lowered and "issue 79" in lowered:
+        return "Invincible Comics - Start Reading at Issue 79"
+    if "api key" in lowered and ("glm" in lowered or "groq" in lowered or "cerebras" in lowered):
+        return "AI API Key Sources - GLM Cerebras and Groq"
+    if "city" in lowered and ("live" in lowered or "living" in lowered):
+        return "Potential Cities for Living - Research Plan"
     if "toloka" in lowered:
         return "Toloka - Tech Stock Investment Idea"
     if "scarf" in lowered or "шарф" in lowered:
@@ -536,7 +574,7 @@ def _descriptive_title_from_text(text: str, *, fallback: str) -> str:
 
 def _infer_folder(text: str) -> str:
     lowered = (text or "").lower()
-    if any(word in lowered for word in ("buy", "purchase", "wishlist", "idea", "strategy", "someday")):
+    if any(word in lowered for word in ("buy", "purchase", "wishlist", "idea", "strategy", "someday", "chair", "scarf", "knife")):
         return "4-Incubator"
     if any(word in lowered for word in ("plan", "deadline", "project")):
         return "1-Projects"
@@ -562,6 +600,12 @@ def _default_status(note_type: str) -> str:
 
 def _moc_category_from_text(text: str) -> str:
     lowered = (text or "").lower()
+    if any(word in lowered for word in ("api key", "glm", "groq", "cerebras", "modal")):
+        return "AI Tools"
+    if "invincible" in lowered or "comics" in lowered:
+        return "Comics and Media"
+    if any(word in lowered for word in ("acquire.com", "мікро-придбання", "fba", "логісти", "логістич", "business")):
+        return "Business Ideas"
     if any(word in lowered for word in ("stock", "investment", "invest", "toloka", "etf")):
         return "Investments"
     if any(word in lowered for word in ("buy", "purchase", "wishlist", "scarf", "knife", "chair", "microphone")):
@@ -583,6 +627,8 @@ def _tags_from_text(text: str) -> list[str]:
 
 def _moc_description(parent_moc: str) -> str:
     descriptions = {
+        "AI Tools MOC": "Tracks AI provider portals, model access, API keys, and setup references.",
+        "Comics and Media MOC": "Tracks reading order, media references, and entertainment knowledge.",
         "Investments MOC": "Tracks investment ideas, risks, theses, and research notes.",
         "Purchases MOC": "Tracks potential purchases, buying criteria, comparisons, and follow-up decisions.",
         "Business Ideas MOC": "Tracks business and earning ideas that may become plans later.",
@@ -610,6 +656,19 @@ def _legacy_enrichment_from_text(title: str, body: str) -> AIEnrichment:
         moc_category=category,
         moc_description=_moc_description(f"{category} MOC"),
     )
+
+
+def _clean_legacy_body(body: str) -> str:
+    text = body or ""
+    raw_match = re.search(r"## Raw Capture\n(?P<raw>.*?)(?=\n## AI Suggestions|\n## Catalog|\Z)", text, flags=re.S)
+    if raw_match:
+        text = raw_match.group("raw")
+    source_match = re.search(r"## Source Capture\n(?P<raw>.*?)(?=\n## AI Suggestions|\n## Catalog|\Z)", text, flags=re.S)
+    if source_match:
+        text = source_match.group("raw")
+    text = re.sub(r"^# .*$", "", text, flags=re.M)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _should_render_polished_text(polished_text: str, raw_text: str) -> bool:
