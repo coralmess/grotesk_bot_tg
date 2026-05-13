@@ -12,6 +12,24 @@ class SecondBrainVaultTests(unittest.TestCase):
         self.assertEqual(sanitize_filename("Buy / test: knife?"), "Buy test knife")
         self.assertEqual(sanitize_filename("   "), "untitled")
 
+    def test_create_capture_preserves_dots_inside_descriptive_titles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = SecondBrainVault(Path(tmp))
+            note = vault.create_capture_note(
+                CaptureInput(capture_type="text", text="Micro SaaS acquisition on Acquire.com"),
+                enrichment=AIEnrichment(
+                    title="Micro SaaS Acquisition via Acquire.com - Business Idea",
+                    suggested_folder="4-Incubator",
+                    suggested_tags=["#business", "#idea"],
+                    note_type="Idea",
+                    note_status="Incubating",
+                    parent_moc="Business Ideas MOC",
+                    moc_category="Business Ideas",
+                ),
+            )
+
+            self.assertTrue(note.path.name.endswith("Acquire.com - Business Idea.md"))
+
     def test_create_text_capture_writes_markdown_with_frontmatter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             vault = SecondBrainVault(Path(tmp))

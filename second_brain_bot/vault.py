@@ -399,12 +399,14 @@ class SecondBrainVault:
     def _unique_note_path(self, folder: str, category: str, filename: str) -> Path:
         root = _safe_para_folder(folder)
         category_name = sanitize_filename(category or "General")
-        base = self.root_dir / root / category_name / sanitize_filename(Path(filename).stem)
+        raw_name = str(filename)
+        stem = raw_name[:-3] if raw_name.lower().endswith(".md") else raw_name
+        base = self.root_dir / root / category_name / sanitize_filename(stem)
         suffix = Path(filename).suffix or ".md"
-        candidate = base.with_suffix(suffix)
+        candidate = base.parent / f"{base.name}{suffix}"
         counter = 2
         while candidate.exists():
-            candidate = candidate.with_name(f"{base.name} {counter}{suffix}")
+            candidate = base.parent / f"{base.name} {counter}{suffix}"
             counter += 1
         return candidate
 
@@ -541,7 +543,15 @@ def _looks_generic_title(title: str) -> bool:
 def _needs_catalog_normalization(title: str) -> bool:
     lowered = title.lower()
     return lowered.startswith("2026-") or any(
-        token in lowered for token in ("another potential", "potential earning", "a note", "state note", "untitled")
+        token in lowered
+        for token in (
+            "another potential",
+            "potential earning",
+            "micro saas acquisition via acquire",
+            "a note",
+            "state note",
+            "untitled",
+        )
     )
 
 
