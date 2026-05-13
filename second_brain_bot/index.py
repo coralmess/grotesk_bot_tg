@@ -133,7 +133,7 @@ class SecondBrainIndex:
     def stale_inbox(self, *, limit: int = 20) -> list[SearchResult]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM notes WHERE status = 'inbox' ORDER BY created_at ASC LIMIT ?",
+                "SELECT * FROM notes WHERE status IN ('Incubating', 'needs_manual_review') ORDER BY created_at ASC LIMIT ?",
                 (int(limit),),
             ).fetchall()
         return [self._row_to_result(row) for row in rows]

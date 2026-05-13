@@ -24,6 +24,8 @@ class SecondBrainService:
         self.index = SecondBrainIndex(Path(vault_dir) / ".second_brain_index.db")
         self.ai = ai
         self.analytics_sink = analytics_sink or AnalyticsSink()
+        if self.vault.migrate_legacy_vault():
+            self._reindex_all_notes()
 
     async def capture_text(
         self,
@@ -141,7 +143,7 @@ class SecondBrainService:
         return self.index.search(query, limit=limit)
 
     def inbox(self, *, limit: int = 10):
-        return self.index.recent_notes(limit=limit, status="inbox")
+        return self.index.recent_notes(limit=limit, status="Incubating")
 
     def status(self) -> dict[str, object]:
         counts = self.vault.note_counts()
@@ -162,16 +164,24 @@ class SecondBrainService:
         self.index.upsert_note(
             NoteRecord(
                 note_id=note_id,
-                title=str(metadata.get("ai_suggested_title") or path.stem),
+                title=path.stem,
                 path=relpath,
                 tags=[str(item) for item in tags],
                 entities=[str(item) for item in entities],
                 body=body,
-                status=str(metadata.get("status") or "inbox"),
-                created_at=str(metadata.get("created_at") or utc_now_iso()),
-                updated_at=str(metadata.get("updated_at") or utc_now_iso()),
+                status=str(metadata.get("status") or "Reference"),
+                created_at=str(metadata.get("date_created") or metadata.get("created_at") or utc_now_iso()),
+                updated_at=str(metadata.get("updated_at") or metadata.get("date_created") or utc_now_iso()),
             )
         )
+
+    def _reindex_all_notes(self) -> None:
+        state = self.vault._load_state()
+        for note_id in state.get("notes", {}):
+            try:
+                self._index_note(note_id)
+            except Exception:
+                continue
 
     def _store_relations(self, note: NoteFile, related: list[RelatedNoteSuggestion]) -> None:
         for item in related:

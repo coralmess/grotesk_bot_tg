@@ -110,7 +110,7 @@ class SecondBrainTelegramBot:
         providers = ", ".join(self.service.ai.providers.keys()) or "none"
         await update.effective_message.reply_text(
             f"Vault: {status['vault_dir']}\n"
-            f"Notes: {counts.get('total', 0)} | Inbox: {counts.get('inbox', 0)} | Review: {counts.get('needs_manual_review', 0)}\n"
+            f"Notes: {counts.get('total', 0)} | Active: {counts.get('Active', 0)} | Incubating: {counts.get('Incubating', 0)} | Reference: {counts.get('Reference', 0)}\n"
             f"AI providers: {providers}\n"
             f"Daily digest: {self.config.digest_hour:02d}:00 {self.config.digest_tz}"
         )
@@ -121,7 +121,7 @@ class SecondBrainTelegramBot:
         limit = _first_int(context.args, default=10, min_value=1, max_value=30)
         notes = self.service.inbox(limit=limit)
         if not notes:
-            await update.effective_message.reply_text("Inbox is empty.")
+            await update.effective_message.reply_text("No Incubating notes right now.")
             return
         await update.effective_message.reply_text("\n".join(f"{n.note_id}: {n.title}" for n in notes))
 
@@ -373,7 +373,7 @@ def build_help_text() -> str:
             "Main commands:",
             "/brain_ask <question> - ask something based on your saved notes.",
             "/brain_search <query> - find notes by words, tags, or topics.",
-            "/brain_inbox [limit] - show recent unprocessed captures.",
+            "/brain_inbox [limit] - show recent Incubating notes and ideas.",
             "/brain_note <id> - open a saved note preview by ID.",
             "",
             "Organize notes:",

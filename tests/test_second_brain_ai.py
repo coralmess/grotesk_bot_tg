@@ -79,7 +79,8 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(enrichment.title, "Remember to buy a knife")
         self.assertEqual(enrichment.provider, "local_fallback")
-        self.assertIn("inbox", enrichment.suggested_tags)
+        self.assertIn("#buy", enrichment.suggested_tags)
+        self.assertEqual(enrichment.parent_moc, "Purchases MOC")
 
     async def test_image_bytes_are_not_sent_to_ai_prompt(self) -> None:
         modal = FakeProvider(

@@ -57,9 +57,16 @@ class AIEnrichment:
     title: str = ""
     summary: str = ""
     polished_text: str = ""
-    suggested_folder: str = "00_Inbox"
+    suggested_folder: str = "3-Resources"
     suggested_tags: list[str] = field(default_factory=list)
     entities: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
+    note_type: str = "Concept"
+    note_status: str = "Reference"
+    parent_moc: str = ""
+    moc_category: str = ""
+    moc_description: str = ""
+    related_links: list[str] = field(default_factory=list)
     action_items: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
     enrichment_notes: list[str] = field(default_factory=list)
@@ -246,9 +253,16 @@ def local_enrichment(text: str) -> AIEnrichment:
         title=title,
         summary=text.strip()[:280],
         polished_text=_polish_capture_text(text),
-        suggested_folder="00_Inbox",
-        suggested_tags=["inbox", *keywords[:4]],
+        suggested_folder=_local_para_folder(text),
+        suggested_tags=[f"#{item}" for item in keywords[:4]],
         entities=keywords[:8],
+        aliases=[],
+        note_type=_local_note_type(text),
+        note_status=_local_note_status(text),
+        parent_moc=_local_parent_moc(text),
+        moc_category=_local_moc_category(text),
+        moc_description=_local_moc_description(text),
+        related_links=_local_related_links(text),
         action_items=[],
         questions=[],
         provider="local_fallback",
@@ -292,9 +306,19 @@ def _enrichment_prompt(text: str, *, allow_web: bool) -> str:
         "- Scores mean practical usefulness/confidence for this capture, not scientific certainty.\n"
         "- For health or mental wellbeing topics, keep it educational, do not diagnose, and prefer evidence-informed methods.\n"
         "- Keep enrichment small: usually 2-6 bullets.\n\n"
-        "Return JSON with keys: title, summary, polished_text, suggested_folder, suggested_tags, entities, action_items, questions, "
+        "Vault catalog rules:\n"
+        "- Choose one PARA root: 1-Projects, 2-Areas, 3-Resources, or 4-Incubator.\n"
+        "- Create a descriptive searchable title, never a generic title like Another idea or Note.\n"
+        "- Choose a parent MOC name like Investments MOC, Purchases MOC, Plans to Do MOC, Recipes MOC, or Software Knowledge MOC.\n"
+        "- Choose a short moc_category folder name matching the MOC topic, such as Investments or Purchases.\n"
+        "- type must be one of MOC, Concept, Plan, Purchase, Idea.\n"
+        "- status must be one of Active, Incubating, Completed, Reference.\n"
+        "- tags must be 2-4 Obsidian tags with a # prefix.\n"
+        "- related_links must be useful existing or likely MOC/concept note titles without brackets.\n\n"
+        "Return JSON with keys: title, summary, polished_text, suggested_folder, suggested_tags, entities, aliases, "
+        "note_type, note_status, parent_moc, moc_category, moc_description, related_links, action_items, questions, "
         "enrichment_notes, scored_suggestions. scored_suggestions must be a list of objects with title, score, reason. "
-        "suggested_folder must be one of 00_Inbox, 01_Projects, 02_Areas, 03_Resources, 99_Archive. "
+        "suggested_folder must be one of 1-Projects, 2-Areas, 3-Resources, 4-Incubator. "
         f"Public web lookup allowed by policy: {allow_web}.\n\nCapture:\n{text[:8000]}"
     )
 
@@ -346,9 +370,16 @@ def _enrichment_from_payload(payload: dict[str, Any], *, provider: str, fallback
             or payload.get("rewritten_capture")
             or _polish_capture_text(fallback_text)
         ).strip(),
-        suggested_folder=str(payload.get("suggested_folder") or "00_Inbox"),
+        suggested_folder=str(payload.get("suggested_folder") or _local_para_folder(fallback_text)),
         suggested_tags=_string_list(payload.get("suggested_tags")),
         entities=_string_list(payload.get("entities")),
+        aliases=_string_list(payload.get("aliases")),
+        note_type=str(payload.get("note_type") or payload.get("type") or _local_note_type(fallback_text)),
+        note_status=str(payload.get("note_status") or payload.get("status") or _local_note_status(fallback_text)),
+        parent_moc=str(payload.get("parent_moc") or _local_parent_moc(fallback_text)),
+        moc_category=str(payload.get("moc_category") or _local_moc_category(fallback_text)),
+        moc_description=str(payload.get("moc_description") or _local_moc_description(fallback_text)),
+        related_links=_string_list(payload.get("related_links")),
         action_items=_string_list(payload.get("action_items")),
         questions=_string_list(payload.get("questions")),
         enrichment_notes=_string_list(payload.get("enrichment_notes") or payload.get("useful_context")),
@@ -432,6 +463,82 @@ def _keywords(text: str) -> list[str]:
             continue
         result.append(word)
     return result[:20]
+
+
+def _local_para_folder(text: str) -> str:
+    lowered = (text or "").lower()
+    if any(word in lowered for word in ("buy", "wishlist", "purchase", "idea", "someday", "maybe", "strategy")):
+        return "4-Incubator"
+    if any(word in lowered for word in ("project", "deadline", "plan to", "need to")):
+        return "1-Projects"
+    if any(word in lowered for word in ("health", "investment", "wealth", "home", "routine")):
+        return "2-Areas"
+    return "3-Resources"
+
+
+def _local_note_type(text: str) -> str:
+    lowered = (text or "").lower()
+    if any(word in lowered for word in ("buy", "purchase", "wishlist")):
+        return "Purchase"
+    if any(word in lowered for word in ("plan", "need to", "todo", "to do")):
+        return "Plan"
+    if any(word in lowered for word in ("idea", "strategy", "maybe")):
+        return "Idea"
+    return "Concept"
+
+
+def _local_note_status(text: str) -> str:
+    note_type = _local_note_type(text)
+    if note_type in {"Idea", "Purchase"}:
+        return "Incubating"
+    if note_type == "Plan":
+        return "Active"
+    return "Reference"
+
+
+def _local_parent_moc(text: str) -> str:
+    lowered = (text or "").lower()
+    if any(word in lowered for word in ("buy", "purchase", "wishlist", "scarf", "knife", "chair", "microphone")):
+        return "Purchases MOC"
+    if any(word in lowered for word in ("stock", "investment", "invest", "etf", "toloka")):
+        return "Investments MOC"
+    if any(word in lowered for word in ("earn", "business", "fba", "strategy", "money")):
+        return "Business Ideas MOC"
+    if any(word in lowered for word in ("city", "living", "move")):
+        return "Life Planning MOC"
+    if any(word in lowered for word in ("health", "mental", "workout")):
+        return "Health MOC"
+    return "Knowledge MOC"
+
+
+def _local_moc_category(text: str) -> str:
+    moc = _local_parent_moc(text)
+    return moc.removesuffix(" MOC")
+
+
+def _local_moc_description(text: str) -> str:
+    moc = _local_parent_moc(text)
+    if moc == "Purchases MOC":
+        return "Tracks potential purchases, buying criteria, comparisons, and follow-up decisions."
+    if moc == "Investments MOC":
+        return "Tracks investment ideas, risks, theses, and research notes."
+    if moc == "Business Ideas MOC":
+        return "Tracks business and earning ideas that may become plans later."
+    if moc == "Life Planning MOC":
+        return "Tracks life-management decisions, location planning, and personal direction."
+    if moc == "Health MOC":
+        return "Tracks health, wellbeing, routines, and personal performance notes."
+    return "Indexes reference notes and reusable knowledge."
+
+
+def _local_related_links(text: str) -> list[str]:
+    links: list[str] = []
+    lowered = (text or "").lower()
+    if any(word in lowered for word in ("buy", "purchase", "wishlist")):
+        links.append("Things to Buy MOC")
+    if any(word in lowered for word in ("plan", "need to", "todo", "to do")):
+        links.append("Plans to Do MOC")
+    return links
 
 
 def _polish_capture_text(text: str) -> str:

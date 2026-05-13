@@ -12,15 +12,15 @@ from typing import Any
 from second_brain_bot.ai import AIEnrichment, RelatedNoteSuggestion
 
 PARA_FOLDERS = (
-    "00_Inbox",
-    "01_Projects",
-    "02_Areas",
-    "03_Resources",
-    "04_Daily",
-    "99_Archive",
+    "1-Projects",
+    "2-Areas",
+    "3-Resources",
+    "4-Incubator",
     "Attachments",
 )
-ALLOWED_STATUS = {"inbox", "organized", "needs_manual_review"}
+LEGACY_PARA_FOLDERS = {"00_Inbox", "01_Projects", "02_Areas", "03_Resources", "04_Daily", "99_Archive"}
+ALLOWED_STATUS = {"Active", "Incubating", "Completed", "Reference", "needs_manual_review"}
+ALLOWED_TYPES = {"MOC", "Concept", "Plan", "Purchase", "Idea"}
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,20 @@ class NoteFile:
     title: str
     path: Path
     status: str
+
+
+@dataclass(frozen=True)
+class CatalogPlan:
+    title: str
+    folder: str
+    category: str
+    parent_moc: str
+    aliases: list[str]
+    tags: list[str]
+    note_type: str
+    status: str
+    moc_description: str
+    related_links: list[str]
 
 
 def utc_now_iso() -> str:
@@ -130,30 +144,25 @@ class SecondBrainVault:
     ) -> NoteFile:
         created_at = capture.created_at or utc_now_iso()
         note_id = safe_note_id()
-        title = sanitize_filename((enrichment.title if enrichment else "") or _title_from_text(capture.text))
-        path = self._unique_note_path("00_Inbox", f"{created_at[:10]} {title}.md")
+        catalog = _catalog_plan(capture, enrichment)
+        path = self._unique_note_path(catalog.folder, catalog.category, f"{catalog.title}.md")
         metadata = {
-            "id": note_id,
-            "created_at": created_at,
-            "updated_at": created_at,
-            "status": "inbox",
-            "capture_type": capture.capture_type,
-            "source": "telegram",
-            "telegram_message_id": capture.telegram_message_id or "",
-            "tags": ["inbox", "capture", *(enrichment.suggested_tags if enrichment else [])],
-            "entities": enrichment.entities if enrichment else [],
-            "ai_suggested_title": enrichment.title if enrichment else "",
-            "ai_suggested_folder": enrichment.suggested_folder if enrichment else "",
-            "ai_suggested_tags": enrichment.suggested_tags if enrichment else [],
-            "ai_summary": enrichment.summary if enrichment else "",
-            "ai_polished_text": enrichment.polished_text if enrichment else "",
-            "ai_enrichment_notes": enrichment.enrichment_notes if enrichment else [],
-            "related_notes": [item.note_id for item in related_notes or []],
+            "aliases": catalog.aliases,
+            "tags": catalog.tags,
+            "type": catalog.note_type,
+            "status": catalog.status,
+            "date_created": created_at[:10],
         }
-        body = self._render_capture_body(capture, enrichment=enrichment, related_notes=related_notes or [])
+        body = self._render_capture_body(
+            capture,
+            enrichment=enrichment,
+            related_notes=related_notes or [],
+            catalog=catalog,
+        )
         self._write_note(path, metadata, body)
-        self._record_state(note_id, path, title=title, status="inbox")
-        return NoteFile(note_id=note_id, title=title, path=path, status="inbox")
+        self._ensure_moc(catalog, note_title=catalog.title)
+        self._record_state(note_id, path, title=catalog.title, status=catalog.status)
+        return NoteFile(note_id=note_id, title=catalog.title, path=path, status=catalog.status)
 
     def read_note(self, note_id: str) -> tuple[dict[str, Any], str, Path]:
         state = self._load_state()
@@ -165,35 +174,20 @@ class SecondBrainVault:
         return data, body, path
 
     def accept_suggestion(self, note_id: str) -> NoteFile:
-        metadata, body, old_path = self.read_note(note_id)
-        title = sanitize_filename(metadata.get("ai_suggested_title") or metadata.get("id") or note_id)
-        folder = str(metadata.get("ai_suggested_folder") or "03_Resources")
-        if folder not in PARA_FOLDERS or folder == "Attachments":
-            folder = "03_Resources"
-        tags = metadata.get("tags")
-        if not isinstance(tags, list):
-            tags = []
-        for tag in metadata.get("ai_suggested_tags") or []:
-            if tag not in tags:
-                tags.append(tag)
-        metadata["tags"] = tags
-        metadata["status"] = "organized"
-        metadata["updated_at"] = utc_now_iso()
-        new_path = self._unique_note_path(folder, f"{title}.md")
-        self._write_note(new_path, metadata, body)
-        if old_path != new_path and old_path.exists():
-            old_path.unlink()
-        self._record_state(note_id, new_path, title=title, status="organized")
-        return NoteFile(note_id=note_id, title=title, path=new_path, status="organized")
+        metadata, body, path = self.read_note(note_id)
+        title = sanitize_filename(path.stem)
+        metadata["status"] = "Active"
+        self._write_note(path, metadata, body)
+        self._record_state(note_id, path, title=title, status="Active")
+        return NoteFile(note_id=note_id, title=title, path=path, status="Active")
 
     def mark_status(self, note_id: str, status: str) -> NoteFile:
         if status not in ALLOWED_STATUS:
             raise ValueError(f"unsupported note status: {status}")
         metadata, body, path = self.read_note(note_id)
         metadata["status"] = status
-        metadata["updated_at"] = utc_now_iso()
         self._write_note(path, metadata, body)
-        title = sanitize_filename(metadata.get("ai_suggested_title") or path.stem)
+        title = sanitize_filename(path.stem)
         self._record_state(note_id, path, title=title, status=status)
         return NoteFile(note_id=note_id, title=title, path=path, status=status)
 
@@ -206,8 +200,6 @@ class SecondBrainVault:
             body = re.sub(r"\n## Related Notes\n.*?(?=\n## |\Z)", "\n" + block.rstrip() + "\n", body, flags=re.S)
         else:
             body = body.rstrip() + "\n\n" + block
-        metadata["related_notes"] = [item.note_id for item in related_notes]
-        metadata["updated_at"] = utc_now_iso()
         self._write_note(path, metadata, body)
 
     def add_backlink(self, source_note_id: str, target_note_id: str, *, source_title: str, reason: str) -> None:
@@ -220,30 +212,25 @@ class SecondBrainVault:
             body = body.rstrip() + "\n" + line + "\n"
         else:
             body = body.rstrip() + f"\n\n{section}\n{line}\n"
-        metadata["updated_at"] = utc_now_iso()
         self._write_note(path, metadata, body)
 
     def write_daily_digest(self, date_key: str, content: str) -> Path:
-        path = self.root_dir / "04_Daily" / f"{date_key}.md"
+        path = self.root_dir / "2-Areas" / "Daily Reviews" / f"{date_key} - Daily Second Brain Digest.md"
         metadata = {
-            "id": f"daily-{date_key}",
-            "created_at": utc_now_iso(),
-            "updated_at": utc_now_iso(),
-            "status": "organized",
-            "capture_type": "digest",
-            "source": "second_brain",
-            "tags": ["daily", "digest"],
-            "entities": [],
-            "related_notes": [],
+            "aliases": [f"Daily digest {date_key}"],
+            "tags": ["#daily", "#digest", "#review"],
+            "type": "Concept",
+            "status": "Reference",
+            "date_created": date_key,
         }
         self._write_note(path, metadata, content)
         return path
 
     def note_counts(self) -> dict[str, int]:
         state = self._load_state()
-        counts = {"total": 0, "inbox": 0, "organized": 0, "needs_manual_review": 0}
+        counts = {"total": 0, "Active": 0, "Incubating": 0, "Completed": 0, "Reference": 0, "needs_manual_review": 0}
         for info in state.get("notes", {}).values():
-            status = info.get("status", "inbox")
+            status = info.get("status", "Reference")
             counts["total"] += 1
             counts[status] = counts.get(status, 0) + 1
         return counts
@@ -261,27 +248,76 @@ class SecondBrainVault:
             for note_id, info in reversed(items)
         ]
 
+    def migrate_legacy_vault(self) -> int:
+        state = self._load_state()
+        migrated = 0
+        for note_id, info in list(state.get("notes", {}).items()):
+            relpath = str(info.get("path") or "")
+            if not relpath or relpath.split("/", 1)[0] not in LEGACY_PARA_FOLDERS:
+                continue
+            old_path = self.root_dir / relpath
+            if not old_path.exists() or old_path.suffix.lower() != ".md":
+                continue
+            metadata, body = _extract_frontmatter(old_path.read_text(encoding="utf-8"))
+            created_at = str(metadata.get("created_at") or metadata.get("date_created") or utc_now_iso())
+            text_for_catalog = body or old_path.stem
+            legacy_enrichment = _legacy_enrichment_from_text(old_path.stem, text_for_catalog)
+            capture = CaptureInput(capture_type="text", text=text_for_catalog.strip(), created_at=created_at)
+            catalog = _catalog_plan(capture, legacy_enrichment)
+            new_path = self._unique_note_path(catalog.folder, catalog.category, f"{catalog.title}.md")
+            new_metadata = {
+                "aliases": catalog.aliases,
+                "tags": catalog.tags,
+                "type": catalog.note_type,
+                "status": catalog.status,
+                "date_created": created_at[:10],
+            }
+            new_body = self._render_capture_body(capture, enrichment=legacy_enrichment, related_notes=[], catalog=catalog)
+            self._write_note(new_path, new_metadata, new_body)
+            self._ensure_moc(catalog, note_title=catalog.title)
+            old_path.unlink()
+            self._record_state(note_id, new_path, title=catalog.title, status=catalog.status)
+            migrated += 1
+        for legacy_folder in LEGACY_PARA_FOLDERS:
+            legacy_path = self.root_dir / legacy_folder
+            if legacy_path.exists():
+                try:
+                    legacy_path.rmdir()
+                except OSError:
+                    pass
+        return migrated
+
     def _render_capture_body(
         self,
         capture: CaptureInput,
         *,
         enrichment: AIEnrichment | None,
         related_notes: list[RelatedNoteSuggestion],
+        catalog: CatalogPlan,
     ) -> str:
-        parts = ["# " + sanitize_filename((enrichment.title if enrichment else "") or _title_from_text(capture.text)), ""]
+        parts = ["# " + catalog.title, "", f"Parent: [[{catalog.parent_moc}]]", ""]
+        link_targets = [link for link in catalog.related_links if link and link != catalog.parent_moc]
+        if enrichment and enrichment.action_items and "Plans to Do MOC" not in link_targets:
+            link_targets.append("Plans to Do MOC")
+        if link_targets:
+            parts.extend(["Related: " + ", ".join(f"[[{link}]]" for link in link_targets), ""])
+        summary = (enrichment.summary if enrichment and enrichment.summary else capture.text.strip()[:280]).strip()
+        if summary:
+            parts.extend(["## Executive Summary", summary, ""])
         if capture.attachment_relpath:
             parts.extend(["## Attachment", f"![[{capture.attachment_relpath}]]", ""])
         if enrichment and _should_render_polished_text(enrichment.polished_text, capture.text):
             parts.extend(["## Polished Capture", enrichment.polished_text.strip(), ""])
-        parts.extend(["## Raw Capture", capture.text.strip() or "_No text caption._", ""])
+        parts.extend(["## Source Capture", capture.text.strip() or "_No text caption._", ""])
         if enrichment:
             parts.extend(
                 [
-                    "## AI Suggestions",
-                    f"Summary: {enrichment.summary}",
-                    f"Suggested folder: `{enrichment.suggested_folder}`",
-                    "Suggested tags: " + ", ".join(enrichment.suggested_tags or []),
-                    "Entities: " + ", ".join(enrichment.entities or []),
+                    "## Catalog",
+                    f"- Type: {catalog.note_type}",
+                    f"- Status: {catalog.status}",
+                    f"- MOC: [[{catalog.parent_moc}]]",
+                    "- Tags: " + ", ".join(catalog.tags or []),
+                    "- Entities: " + ", ".join(enrichment.entities or []),
                     "",
                 ]
             )
@@ -306,6 +342,36 @@ class SecondBrainVault:
             parts.append(_render_related_notes(related_notes).rstrip())
         return "\n".join(parts).rstrip() + "\n"
 
+    def _ensure_moc(self, catalog: CatalogPlan, *, note_title: str) -> None:
+        moc_path = self.root_dir / catalog.folder / sanitize_filename(catalog.category) / f"{sanitize_filename(catalog.parent_moc)}.md"
+        metadata = {
+            "aliases": [catalog.category],
+            "tags": _normalize_tags([*catalog.tags[:2], "#moc"]),
+            "type": "MOC",
+            "status": "Active",
+            "date_created": utc_now_iso()[:10],
+        }
+        if moc_path.exists():
+            existing_metadata, body = _extract_frontmatter(moc_path.read_text(encoding="utf-8"))
+            if isinstance(existing_metadata, dict) and existing_metadata:
+                metadata = {**metadata, **{key: existing_metadata.get(key, value) for key, value in metadata.items()}}
+        else:
+            body = "\n".join(
+                [
+                    f"# {catalog.parent_moc}",
+                    "",
+                    f"Purpose: {catalog.moc_description}",
+                    "",
+                    "## Notes",
+                    "",
+                ]
+            )
+        link = f"[[{note_title}]]"
+        if link not in body:
+            description = catalog.moc_description.rstrip(".")
+            body = body.rstrip() + f"\n- {link} - {description}.\n"
+        self._write_note(moc_path, metadata, body)
+
     def _write_note(self, path: Path, metadata: dict[str, Any], body: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = _render_frontmatter(metadata) + "\n" + body
@@ -313,8 +379,10 @@ class SecondBrainVault:
         tmp_path.write_text(payload, encoding="utf-8")
         os.replace(tmp_path, path)
 
-    def _unique_note_path(self, folder: str, filename: str) -> Path:
-        base = self.root_dir / folder / sanitize_filename(Path(filename).stem)
+    def _unique_note_path(self, folder: str, category: str, filename: str) -> Path:
+        root = _safe_para_folder(folder)
+        category_name = sanitize_filename(category or "General")
+        base = self.root_dir / root / category_name / sanitize_filename(Path(filename).stem)
         suffix = Path(filename).suffix or ".md"
         candidate = base.with_suffix(suffix)
         counter = 2
@@ -364,6 +432,184 @@ def _render_related_notes(related_notes: list[RelatedNoteSuggestion]) -> str:
     for item in related_notes:
         lines.append(f"- [[{item.title}]] - {item.reason} ({item.confidence:.2f})")
     return "\n".join(lines) + "\n"
+
+
+def _catalog_plan(capture: CaptureInput, enrichment: AIEnrichment | None) -> CatalogPlan:
+    raw_text = capture.text or ""
+    title = sanitize_filename((enrichment.title if enrichment else "") or _title_from_text(raw_text), max_length=96)
+    if _looks_generic_title(title):
+        title = _descriptive_title_from_text(raw_text, fallback=title)
+    folder = _safe_para_folder(enrichment.suggested_folder if enrichment else _infer_folder(raw_text))
+    category = sanitize_filename((enrichment.moc_category if enrichment else "") or _moc_category_from_text(raw_text), max_length=64)
+    parent_moc = sanitize_filename((enrichment.parent_moc if enrichment else "") or f"{category} MOC", max_length=80)
+    if not parent_moc.endswith(" MOC"):
+        parent_moc += " MOC"
+    note_type = _safe_note_type(enrichment.note_type if enrichment else _infer_note_type(raw_text))
+    status = _safe_note_status(enrichment.note_status if enrichment else _default_status(note_type))
+    tags = _normalize_tags(enrichment.suggested_tags if enrichment and enrichment.suggested_tags else _tags_from_text(raw_text))
+    aliases = _dedupe_strings([*(enrichment.aliases if enrichment else []), *([title] if title else [])])[:6]
+    moc_description = (
+        (enrichment.moc_description if enrichment and enrichment.moc_description else "").strip()
+        or _moc_description(parent_moc)
+    )
+    related_links = _dedupe_strings(enrichment.related_links if enrichment else [])
+    return CatalogPlan(
+        title=title,
+        folder=folder,
+        category=category,
+        parent_moc=parent_moc,
+        aliases=aliases,
+        tags=tags,
+        note_type=note_type,
+        status=status,
+        moc_description=moc_description,
+        related_links=related_links,
+    )
+
+
+def _safe_para_folder(value: str | None) -> str:
+    value = str(value or "").strip()
+    legacy_map = {
+        "01_Projects": "1-Projects",
+        "02_Areas": "2-Areas",
+        "03_Resources": "3-Resources",
+        "00_Inbox": "4-Incubator",
+        "04_Daily": "2-Areas",
+        "99_Archive": "3-Resources",
+    }
+    value = legacy_map.get(value, value)
+    return value if value in PARA_FOLDERS and value != "Attachments" else "3-Resources"
+
+
+def _safe_note_type(value: str | None) -> str:
+    value = str(value or "").strip().title()
+    return value if value in ALLOWED_TYPES and value != "MOC" else "Concept"
+
+
+def _safe_note_status(value: str | None) -> str:
+    value = str(value or "").strip().replace("organized", "Active").replace("inbox", "Incubating")
+    value = value[:1].upper() + value[1:] if value else value
+    return value if value in ALLOWED_STATUS and value != "needs_manual_review" else "Reference"
+
+
+def _normalize_tags(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    result: list[str] = []
+    for value in values or []:
+        tag = str(value or "").strip().lower().replace(" ", "-")
+        if not tag:
+            continue
+        if not tag.startswith("#"):
+            tag = "#" + tag
+        if tag not in result:
+            result.append(tag)
+    if not result:
+        result = ["#knowledge", "#reference"]
+    return result[:4]
+
+
+def _dedupe_strings(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    result: list[str] = []
+    for value in values or []:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _looks_generic_title(title: str) -> bool:
+    lowered = title.lower()
+    return any(token in lowered for token in ("another potential", "potential earning", "a note", "state note", "untitled"))
+
+
+def _descriptive_title_from_text(text: str, *, fallback: str) -> str:
+    lowered = (text or "").lower()
+    if "amazon fba" in lowered and "wyoming" in lowered:
+        return "Amazon FBA and Wyoming LLC - Business Idea"
+    if "toloka" in lowered:
+        return "Toloka - Tech Stock Investment Idea"
+    if "scarf" in lowered or "шарф" in lowered:
+        return "Head Scarf Under Coat - Purchase Idea"
+    if "knife" in lowered:
+        return "Knife Purchase Research and Wishlist Note"
+    return sanitize_filename(fallback or _title_from_text(text), max_length=96)
+
+
+def _infer_folder(text: str) -> str:
+    lowered = (text or "").lower()
+    if any(word in lowered for word in ("buy", "purchase", "wishlist", "idea", "strategy", "someday")):
+        return "4-Incubator"
+    if any(word in lowered for word in ("plan", "deadline", "project")):
+        return "1-Projects"
+    if any(word in lowered for word in ("health", "investment", "wealth", "home")):
+        return "2-Areas"
+    return "3-Resources"
+
+
+def _infer_note_type(text: str) -> str:
+    lowered = (text or "").lower()
+    if any(word in lowered for word in ("buy", "purchase", "wishlist", "scarf", "knife", "chair")):
+        return "Purchase"
+    if any(word in lowered for word in ("plan", "need to", "todo")):
+        return "Plan"
+    if any(word in lowered for word in ("idea", "strategy", "investment", "invest")):
+        return "Idea"
+    return "Concept"
+
+
+def _default_status(note_type: str) -> str:
+    return "Incubating" if note_type in {"Idea", "Purchase"} else "Reference"
+
+
+def _moc_category_from_text(text: str) -> str:
+    lowered = (text or "").lower()
+    if any(word in lowered for word in ("stock", "investment", "invest", "toloka", "etf")):
+        return "Investments"
+    if any(word in lowered for word in ("buy", "purchase", "wishlist", "scarf", "knife", "chair", "microphone")):
+        return "Purchases"
+    if any(word in lowered for word in ("earn", "business", "fba", "strategy", "money")):
+        return "Business Ideas"
+    if any(word in lowered for word in ("city", "living", "move")):
+        return "Life Planning"
+    if any(word in lowered for word in ("health", "mental", "workout")):
+        return "Health"
+    return "Knowledge"
+
+
+def _tags_from_text(text: str) -> list[str]:
+    category = _moc_category_from_text(text).lower().replace(" ", "-")
+    note_type = _infer_note_type(text).lower()
+    return [f"#{category}", f"#{note_type}"]
+
+
+def _moc_description(parent_moc: str) -> str:
+    descriptions = {
+        "Investments MOC": "Tracks investment ideas, risks, theses, and research notes.",
+        "Purchases MOC": "Tracks potential purchases, buying criteria, comparisons, and follow-up decisions.",
+        "Business Ideas MOC": "Tracks business and earning ideas that may become plans later.",
+        "Life Planning MOC": "Tracks life-management decisions, location planning, and personal direction.",
+        "Health MOC": "Tracks health, wellbeing, routines, and personal performance notes.",
+    }
+    return descriptions.get(parent_moc, "Indexes reference notes and reusable knowledge.")
+
+
+def _legacy_enrichment_from_text(title: str, body: str) -> AIEnrichment:
+    text = body or title
+    catalog_title = _descriptive_title_from_text(text, fallback=title)
+    category = _moc_category_from_text(text)
+    note_type = _infer_note_type(text)
+    return AIEnrichment(
+        title=catalog_title,
+        summary=re.sub(r"\s+", " ", text).strip()[:320],
+        polished_text=re.sub(r"\s+", " ", text).strip(),
+        suggested_folder=_infer_folder(text),
+        suggested_tags=_tags_from_text(text),
+        aliases=[title],
+        note_type=note_type,
+        note_status=_default_status(note_type),
+        parent_moc=f"{category} MOC",
+        moc_category=category,
+        moc_description=_moc_description(f"{category} MOC"),
+    )
 
 
 def _should_render_polished_text(polished_text: str, raw_text: str) -> bool:
