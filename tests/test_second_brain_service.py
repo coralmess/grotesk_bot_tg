@@ -42,6 +42,8 @@ class FakeAI:
 
     async def ask(self, question: str, *, context: str, heavy: bool = True):
         self.ask_calls.append((question, context, heavy))
+        if "learning session" in question.lower():
+            return type("Result", (), {"text": "Lesson body with examples, answers, and scored next steps.", "provider": "fake"})()
         return type("Result", (), {"text": "Use the collected knife notes.", "provider": "fake"})()
 
 
@@ -83,6 +85,36 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("Daily Second Brain Digest", digest)
             self.assertTrue((Path(tmp) / "2-Areas" / "Daily Reviews" / "2026-05-13 - Daily Second Brain Digest.md").exists())
+
+    async def test_learn_creates_linked_learning_note_from_note_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ai = FakeAI()
+            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            source = await service.capture_text(
+                "Representativeness heuristic",
+                telegram_message_id=1,
+                created_at="2026-05-13T09:00:00Z",
+            )
+
+            lesson = await service.learn(source.note_id)
+
+            self.assertIn("Lesson body with examples", lesson.text)
+            self.assertIn("Learning", lesson.note.title)
+            self.assertTrue(lesson.note.path.exists())
+            body = lesson.note.path.read_text(encoding="utf-8")
+            self.assertIn("Related: [[Knife Brand - Purchase Research Note]]", body)
+            self.assertIn("Lesson body with examples, answers, and scored next steps.", body)
+            self.assertIsNotNone(service.index.get_note(lesson.note.note_id))
+
+    async def test_list_notes_returns_recent_notes_without_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = SecondBrainService(vault_dir=Path(tmp), ai=FakeAI())
+            await service.capture_text("Buy knife", telegram_message_id=1)
+
+            notes = service.list_notes(limit=10)
+
+            self.assertEqual(len(notes), 1)
+            self.assertEqual(notes[0].title, "Knife Brand - Purchase Research Note")
 
 
 if __name__ == "__main__":

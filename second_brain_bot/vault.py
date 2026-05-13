@@ -233,6 +233,58 @@ class SecondBrainVault:
         self._write_note(path, metadata, content)
         return path
 
+    def write_learning_note(
+        self,
+        *,
+        source_note_id: str,
+        source_title: str,
+        source_path: str,
+        lesson_text: str,
+        provider: str = "",
+    ) -> NoteFile:
+        note_id = safe_note_id()
+        title = sanitize_filename(f"Learning - {source_title}", max_length=96)
+        catalog = CatalogPlan(
+            title=title,
+            folder="3-Resources",
+            category="Learning",
+            parent_moc="Learning MOC",
+            aliases=[title, f"Learn {source_title}"],
+            tags=["#learning", "#study", "#second-brain"],
+            note_type="Concept",
+            status="Reference",
+            moc_description="Indexes saved learning sessions generated from existing vault notes.",
+            related_links=[source_title],
+        )
+        path = self._unique_note_path(catalog.folder, catalog.category, f"{catalog.title}.md")
+        metadata = {
+            "aliases": catalog.aliases,
+            "tags": catalog.tags,
+            "type": catalog.note_type,
+            "status": catalog.status,
+            "date_created": utc_now_iso()[:10],
+        }
+        body = "\n".join(
+            [
+                f"# {catalog.title}",
+                "",
+                "Parent: [[Learning MOC]]",
+                f"Related: [[{source_title}]]",
+                "",
+                "## Source Note",
+                f"- ID: {source_note_id}",
+                f"- Path: {source_path}",
+                "",
+                "## Learning Session",
+                lesson_text.strip() or "No lesson text was generated.",
+                "",
+            ]
+        )
+        self._write_note(path, metadata, body)
+        self._ensure_moc(catalog, note_title=catalog.title)
+        self._record_state(note_id, path, title=catalog.title, status=catalog.status)
+        return NoteFile(note_id=note_id, title=catalog.title, path=path, status=catalog.status, provider=provider)
+
     def note_counts(self) -> dict[str, int]:
         state = self._load_state()
         counts = {"total": 0, "Active": 0, "Incubating": 0, "Completed": 0, "Reference": 0, "needs_manual_review": 0}

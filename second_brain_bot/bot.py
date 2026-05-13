@@ -38,6 +38,11 @@ class SecondBrainTelegramBot:
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CommandHandler("start", self.start_command))
         application.add_handler(CommandHandler("help", self.start_command))
+        application.add_handler(CommandHandler("status", self.status_command))
+        application.add_handler(CommandHandler("vault", self.vault_command))
+        application.add_handler(CommandHandler("note", self.note_command))
+        application.add_handler(CommandHandler("ask", self.ask_command))
+        application.add_handler(CommandHandler("learn", self.learn_command))
         application.add_handler(CommandHandler("brain_status", self.status_command))
         application.add_handler(CommandHandler("brain_inbox", self.inbox_command))
         application.add_handler(CommandHandler("brain_note", self.note_command))
@@ -131,7 +136,7 @@ class SecondBrainTelegramBot:
             return
         note_id = _arg_text(context.args)
         if not note_id:
-            await update.effective_message.reply_text("Usage: /brain_note <id>")
+            await update.effective_message.reply_text("Usage: /note <id>")
             return
         result = self.service.index.get_note(note_id)
         if result is None:
@@ -146,23 +151,21 @@ class SecondBrainTelegramBot:
         await self._note_action(update, context, action="skip")
 
     async def search_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await self.vault_command(update, context)
+
+    async def vault_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
             return
         query = _arg_text(context.args)
-        if not query:
-            await update.effective_message.reply_text("Usage: /brain_search <query>")
-            return
-        results = self.service.search(query, limit=8)
-        await update.effective_message.reply_text(
-            "\n".join(f"{item.note_id}: {item.title} ({item.path})" for item in results) or "No matches."
-        )
+        results = self.service.list_notes(query, limit=25)
+        await update.effective_message.reply_text(_format_vault_results(results, query=query))
 
     async def ask_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
             return
         question = _arg_text(context.args)
         if not question:
-            await update.effective_message.reply_text("Usage: /brain_ask <question>")
+            await update.effective_message.reply_text("Usage: /ask <question>")
             return
         thinking = await update.effective_message.reply_text(THINKING_MESSAGE)
         try:
@@ -172,6 +175,24 @@ class SecondBrainTelegramBot:
             self.service_health.record_failure("brain_ask", exc)
             LOGGER.exception("Second Brain ask failed")
             await _edit_or_reply(thinking, "I could not answer that. Check service logs.")
+
+    async def learn_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._allowed(update):
+            return
+        selector = _arg_text(context.args)
+        if not selector:
+            await update.effective_message.reply_text("Usage: /learn <id or topic>")
+            return
+        thinking = await update.effective_message.reply_text(THINKING_MESSAGE)
+        try:
+            result = await self.service.learn(selector)
+            await _edit_or_reply(thinking, _format_learning_result(result))
+        except KeyError:
+            await _edit_or_reply(thinking, "I could not find a matching note to learn from.")
+        except Exception as exc:
+            self.service_health.record_failure("learn", exc)
+            LOGGER.exception("Second Brain learn failed")
+            await _edit_or_reply(thinking, "Learning mode failed. Check service logs.")
 
     async def distill_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
@@ -372,9 +393,8 @@ def _first_int(args: list[str], *, default: int, min_value: int, max_value: int)
     return min(max(value, min_value), max_value)
 
 
-def build_help_text() -> str:
-    # Keep command help self-explanatory because this bot is operated from Telegram,
-    # where there is no surrounding documentation next to the command list.
+def _legacy_help_text() -> str:
+    # Kept only as a reference for the hidden /brain_* compatibility commands.
     return "\n".join(
         [
             "Second Brain bot is online.",
@@ -401,6 +421,70 @@ def build_help_text() -> str:
             "Tip: when AI is working, I first show \"🧠Thinking🧠\" and then edit that message with the answer.",
         ]
     )
+
+
+def build_help_text() -> str:
+    # Keep public help focused on the daily workflows; legacy /brain_* commands
+    # still exist as advanced compatibility aliases.
+    return "\n".join(
+        [
+            "Second Brain",
+            "",
+            "Save:",
+            "Send any text, link, or photo. I will memorize it, organize it, tag it, and connect it to related notes.",
+            "",
+            "Use:",
+            "/ask <question>",
+            "Ask using your vault. I search notes, analyze what I found, and give a scored answer when useful.",
+            "",
+            "/vault [query]",
+            "Show notes in the vault. Add a query to filter.",
+            "",
+            "/note <id>",
+            "Open one note in readable format.",
+            "",
+            "Learn:",
+            "/learn <id or topic>",
+            "Turn a note or topic into a learning session, save it, and show the lesson.",
+            "",
+            "Status:",
+            "/status",
+            "Show vault count and connected AI.",
+        ]
+    )
+
+
+def _format_vault_results(results, *, query: str = "") -> str:
+    if not results:
+        return "No matching notes." if query else "Vault is empty."
+    title = f"Vault results for: {query}" if query else "Recent vault notes"
+    lines = [title]
+    current_group = ""
+    for item in results:
+        group = _display_vault_group(str(item.path or ""))
+        if group != current_group:
+            current_group = group
+            lines.extend(["", current_group])
+        lines.append(f"- {item.title}")
+        lines.append(f"  ID: {item.note_id}")
+    return _shorten_for_telegram("\n".join(lines), limit=3900)
+
+
+def _display_vault_group(path_value: str) -> str:
+    parts = [part for part in Path(str(path_value)).parts if part]
+    if len(parts) >= 2:
+        return " / ".join(_display_para_folder(part) for part in parts[:2])
+    if parts:
+        return _display_para_folder(parts[0])
+    return "Vault"
+
+
+def _format_learning_result(result) -> str:
+    path = _display_note_breadcrumb(getattr(result.note, "path", ""))
+    provider = _display_provider_name(str(getattr(result, "provider", "") or getattr(result.note, "provider", "")))
+    suffix = f" ({provider})" if provider else ""
+    header = f"🧠 Learning saved: {path}\n📄 ID: {result.note.note_id}{suffix}"
+    return _shorten_for_telegram(header + "\n\n" + str(result.text or "").strip())
 
 
 def _format_note_preview_html(result) -> str:

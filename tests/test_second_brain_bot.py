@@ -1,6 +1,12 @@
 import unittest
 
-from second_brain_bot.bot import _format_capture_confirmation, _format_note_preview_html, _shorten_for_telegram, build_help_text
+from second_brain_bot.bot import (
+    _format_capture_confirmation,
+    _format_note_preview_html,
+    _format_vault_results,
+    _shorten_for_telegram,
+    build_help_text,
+)
 from second_brain_bot.models import NoteRecord, SearchResult
 
 
@@ -13,18 +19,51 @@ class SecondBrainBotTests(unittest.TestCase):
         self.assertLessEqual(len(text), 20)
         self.assertTrue(text.endswith("..."))
 
-    def test_help_text_explains_commands(self) -> None:
+    def test_help_text_shows_simple_daily_commands(self) -> None:
         text = build_help_text()
 
-        self.assertIn("/brain_ask <question> - ask something based on your saved notes.", text)
-        self.assertIn("/brain_accept <id> - accept AI title/tags/folder for a note.", text)
-        self.assertIn("🧠Thinking🧠", text)
+        self.assertIn("/ask <question>", text)
+        self.assertIn("/vault [query]", text)
+        self.assertIn("/note <id>", text)
+        self.assertIn("/learn <id or topic>", text)
+        self.assertIn("/status", text)
+        self.assertNotIn("/brain_ask", text)
+        self.assertNotIn("/brain_accept", text)
+
+    def test_vault_results_are_grouped_and_readable(self) -> None:
+        results = [
+            SearchResult(
+                note_id="n1",
+                title="Representativeness Heuristic",
+                path="3-Resources/Psychology/Representativeness Heuristic.md",
+                tags=["#psychology"],
+                entities=[],
+                body="",
+                status="Reference",
+            ),
+            SearchResult(
+                note_id="n2",
+                title="Knife Purchase",
+                path="4-Incubator/Purchases/Knife Purchase.md",
+                tags=["#purchase"],
+                entities=[],
+                body="",
+                status="Incubating",
+            ),
+        ]
+
+        text = _format_vault_results(results)
+
+        self.assertIn("Resources / Psychology", text)
+        self.assertIn("Representativeness Heuristic", text)
+        self.assertIn("ID: n1", text)
+        self.assertIn("Incubator / Purchases", text)
 
     def test_capture_confirmation_uses_readable_breadcrumb_and_ai_provider(self) -> None:
         note = NoteRecord(
             note_id="20260513122336-cafc88a2",
-            title="Феномен Баадера — Майнхоф",
-            path="/home/ubuntu/LystTgFirefox/runtime_data/second_brain_vault/3-Resources/Psychology/Феномен Баадера — Майнхоф.md",
+            title="Baader Meinhof Phenomenon",
+            path="/home/ubuntu/LystTgFirefox/runtime_data/second_brain_vault/3-Resources/Psychology/Baader Meinhof Phenomenon.md",
             tags=[],
             entities=[],
             body="",
@@ -38,7 +77,7 @@ class SecondBrainBotTests(unittest.TestCase):
 
         self.assertEqual(
             text,
-            "🧠 Memorized: Resources -> Psychology -> Феномен Баадера — Майнхоф\n"
+            "🧠 Memorized: Resources -> Psychology -> Baader Meinhof Phenomenon\n"
             "📄 ID: 20260513122336-cafc88a2 (Gemini)",
         )
         self.assertNotIn("/home/ubuntu", text)
@@ -66,33 +105,31 @@ class SecondBrainBotTests(unittest.TestCase):
     def test_note_preview_formats_structured_note_for_telegram(self) -> None:
         result = SearchResult(
             note_id="n1",
-            title="Репрезентативна евристика",
-            path="3-Resources/Psychology/Репрезентативна евристика.md",
+            title="Representativeness Heuristic",
+            path="3-Resources/Psychology/Representativeness Heuristic.md",
             tags=[],
             entities=[],
             body=(
-                "# Репрезентативна евристика\n\n"
+                "# Representativeness Heuristic\n\n"
                 "Parent: [[Psychology MOC]]\n\n"
                 "Related: [[Cognitive Biases MOC]], [[Decision Making]]\n\n"
                 "## Executive Summary\n"
-                "Запит на пояснення когнітивного упередження.\n\n"
+                "Request to explain a cognitive bias.\n\n"
                 "## Polished Capture\n"
-                "🧠 **Репрезентативна евристика**\n"
-                "Хотів би дізнатись, що це таке.\n\n"
-                "## Source Capture\n"
-                "Репрезентативная эвристика - хотів би дізнатись що це\n\n"
+                "🧠 **Representativeness Heuristic**\n"
+                "I want to understand what it is.\n\n"
                 "## Catalog\n"
                 "- Type: Concept\n"
-                "- Tags: #психологія, #когнітивні_упередження\n"
-                "- Entities: Репрезентативна евристика, Амос Тверські\n\n"
+                "- Tags: #psychology, #cognitive-biases\n"
+                "- Entities: Representativeness Heuristic, Amos Tversky\n\n"
                 "### Action Items\n"
-                "- Вивчити основні приклади.\n\n"
+                "- Study the Linda problem.\n\n"
                 "### Questions\n"
-                "- Чим вона відрізняється від евристики доступності?\n\n"
+                "- How is it different from availability heuristic?\n\n"
                 "### Useful Context\n"
-                "- Репрезентативна евристика — це ментальне скорочення.\n\n"
+                "- It is a mental shortcut.\n\n"
                 "### Scored Suggestions\n"
-                "- Прочитати Thinking Fast and Slow (Score: 95/100) - Першоджерело.\n"
+                "- Read Thinking Fast and Slow (Score: 95/100) - Primary source.\n"
             ),
             status="Reference",
         )
@@ -100,18 +137,18 @@ class SecondBrainBotTests(unittest.TestCase):
         preview = _format_note_preview_html(result)
 
         self.assertIn("<b>Summary</b>", preview)
-        self.assertIn("Запит на пояснення когнітивного упередження.", preview)
+        self.assertIn("Request to explain a cognitive bias.", preview)
         self.assertIn("<b>Capture</b>", preview)
-        self.assertIn("🧠 Репрезентативна евристика", preview)
+        self.assertIn("🧠 Representativeness Heuristic", preview)
         self.assertIn("<b>Useful Context</b>", preview)
-        self.assertIn("• Репрезентативна евристика", preview)
+        self.assertIn("• It is a mental shortcut.", preview)
         self.assertIn("<b>Actions</b>", preview)
-        self.assertIn("• Вивчити основні приклади.", preview)
+        self.assertIn("• Study the Linda problem.", preview)
         self.assertIn("<b>Questions</b>", preview)
         self.assertIn("<b>Suggestions</b>", preview)
         self.assertNotIn("**", preview)
         self.assertNotIn("Catalog", preview)
-        self.assertNotIn("#психологія", preview)
+        self.assertNotIn("#psychology", preview)
         self.assertNotIn("Entities:", preview)
 
 

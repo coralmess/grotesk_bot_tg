@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +11,13 @@ from second_brain_bot.index import SecondBrainIndex
 from second_brain_bot.models import NoteRecord, RelationRecord
 from second_brain_bot.vault import CaptureInput, NoteFile, SecondBrainVault, utc_now_iso
 from second_brain_bot.web_lookup import fetch_public_page_summary, should_allow_public_lookup
+
+
+@dataclass(frozen=True)
+class LearningResult:
+    note: NoteFile
+    text: str
+    provider: str
 
 
 class SecondBrainService:
@@ -102,6 +110,31 @@ class SecondBrainService:
         self._record_command("distill", provider=result.provider)
         return result.text
 
+    async def learn(self, selector: str) -> LearningResult:
+        source = self.index.get_note(selector)
+        if source is None:
+            matches = self.index.search(selector, limit=1)
+            source = matches[0] if matches else None
+        if source is None:
+            raise KeyError(selector)
+        prompt = (
+            "Create a practical learning session from this note. "
+            "Explain the key concept, answer the note's open questions, expand useful suggestions/actions, "
+            "give concrete examples, add a short practice exercise, and score next steps from 1 to 100. "
+            "Keep it readable in Telegram and useful enough to save as a linked Obsidian note."
+        )
+        result = await self.ai.ask(prompt, context=format_note_context(source, max_chars=5000), heavy=True)
+        note = self.vault.write_learning_note(
+            source_note_id=source.note_id,
+            source_title=source.title,
+            source_path=source.path,
+            lesson_text=result.text,
+            provider=result.provider,
+        )
+        self._index_note(note.note_id)
+        self._record_command("learn", provider=result.provider)
+        return LearningResult(note=note, text=result.text, provider=result.provider)
+
     async def build_daily_digest(self, *, now_iso: str | None = None) -> str:
         now_iso = now_iso or utc_now_iso()
         date_key = now_iso[:10]
@@ -141,6 +174,11 @@ class SecondBrainService:
     def search(self, query: str, *, limit: int = 10):
         self._record_command("search")
         return self.index.search(query, limit=limit)
+
+    def list_notes(self, query: str = "", *, limit: int = 30):
+        self._record_command("vault")
+        query = (query or "").strip()
+        return self.index.search(query, limit=limit) if query else self.index.recent_notes(limit=limit)
 
     def inbox(self, *, limit: int = 10):
         return self.index.recent_notes(limit=limit, status="Incubating")
