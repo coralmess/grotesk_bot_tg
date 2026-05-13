@@ -152,6 +152,9 @@ class SecondBrainVault:
             "tags": catalog.tags,
             "type": catalog.note_type,
             "status": catalog.status,
+            "ai_provider": enrichment.provider if enrichment else "",
+            "ai_retry_status": _ai_retry_status(enrichment.provider if enrichment else ""),
+            "ai_retry_attempts": 0,
             "date_created": created_at[:10],
         }
         body = self._render_capture_body(
@@ -170,6 +173,59 @@ class SecondBrainVault:
             status=catalog.status,
             provider=(enrichment.provider if enrichment else ""),
         )
+
+    def pending_ai_retry_notes(self, *, limit: int = 5, max_attempts: int = 3) -> list[tuple[str, dict[str, Any], str]]:
+        state = self._load_state()
+        candidates: list[tuple[str, dict[str, Any], str]] = []
+        for note_id, info in reversed(list(state.get("notes", {}).items())):
+            if len(candidates) >= limit:
+                break
+            try:
+                metadata, body, _path = self.read_note(note_id)
+            except Exception:
+                continue
+            if _is_retry_candidate(metadata, body, max_attempts=max_attempts):
+                source_text = _extract_source_capture(body)
+                if source_text:
+                    candidates.append((note_id, metadata, source_text))
+        return candidates
+
+    def rewrite_capture_note(
+        self,
+        note_id: str,
+        *,
+        capture: CaptureInput,
+        enrichment: AIEnrichment,
+        related_notes: list[RelatedNoteSuggestion],
+    ) -> NoteFile:
+        old_metadata, _old_body, old_path = self.read_note(note_id)
+        catalog = _catalog_plan(capture, enrichment)
+        desired_path = self._desired_note_path(catalog.folder, catalog.category, f"{catalog.title}.md")
+        path = desired_path if desired_path == old_path else self._unique_note_path(catalog.folder, catalog.category, f"{catalog.title}.md")
+        attempts = _int_value(old_metadata.get("ai_retry_attempts")) + 1
+        metadata = {
+            "aliases": catalog.aliases,
+            "tags": catalog.tags,
+            "type": catalog.note_type,
+            "status": catalog.status,
+            "ai_provider": enrichment.provider,
+            "ai_retry_status": _ai_retry_status(enrichment.provider),
+            "ai_retry_attempts": attempts,
+            "date_created": str(old_metadata.get("date_created") or utc_now_iso()[:10]),
+        }
+        body = self._render_capture_body(
+            capture,
+            enrichment=enrichment,
+            related_notes=related_notes,
+            catalog=catalog,
+        )
+        self._write_note(path, metadata, body)
+        if path != old_path and old_path.exists():
+            self._remove_moc_link(old_path.stem)
+            old_path.unlink()
+        self._ensure_moc(catalog, note_title=catalog.title)
+        self._record_state(note_id, path, title=catalog.title, status=catalog.status)
+        return NoteFile(note_id=note_id, title=catalog.title, path=path, status=catalog.status, provider=enrichment.provider)
 
     def read_note(self, note_id: str) -> tuple[dict[str, Any], str, Path]:
         state = self._load_state()
@@ -484,11 +540,7 @@ class SecondBrainVault:
         os.replace(tmp_path, path)
 
     def _unique_note_path(self, folder: str, category: str, filename: str) -> Path:
-        root = _safe_para_folder(folder)
-        category_name = sanitize_filename(category or "General")
-        raw_name = str(filename)
-        stem = raw_name[:-3] if raw_name.lower().endswith(".md") else raw_name
-        base = self.root_dir / root / category_name / sanitize_filename(stem)
+        base = self._desired_note_path(folder, category, filename).with_suffix("")
         suffix = Path(filename).suffix or ".md"
         candidate = base.parent / f"{base.name}{suffix}"
         counter = 2
@@ -496,6 +548,13 @@ class SecondBrainVault:
             candidate = base.parent / f"{base.name} {counter}{suffix}"
             counter += 1
         return candidate
+
+    def _desired_note_path(self, folder: str, category: str, filename: str) -> Path:
+        root = _safe_para_folder(folder)
+        category_name = sanitize_filename(category or "General")
+        raw_name = str(filename)
+        stem = raw_name[:-3] if raw_name.lower().endswith(".md") else raw_name
+        return self.root_dir / root / category_name / f"{sanitize_filename(stem)}{Path(filename).suffix or '.md'}"
 
     def _load_state(self) -> dict[str, Any]:
         if not self.state_file.exists():
@@ -774,6 +833,40 @@ def _should_render_polished_text(polished_text: str, raw_text: str) -> bool:
     if not polished:
         return False
     return re.sub(r"\s+", " ", polished) != re.sub(r"\s+", " ", raw)
+
+
+def _ai_retry_status(provider: str) -> str:
+    return "pending" if provider == "local_fallback" else "complete"
+
+
+def _is_retry_candidate(metadata: dict[str, Any], body: str, *, max_attempts: int) -> bool:
+    if "## Source Capture" not in body:
+        return False
+    if "## Learning Session" in body or str(metadata.get("type") or "") == "MOC":
+        return False
+    attempts = _int_value(metadata.get("ai_retry_attempts"))
+    if attempts >= max_attempts:
+        return False
+    provider = str(metadata.get("ai_provider") or "")
+    retry_status = str(metadata.get("ai_retry_status") or "")
+    # Missing provider metadata covers older captures made before retry tracking existed.
+    return provider == "local_fallback" or retry_status == "pending" or not provider
+
+
+def _extract_source_capture(body: str) -> str:
+    match = re.search(r"(?ms)^## Source Capture\s*\n(?P<body>.*?)(?=^## |\Z)", body or "")
+    if not match:
+        return ""
+    text = match.group("body").strip()
+    text = re.sub(r"^_No text caption\\._$", "", text)
+    return text.strip()
+
+
+def _int_value(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _title_from_text(text: str) -> str:

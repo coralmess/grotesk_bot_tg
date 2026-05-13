@@ -5,6 +5,7 @@ from pathlib import Path
 from second_brain_bot.ai import AIEnrichment, RelatedNoteSuggestion
 from second_brain_bot.models import NoteRecord, RelationRecord
 from second_brain_bot.service import SecondBrainService
+from second_brain_bot.vault import CaptureInput
 
 
 class FakeAI:
@@ -48,6 +49,33 @@ class FakeAI:
         return type("Result", (), {"text": "Use the collected knife notes.", "provider": "fake"})()
 
 
+class RetryAI:
+    def __init__(self) -> None:
+        self.enrich_calls: list[str] = []
+
+    async def enrich_capture(self, text: str, *, image_bytes=None, preferred_provider=None, allow_web=False):
+        self.enrich_calls.append(text)
+        return AIEnrichment(
+            title="COPX - Copper Miners ETF Investment Idea",
+            summary="COPX is the Global X Copper Miners ETF.",
+            suggested_folder="4-Incubator",
+            suggested_tags=["#investments", "#etf"],
+            entities=["COPX", "Global X Copper Miners ETF"],
+            note_type="Idea",
+            note_status="Incubating",
+            parent_moc="Investments MOC",
+            moc_category="Investments",
+            action_items=["Compare COPX risk with portfolio plan"],
+            provider="gemini",
+        )
+
+    async def suggest_relations(self, note_text, candidates):
+        return []
+
+    async def ask(self, question: str, *, context: str, heavy: bool = True, **kwargs):
+        return type("Result", (), {"text": "answer", "provider": "gemini"})()
+
+
 class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_capture_indexes_note_and_creates_relation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,6 +92,27 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(relations), 1)
             self.assertEqual(relations[0].target_note_id, first.note_id)
             self.assertIn("[[Knife Brand - Purchase Research Note]]", second.path.read_text(encoding="utf-8"))
+
+    async def test_retry_pending_ai_enrichments_updates_local_fallback_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = SecondBrainService(vault_dir=Path(tmp), ai=FakeAI())
+            fallback = service.vault.create_capture_note(
+                CaptureInput(capture_type="text", text="COPX stock idea"),
+                enrichment=AIEnrichment(title="COPX stock idea", provider="local_fallback"),
+            )
+            service._index_note(fallback.note_id)
+            retry_ai = RetryAI()
+            service.ai = retry_ai
+
+            updated = await service.retry_pending_ai_enrichments(limit=2)
+
+            self.assertEqual(len(updated), 1)
+            self.assertEqual(updated[0].note_id, fallback.note_id)
+            self.assertEqual(updated[0].provider, "gemini")
+            self.assertEqual(len(retry_ai.enrich_calls), 1)
+            metadata, body, _ = service.vault.read_note(fallback.note_id)
+            self.assertEqual(metadata["ai_retry_status"], "complete")
+            self.assertIn("Global X Copper Miners ETF", body)
 
     async def test_ask_uses_local_retrieval_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

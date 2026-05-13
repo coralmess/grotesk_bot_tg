@@ -64,6 +64,7 @@ class SecondBrainVaultTests(unittest.TestCase):
                             "reason": "Practical CBT method.",
                         }
                     ],
+                    provider="gemini",
                 ),
                 related_notes=[
                     RelatedNoteSuggestion(
@@ -84,6 +85,8 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertIn("- \"#purchase\"", text)
             self.assertIn("type: Purchase", text)
             self.assertIn("status: Incubating", text)
+            self.assertIn("ai_provider: gemini", text)
+            self.assertIn("ai_retry_status: complete", text)
             self.assertIn("date_created: 2026-05-13", text)
             self.assertIn("Parent: [[Purchases MOC]]", text)
             self.assertIn("[[Things to Buy MOC]]", text)
@@ -99,6 +102,59 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertIn("type: MOC", moc_text)
             self.assertIn("[[Shure SM7B - Microphone Purchase Plan]]", moc_text)
             self.assertIn("Potential audio gear purchase", moc_text)
+
+    def test_local_fallback_capture_is_marked_pending_ai_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = SecondBrainVault(Path(tmp))
+            note = vault.create_capture_note(
+                CaptureInput(capture_type="text", text="A concept to enrich later"),
+                enrichment=AIEnrichment(
+                    title="A concept to enrich later",
+                    summary="Fallback summary",
+                    provider="local_fallback",
+                ),
+            )
+
+            metadata, body, _ = vault.read_note(note.note_id)
+            candidates = vault.pending_ai_retry_notes(limit=5)
+
+            self.assertEqual(metadata["ai_provider"], "local_fallback")
+            self.assertEqual(metadata["ai_retry_status"], "pending")
+            self.assertEqual(candidates[0][0], note.note_id)
+            self.assertIn("A concept to enrich later", candidates[0][2])
+
+    def test_rewrite_capture_note_updates_existing_note_after_ai_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = SecondBrainVault(Path(tmp))
+            note = vault.create_capture_note(
+                CaptureInput(capture_type="text", text="COPX stock idea"),
+                enrichment=AIEnrichment(title="COPX stock idea", provider="local_fallback"),
+            )
+
+            updated = vault.rewrite_capture_note(
+                note.note_id,
+                capture=CaptureInput(capture_type="text", text="COPX stock idea"),
+                enrichment=AIEnrichment(
+                    title="COPX - Copper Miners ETF Investment Idea",
+                    summary="COPX is a copper miners ETF.",
+                    suggested_folder="4-Incubator",
+                    suggested_tags=["#investments", "#etf"],
+                    note_type="Idea",
+                    note_status="Incubating",
+                    parent_moc="Investments MOC",
+                    moc_category="Investments",
+                    provider="gemini",
+                ),
+                related_notes=[],
+            )
+
+            self.assertEqual(updated.note_id, note.note_id)
+            self.assertFalse(note.path.exists())
+            self.assertTrue(updated.path.exists())
+            metadata, body, _ = vault.read_note(note.note_id)
+            self.assertEqual(metadata["ai_provider"], "gemini")
+            self.assertEqual(metadata["ai_retry_status"], "complete")
+            self.assertIn("COPX is a copper miners ETF.", body)
 
     def test_attachment_paths_are_relative_to_vault(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

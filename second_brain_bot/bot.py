@@ -34,6 +34,7 @@ class SecondBrainTelegramBot:
         self.service_health = service_health
         self._digest_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None
+        self._ai_retry_task: asyncio.Task | None = None
 
     def register_handlers(self, application: Application) -> None:
         application.add_handler(CommandHandler("start", self.start_command))
@@ -70,10 +71,11 @@ class SecondBrainTelegramBot:
             name="second-brain-health-heartbeat",
         )
         self._digest_task = asyncio.create_task(self._digest_loop(application), name="second-brain-digest")
+        self._ai_retry_task = asyncio.create_task(self._ai_retry_loop(), name="second-brain-ai-retry")
 
     async def on_shutdown(self, application: Application) -> None:
         self.service_health.mark_stopping("second brain bot stopping")
-        for task in (self._digest_task, self._heartbeat_task):
+        for task in (self._digest_task, self._heartbeat_task, self._ai_retry_task):
             if task is None:
                 continue
             task.cancel()
@@ -321,6 +323,22 @@ class SecondBrainTelegramBot:
                 self.service_health.record_failure("daily_digest", exc)
                 LOGGER.exception("Second Brain daily digest failed")
                 await asyncio.sleep(300)
+
+    async def _ai_retry_loop(self) -> None:
+        await asyncio.sleep(600)
+        while True:
+            try:
+                updated = await self.service.retry_pending_ai_enrichments(limit=2)
+                if updated:
+                    self.service_health.record_success("ai_retry", note=f"updated={len(updated)}")
+                    LOGGER.info("Second Brain AI retry updated %s fallback notes", len(updated))
+                await asyncio.sleep(1800)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.service_health.record_failure("ai_retry", exc)
+                LOGGER.exception("Second Brain AI retry loop failed")
+                await asyncio.sleep(1800)
 
     async def _allowed(self, update: Update) -> bool:
         chat = update.effective_chat

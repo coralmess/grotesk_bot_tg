@@ -185,6 +185,31 @@ class SecondBrainService:
         self._record_command("digest", provider=result.provider)
         return digest
 
+    async def retry_pending_ai_enrichments(self, *, limit: int = 2) -> list[NoteFile]:
+        updated: list[NoteFile] = []
+        for note_id, metadata, source_text in self.vault.pending_ai_retry_notes(limit=limit):
+            enrichment = await self.ai.enrich_capture(source_text)
+            related = await self.ai.suggest_relations(
+                source_text,
+                self._candidate_notes(source_text, enrichment.entities + enrichment.suggested_tags),
+            )
+            note = self.vault.rewrite_capture_note(
+                note_id,
+                capture=CaptureInput(
+                    capture_type=str(metadata.get("capture_type") or "text"),
+                    text=source_text,
+                    created_at=str(metadata.get("date_created") or ""),
+                ),
+                enrichment=enrichment,
+                related_notes=related,
+            )
+            self._index_note(note.note_id)
+            self._store_relations(note, related)
+            self._store_actions(note, enrichment.action_items)
+            self._record_capture(capture_type="ai_retry", related_count=len(related), provider=enrichment.provider)
+            updated.append(note)
+        return updated
+
     def accept(self, note_id: str) -> NoteFile:
         note = self.vault.accept_suggestion(note_id)
         self._index_note(note_id)
