@@ -71,6 +71,15 @@ SERVICE_RULES = {
         "helpers/service_health.py",
         "config.py",
     ),
+    "second-brain-bot.service": (
+        "second_brain_bot/",
+        "second-brain-bot.service",
+        "helpers/runtime_paths.py",
+        "helpers/sqlite_runtime.py",
+        "helpers/service_health.py",
+        "helpers/analytics_events.py",
+        "config.py",
+    ),
     "auto-ria-bot.service": (
         "auto_ria_bot.py",
         "auto-ria-bot.service",
