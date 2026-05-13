@@ -20,27 +20,29 @@ class SecondBrainBotTests(unittest.TestCase):
         self.assertIn("/brain_accept <id> - accept AI title/tags/folder for a note.", text)
         self.assertIn("🧠Thinking🧠", text)
 
-
-    def test_capture_confirmation_uses_saved_markdown_path(self) -> None:
+    def test_capture_confirmation_uses_readable_breadcrumb_and_ai_provider(self) -> None:
         note = NoteRecord(
-            note_id="20260513120957-ff4dea61",
-            title="rockyou.txt - Password List Reference",
-            path="3-Resources/Security Research/rockyou.txt - Password List Reference.md",
+            note_id="20260513122336-cafc88a2",
+            title="Феномен Баадера — Майнхоф",
+            path="/home/ubuntu/LystTgFirefox/runtime_data/second_brain_vault/3-Resources/Psychology/Феномен Баадера — Майнхоф.md",
             tags=[],
             entities=[],
             body="",
             status="Reference",
-            created_at="2026-05-13T12:09:57Z",
-            updated_at="2026-05-13T12:09:57Z",
+            created_at="2026-05-13T12:23:36Z",
+            updated_at="2026-05-13T12:23:36Z",
         )
+        note = type("CapturedNote", (), {**note.__dict__, "provider": "gemini"})()
 
         text = _format_capture_confirmation(note)
 
         self.assertEqual(
             text,
-            "🧠 Memorized: 3-Resources/Security Research/rockyou.txt - Password List Reference.md\n"
-            "📄 ID: 20260513120957-ff4dea61",
+            "🧠 Memorized: Resources -> Psychology -> Феномен Баадера — Майнхоф\n"
+            "📄 ID: 20260513122336-cafc88a2 (Gemini)",
         )
+        self.assertNotIn("/home/ubuntu", text)
+        self.assertNotIn(".md", text)
         self.assertNotIn("Captured:", text)
 
     def test_note_preview_uses_telegram_html_not_raw_markdown_headings(self) -> None:

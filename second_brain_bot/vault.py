@@ -38,6 +38,7 @@ class NoteFile:
     title: str
     path: Path
     status: str
+    provider: str = ""
 
 
 @dataclass(frozen=True)
@@ -162,7 +163,13 @@ class SecondBrainVault:
         self._write_note(path, metadata, body)
         self._ensure_moc(catalog, note_title=catalog.title)
         self._record_state(note_id, path, title=catalog.title, status=catalog.status)
-        return NoteFile(note_id=note_id, title=catalog.title, path=path, status=catalog.status)
+        return NoteFile(
+            note_id=note_id,
+            title=catalog.title,
+            path=path,
+            status=catalog.status,
+            provider=(enrichment.provider if enrichment else ""),
+        )
 
     def read_note(self, note_id: str) -> tuple[dict[str, Any], str, Path]:
         state = self._load_state()

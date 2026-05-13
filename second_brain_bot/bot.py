@@ -412,9 +412,47 @@ def _format_note_preview_html(result) -> str:
 def _format_capture_confirmation(note) -> str:
     # The saved file path is more useful than the AI title because it shows
     # where the note landed in the vault and avoids misleading title-only echoes.
-    saved_path = str(getattr(note, "path", "") or getattr(note, "title", "") or "saved note")
+    saved_path = _display_note_breadcrumb(getattr(note, "path", "") or getattr(note, "title", "") or "saved note")
     note_id = str(getattr(note, "note_id", "") or "")
-    return f"🧠 Memorized: {saved_path}\n📄 ID: {note_id}"
+    provider = _display_provider_name(str(getattr(note, "provider", "") or ""))
+    provider_suffix = f" ({provider})" if provider else ""
+    return f"🧠 Memorized: {saved_path}\n📄 ID: {note_id}{provider_suffix}"
+
+
+def _display_note_breadcrumb(path_value) -> str:
+    parts = [part for part in Path(str(path_value)).parts if part not in {"", "/", "\\"}]
+    vault_markers = {"second_brain_vault", "second_brain_vault_backup_20260513T114939Z"}
+    for index, part in enumerate(parts):
+        if part in vault_markers:
+            parts = parts[index + 1 :]
+            break
+    if not parts:
+        return "saved note"
+    if parts[-1].lower().endswith(".md"):
+        parts[-1] = parts[-1][:-3]
+    readable_parts = [_display_para_folder(part) for part in parts]
+    return " -> ".join(part for part in readable_parts if part)
+
+
+def _display_para_folder(value: str) -> str:
+    mapping = {
+        "1-Projects": "Projects",
+        "2-Areas": "Areas",
+        "3-Resources": "Resources",
+        "4-Incubator": "Incubator",
+    }
+    return mapping.get(value, value)
+
+
+def _display_provider_name(provider: str) -> str:
+    mapping = {
+        "gemini": "Gemini",
+        "modal_glm": "Modal GLM",
+        "cerebras": "Cerebras",
+        "groq": "Groq",
+        "local_fallback": "Local fallback",
+    }
+    return mapping.get(provider.strip(), provider.strip())
 
 
 async def _edit_or_reply(message, text: str) -> None:
