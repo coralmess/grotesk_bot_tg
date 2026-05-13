@@ -235,6 +235,14 @@ class SecondBrainVaultTests(unittest.TestCase):
                 encoding="utf-8",
             )
             vault = SecondBrainVault(root)
+            stale_dir = root / "3-Resources" / "Knowledge"
+            stale_dir.mkdir(parents=True)
+            stale_moc = stale_dir / "Knowledge MOC.md"
+            stale_moc.write_text(
+                "---\naliases: [Knowledge]\ntags: [\"#moc\"]\ntype: MOC\nstatus: Active\ndate_created: 2026-05-13\n---\n"
+                "# Knowledge MOC\n\n## Notes\n",
+                encoding="utf-8",
+            )
 
             migrated = vault.migrate_legacy_vault()
 
@@ -245,6 +253,7 @@ class SecondBrainVaultTests(unittest.TestCase):
             moc_text = moc.read_text(encoding="utf-8")
             self.assertIn("[[Herman Miller Gaming Embody - Office Chair Purchase Evaluation]]", moc_text)
             self.assertNotIn("[[2026-05-13 Herman Miller Gaming Embody Office Chair Evaluation]]", moc_text)
+            self.assertFalse(stale_moc.exists())
 
 
 if __name__ == "__main__":

@@ -292,6 +292,7 @@ class SecondBrainVault:
                     legacy_path.rmdir()
                 except OSError:
                     pass
+        self._cleanup_empty_mocs_and_dirs()
         return migrated
 
     def _render_capture_body(
@@ -388,6 +389,20 @@ class SecondBrainVault:
             updated = re.sub(rf"^- .*{escaped}.*(?:\n|$)", "", body, flags=re.M)
             if updated != body:
                 self._write_note(moc_path, metadata, updated)
+
+    def _cleanup_empty_mocs_and_dirs(self) -> None:
+        for moc_path in sorted(self.root_dir.rglob("* MOC.md")):
+            _metadata, body = _extract_frontmatter(moc_path.read_text(encoding="utf-8"))
+            if "- [[" in body:
+                continue
+            moc_path.unlink()
+        for directory in sorted([path for path in self.root_dir.rglob("*") if path.is_dir()], key=lambda item: len(item.parts), reverse=True):
+            if directory.name == "Attachments":
+                continue
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
 
     def _write_note(self, path: Path, metadata: dict[str, Any], body: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
