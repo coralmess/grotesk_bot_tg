@@ -255,6 +255,39 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertNotIn("[[2026-05-13 Herman Miller Gaming Embody Office Chair Evaluation]]", moc_text)
             self.assertFalse(stale_moc.exists())
 
+    def test_migration_does_not_rename_already_correct_dotted_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note_dir = root / "4-Incubator" / "Business Ideas"
+            note_dir.mkdir(parents=True)
+            note_path = note_dir / "Micro SaaS Acquisition via Acquire.com - Business Idea.md"
+            note_path.write_text(
+                "---\naliases: []\ntags: [\"#business-ideas\"]\ntype: Idea\nstatus: Incubating\ndate_created: 2026-05-13\n---\n"
+                "# Micro SaaS Acquisition via Acquire.com - Business Idea\n\nParent: [[Business Ideas MOC]]\n",
+                encoding="utf-8",
+            )
+            (root / ".second_brain_state.json").write_text(
+                json.dumps(
+                    {
+                        "notes": {
+                            "saas-note": {
+                                "path": "4-Incubator/Business Ideas/Micro SaaS Acquisition via Acquire.com - Business Idea.md",
+                                "title": "Micro SaaS Acquisition via Acquire.com - Business Idea",
+                                "status": "Incubating",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            vault = SecondBrainVault(root)
+
+            migrated = vault.migrate_legacy_vault()
+
+            self.assertEqual(migrated, 0)
+            self.assertTrue(note_path.exists())
+            self.assertFalse((note_dir / "Micro SaaS Acquisition via Acquire.com - Business Idea 2.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

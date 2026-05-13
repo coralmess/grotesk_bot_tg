@@ -557,7 +557,7 @@ def _looks_generic_title(title: str) -> bool:
 
 def _needs_catalog_normalization(title: str) -> bool:
     lowered = title.lower()
-    return lowered.startswith("2026-") or any(
+    return lowered.startswith("2026-") or lowered.endswith(" 2") or any(
         token in lowered
         for token in (
             "another potential",
@@ -567,7 +567,7 @@ def _needs_catalog_normalization(title: str) -> bool:
             "state note",
             "untitled",
         )
-    )
+    ) and "acquire.com - business idea" not in lowered
 
 
 def _descriptive_title_from_text(text: str, *, fallback: str) -> str:
