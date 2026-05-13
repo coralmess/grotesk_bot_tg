@@ -15,6 +15,7 @@ RUNTIME_CACHE_DIR = RUNTIME_DATA_DIR / "cache"
 RUNTIME_BROWSER_DIR = RUNTIME_DATA_DIR / "browser"
 RUNTIME_TMP_DIR = RUNTIME_DATA_DIR / "tmp"
 RUNTIME_ANALYTICS_DIR = RUNTIME_DATA_DIR / "analytics"
+SECOND_BRAIN_VAULT_DIR = RUNTIME_DATA_DIR / "second_brain_vault"
 
 
 def ensure_runtime_dirs() -> None:
@@ -31,6 +32,7 @@ def ensure_runtime_dirs() -> None:
         RUNTIME_BROWSER_DIR,
         RUNTIME_TMP_DIR,
         RUNTIME_ANALYTICS_DIR,
+        SECOND_BRAIN_VAULT_DIR,
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -74,6 +76,9 @@ SHAFA_DYNAMIC_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "shafa_dynamic_urls.jso
 SVITLO_SUBSCRIBERS_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "subscribers.json")
 SVITLO_STATE_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "svitlo_state.json")
 VIEWED_DESIGNERS_JSON_FILE = runtime_file(RUNTIME_JSON_DIR, "viewed_designers.json")
+# The Second Brain bot keeps Obsidian Markdown as primary storage and uses this
+# SQLite index only for fast retrieval/cross-reference suggestions.
+SECOND_BRAIN_INDEX_DB_FILE = runtime_file(RUNTIME_DB_DIR, "second_brain_index.db")
 
 
 def service_health_file(service_name: str) -> Path:

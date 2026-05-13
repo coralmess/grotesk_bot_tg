@@ -17,6 +17,7 @@ class RestartChangedServicesTests(unittest.TestCase):
         self.assertIn("grotesk-lyst.service", SERVICE_RULES)
         self.assertIn("auto-ria-bot.service", SERVICE_RULES)
         self.assertIn("usefulbot.service", SERVICE_RULES)
+        self.assertIn("second-brain-bot.service", SERVICE_RULES)
         self.assertIn("svitlobot.service", SERVICE_RULES)
 
     def test_svitlobot_restarts_for_its_runtime_changes(self) -> None:
@@ -33,6 +34,12 @@ class RestartChangedServicesTests(unittest.TestCase):
         self.assertTrue(should_restart("usefulbot.service", ["useful_bot/index.py"]))
         self.assertTrue(should_restart("usefulbot.service", ["helpers/runtime_paths.py"]))
         self.assertFalse(should_restart("usefulbot.service", ["svitlo_bot.py"]))
+
+    def test_second_brain_restart_rules_cover_its_runtime_files(self) -> None:
+        self.assertTrue(should_restart("second-brain-bot.service", ["second_brain_bot/index.py"]))
+        self.assertTrue(should_restart("second-brain-bot.service", ["second-brain-bot.service"]))
+        self.assertTrue(should_restart("second-brain-bot.service", ["helpers/runtime_paths.py"]))
+        self.assertFalse(should_restart("second-brain-bot.service", ["useful_bot/index.py"]))
 
     def test_auto_ria_restart_rules_cover_runtime_and_config(self) -> None:
         self.assertTrue(should_restart("auto-ria-bot.service", ["config_auto_ria_urls.py"]))
