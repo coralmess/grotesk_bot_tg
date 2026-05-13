@@ -91,6 +91,47 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(modal.calls), 1)
         self.assertNotIn("private-image-bytes", modal.calls[0][1])
 
+    async def test_enrichment_prompt_prefers_useful_context_without_noisy_guesses(self) -> None:
+        modal = FakeProvider(
+            "modal_glm",
+            result=ProviderResult(provider="modal_glm", model="glm", payload={"title": "COPX stock"}),
+        )
+        ai = AIOrchestrator(providers={"modal_glm": modal})
+
+        await ai.enrich_capture("I want COPX stocks", preferred_provider="modal_glm")
+
+        prompt = modal.calls[0][1]
+        self.assertIn("recognizable ticker", prompt)
+        self.assertIn("Do not add noisy guesses", prompt)
+        self.assertIn("score from 1 to 100", prompt)
+
+    async def test_enrichment_parses_useful_context_and_scored_suggestions(self) -> None:
+        modal = FakeProvider(
+            "modal_glm",
+            result=ProviderResult(
+                provider="modal_glm",
+                model="glm",
+                payload={
+                    "title": "Improve mental resilience",
+                    "summary": "Goal note.",
+                    "enrichment_notes": ["Cognitive defusion means noticing thoughts as thoughts."],
+                    "scored_suggestions": [
+                        {
+                            "title": "Spotting Cognitive Distortions",
+                            "score": 95,
+                            "reason": "Useful CBT skill.",
+                        }
+                    ],
+                },
+            ),
+        )
+        ai = AIOrchestrator(providers={"modal_glm": modal})
+
+        enrichment = await ai.enrich_capture("I care too much about opinions", preferred_provider="modal_glm")
+
+        self.assertEqual(enrichment.enrichment_notes, ["Cognitive defusion means noticing thoughts as thoughts."])
+        self.assertEqual(enrichment.scored_suggestions[0]["score"], 95)
+
     async def test_ask_returns_readable_answer_not_thinking_or_json(self) -> None:
         modal = FakeProvider(
             "modal_glm",
@@ -119,6 +160,14 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<think>", cleaned)
         self.assertIn("🧭 Things to do", cleaned)
         self.assertIn("Buy scarf", cleaned)
+
+    def test_clean_human_response_formats_scored_suggestions(self) -> None:
+        raw = '{"suggestions":[{"title":"Cognitive Defusion","score":92,"reason":"Helps detach from thoughts."}]}'
+
+        cleaned = clean_human_response(raw)
+
+        self.assertIn("Suggested options", cleaned)
+        self.assertIn("Cognitive Defusion (Score: 92/100)", cleaned)
 
 
 if __name__ == "__main__":

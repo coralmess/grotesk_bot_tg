@@ -146,6 +146,7 @@ class SecondBrainVault:
             "ai_suggested_folder": enrichment.suggested_folder if enrichment else "",
             "ai_suggested_tags": enrichment.suggested_tags if enrichment else [],
             "ai_summary": enrichment.summary if enrichment else "",
+            "ai_enrichment_notes": enrichment.enrichment_notes if enrichment else [],
             "related_notes": [item.note_id for item in related_notes or []],
         }
         body = self._render_capture_body(capture, enrichment=enrichment, related_notes=related_notes or [])
@@ -285,6 +286,19 @@ class SecondBrainVault:
                 parts.extend(["### Action Items", *[f"- {item}" for item in enrichment.action_items], ""])
             if enrichment.questions:
                 parts.extend(["### Questions", *[f"- {item}" for item in enrichment.questions], ""])
+            if enrichment.enrichment_notes:
+                parts.extend(["### Useful Context", *[f"- {item}" for item in enrichment.enrichment_notes], ""])
+            if enrichment.scored_suggestions:
+                parts.append("### Scored Suggestions")
+                for item in enrichment.scored_suggestions:
+                    title = item.get("title", "")
+                    score = item.get("score", "")
+                    reason = item.get("reason", "")
+                    line = f"- {title} (Score: {score}/100)"
+                    if reason:
+                        line += f" - {reason}"
+                    parts.append(line)
+                parts.append("")
         if related_notes:
             parts.append(_render_related_notes(related_notes).rstrip())
         return "\n".join(parts).rstrip() + "\n"

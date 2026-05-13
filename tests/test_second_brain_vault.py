@@ -30,6 +30,14 @@ class SecondBrainVaultTests(unittest.TestCase):
                     entities=["knife"],
                     action_items=["Compare knife brands"],
                     questions=[],
+                    enrichment_notes=["COPX is the Global X Copper Miners ETF."],
+                    scored_suggestions=[
+                        {
+                            "title": "Spotting Cognitive Distortions",
+                            "score": 95,
+                            "reason": "Practical CBT method.",
+                        }
+                    ],
                 ),
                 related_notes=[
                     RelatedNoteSuggestion(
@@ -47,6 +55,9 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertIn("capture_type: text", text)
             self.assertIn("ai_suggested_title: Buy knife later", text)
             self.assertIn("- wishlist", text)
+            self.assertIn("### Useful Context", text)
+            self.assertIn("COPX is the Global X Copper Miners ETF.", text)
+            self.assertIn("Spotting Cognitive Distortions (Score: 95/100)", text)
             self.assertIn("[[Kitchen wishlist]]", text)
             self.assertIn("Buy knife later", text)
 

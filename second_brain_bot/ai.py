@@ -30,6 +30,11 @@ Rules:
 - Cite note titles or paths when useful.
 - Separate facts from assumptions.
 - Never output raw JSON to the user unless they explicitly ask for JSON.
+- Enrich captures only when the enrichment is useful and not noisy.
+- Never invent missing specifics such as a scarf brand, product model, ticker, person, or source when the user did not provide enough evidence.
+- Add compact high-confidence clarifications for recognizable tickers, acronyms, companies, products, methods, books, people, or concepts.
+- When suggesting variants/options, attach a practical usefulness/confidence score from 1 to 100.
+- For wellbeing or mental-performance captures, suggest evidence-informed methods without diagnosing the user or pretending to provide therapy.
 """.strip()
 
 JSON_SYSTEM_INSTRUCTIONS = (
@@ -56,6 +61,8 @@ class AIEnrichment:
     entities: list[str] = field(default_factory=list)
     action_items: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
+    enrichment_notes: list[str] = field(default_factory=list)
+    scored_suggestions: list[dict[str, Any]] = field(default_factory=list)
     provider: str = "local_fallback"
     verification_pending: bool = False
 
@@ -269,8 +276,18 @@ def local_relation_suggestions(note_text: str, candidates: list[SearchResult]) -
 def _enrichment_prompt(text: str, *, allow_web: bool) -> str:
     return (
         f"{SECOND_BRAIN_SYSTEM_INSTRUCTIONS}\n\n"
-        "Enrich this personal Second Brain capture. Use model knowledge only unless web facts are already supplied. "
-        "Return JSON with keys: title, summary, suggested_folder, suggested_tags, entities, action_items, questions. "
+        "Enrich this personal Second Brain capture. Use model knowledge only unless web facts are already supplied.\n"
+        "Universal enrichment rules:\n"
+        "- Preserve everything the user provided; never replace the raw capture.\n"
+        "- Add useful context only when it is high-confidence and helpful for future recall or decisions.\n"
+        "- Do not add noisy guesses. If the user says they want to buy a scarf, do not guess a brand or material unless provided.\n"
+        "- If the user gives a recognizable ticker, acronym, company, product, method, book, person, or concept, add a compact definition.\n"
+        "- If the capture is a goal/problem, suggest a few effective approaches and give each a score from 1 to 100.\n"
+        "- Scores mean practical usefulness/confidence for this capture, not scientific certainty.\n"
+        "- For health or mental wellbeing topics, keep it educational, do not diagnose, and prefer evidence-informed methods.\n"
+        "- Keep enrichment small: usually 2-6 bullets.\n\n"
+        "Return JSON with keys: title, summary, suggested_folder, suggested_tags, entities, action_items, questions, "
+        "enrichment_notes, scored_suggestions. scored_suggestions must be a list of objects with title, score, reason. "
         "suggested_folder must be one of 00_Inbox, 01_Projects, 02_Areas, 03_Resources, 99_Archive. "
         f"Public web lookup allowed by policy: {allow_web}.\n\nCapture:\n{text[:8000]}"
     )
@@ -322,6 +339,8 @@ def _enrichment_from_payload(payload: dict[str, Any], *, provider: str, fallback
         entities=_string_list(payload.get("entities")),
         action_items=_string_list(payload.get("action_items")),
         questions=_string_list(payload.get("questions")),
+        enrichment_notes=_string_list(payload.get("enrichment_notes") or payload.get("useful_context")),
+        scored_suggestions=_scored_suggestions(payload.get("scored_suggestions") or payload.get("suggestions")),
         provider=provider,
         verification_pending=bool(payload.get("verification_pending", False)),
     )
@@ -361,6 +380,28 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()][:20]
+
+
+def _scored_suggestions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, str):
+            title, score, reason = item.strip(), 70, ""
+        elif isinstance(item, dict):
+            title = str(item.get("title") or item.get("name") or "").strip()
+            reason = str(item.get("reason") or item.get("why") or "").strip()
+            try:
+                score = int(float(item.get("score", 70)))
+            except (TypeError, ValueError):
+                score = 70
+        else:
+            continue
+        if not title:
+            continue
+        result.append({"title": title, "score": min(100, max(1, score)), "reason": reason})
+    return result[:10]
 
 
 def _first_line(text: str) -> str:
@@ -445,6 +486,15 @@ def _json_to_human_text(payload: dict[str, Any]) -> str:
             line = f"- {task}"
             if source:
                 line += f" — {source}"
+            lines.append(line)
+        return "\n".join(lines) if len(lines) > 1 else ""
+    suggestions = payload.get("suggestions") or payload.get("scored_suggestions")
+    if isinstance(suggestions, list):
+        lines = ["🧠 Suggested options"]
+        for item in _scored_suggestions(suggestions):
+            line = f"- {item['title']} (Score: {item['score']}/100)"
+            if item.get("reason"):
+                line += f" — {item['reason']}"
             lines.append(line)
         return "\n".join(lines) if len(lines) > 1 else ""
     bullets = payload.get("bullets") or payload.get("items")
