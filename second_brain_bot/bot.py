@@ -74,27 +74,7 @@ class SecondBrainTelegramBot:
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
             return
-        await update.effective_message.reply_text(
-            "\n".join(
-                [
-                    "Second Brain bot is online.",
-                    "Send text, links, or photos to capture.",
-                    "",
-                    "Commands:",
-                    "/brain_status",
-                    "/brain_inbox [limit]",
-                    "/brain_note <id>",
-                    "/brain_accept <id>",
-                    "/brain_skip <id>",
-                    "/brain_search <query>",
-                    "/brain_ask <question>",
-                    "/brain_distill <id|today|week>",
-                    "/brain_digest_now",
-                    "/brain_ai_retry <id>",
-                    "/brain_web_enrich <id>",
-                ]
-            )
-        )
+        await update.effective_message.reply_text(build_help_text())
 
     async def capture_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update) or not update.effective_message:
@@ -378,6 +358,37 @@ def _first_int(args: list[str], *, default: int, min_value: int, max_value: int)
     except ValueError:
         return default
     return min(max(value, min_value), max_value)
+
+
+def build_help_text() -> str:
+    # Keep command help self-explanatory because this bot is operated from Telegram,
+    # where there is no surrounding documentation next to the command list.
+    return "\n".join(
+        [
+            "Second Brain bot is online.",
+            "",
+            "Send me any text, link, or photo and I will save it into your Obsidian-style vault, enrich it when useful, and connect it to related notes.",
+            "",
+            "Main commands:",
+            "/brain_ask <question> - ask something based on your saved notes.",
+            "/brain_search <query> - find notes by words, tags, or topics.",
+            "/brain_inbox [limit] - show recent unprocessed captures.",
+            "/brain_note <id> - open a saved note preview by ID.",
+            "",
+            "Organize notes:",
+            "/brain_accept <id> - accept AI title/tags/folder for a note.",
+            "/brain_skip <id> - mark a note as needing manual review.",
+            "/brain_ai_retry <id> - rerun AI enrichment and save a new enriched version.",
+            "/brain_web_enrich <id> - rerun enrichment with public web lookup allowed.",
+            "",
+            "Summaries:",
+            "/brain_distill <id|today|week> - create a concise insight/next-actions summary.",
+            "/brain_digest_now - generate the daily digest immediately.",
+            "/brain_status - show vault path, note counts, and connected AI providers.",
+            "",
+            "Tip: when AI is working, I first show \"🧠Thinking🧠\" and then edit that message with the answer.",
+        ]
+    )
 
 
 async def _edit_or_reply(message, text: str) -> None:
