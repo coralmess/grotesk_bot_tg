@@ -2,10 +2,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from helpers.analytics_events import AnalyticsSink
 from second_brain_bot.ai import AIEnrichment, RelatedNoteSuggestion
 from second_brain_bot.models import NoteRecord, RelationRecord
 from second_brain_bot.service import SecondBrainService
 from second_brain_bot.vault import CaptureInput
+
+
+def make_test_service(tmp: str, ai) -> SecondBrainService:
+    return SecondBrainService(
+        vault_dir=Path(tmp),
+        ai=ai,
+        analytics_sink=AnalyticsSink(Path(tmp) / "analytics", now_func=lambda: "2026-05-13T00:00:00Z"),
+    )
 
 
 class FakeAI:
@@ -77,9 +86,17 @@ class RetryAI:
 
 
 class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_test_service_analytics_stays_inside_temp_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = make_test_service(tmp, FakeAI())
+            await service.capture_text("Buy knife", telegram_message_id=1)
+
+            self.assertTrue((Path(tmp) / "analytics" / "events" / "2026-05-13.second_brain_capture.jsonl").exists())
+            self.assertTrue(str(service.analytics_sink.root_dir).startswith(str(Path(tmp))))
+
     async def test_capture_indexes_note_and_creates_relation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = SecondBrainService(vault_dir=Path(tmp), ai=FakeAI())
+            service = make_test_service(tmp, FakeAI())
             first = await service.capture_text("Buy knife", telegram_message_id=1, created_at="2026-05-13T09:00:00Z")
             second = await service.capture_text(
                 "This knife brand is great",
@@ -95,7 +112,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retry_pending_ai_enrichments_updates_local_fallback_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = SecondBrainService(vault_dir=Path(tmp), ai=FakeAI())
+            service = make_test_service(tmp, FakeAI())
             fallback = service.vault.create_capture_note(
                 CaptureInput(capture_type="text", text="COPX stock idea"),
                 enrichment=AIEnrichment(title="COPX stock idea", provider="local_fallback"),
@@ -117,7 +134,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_ask_uses_local_retrieval_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ai = FakeAI()
-            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            service = make_test_service(tmp, ai)
             await service.capture_text("Buy knife", telegram_message_id=1)
 
             answer = await service.ask("What should I buy?")
@@ -129,7 +146,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_ask_uses_related_notes_from_deep_retrieval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ai = FakeAI()
-            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            service = make_test_service(tmp, ai)
             source = await service.capture_text(
                 "Representativeness heuristic",
                 telegram_message_id=1,
@@ -159,7 +176,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_capture_stores_action_items_for_task_questions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ai = FakeAI()
-            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            service = make_test_service(tmp, ai)
             await service.capture_text("Buy knife", telegram_message_id=1)
 
             actions = service.index.search_actions("what should I do?", limit=5)
@@ -170,7 +187,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_ask_includes_open_actions_for_task_questions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ai = FakeAI()
-            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            service = make_test_service(tmp, ai)
             await service.capture_text("Buy knife", telegram_message_id=1)
 
             await service.ask("what are the things I need to do?")
@@ -182,7 +199,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_ask_returns_not_found_without_ai_when_no_evidence_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ai = FakeAI()
-            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            service = make_test_service(tmp, ai)
 
             answer = await service.ask("what do I know about sailing?")
 
@@ -191,7 +208,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_digest_writes_daily_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = SecondBrainService(vault_dir=Path(tmp), ai=FakeAI())
+            service = make_test_service(tmp, FakeAI())
             await service.capture_text("Buy knife", telegram_message_id=1, created_at="2026-05-13T09:00:00Z")
 
             digest = await service.build_daily_digest(now_iso="2026-05-13T13:00:00Z")
@@ -201,7 +218,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_vault_health_reports_weak_and_orphan_notes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = SecondBrainService(vault_dir=Path(tmp), ai=FakeAI())
+            service = make_test_service(tmp, FakeAI())
             service.index.upsert_note(
                 NoteRecord(
                     note_id="bad-note",
@@ -229,7 +246,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_consolidate_writes_new_review_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ai = FakeAI()
-            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            service = make_test_service(tmp, ai)
             await service.capture_text("Buy knife", telegram_message_id=1, created_at="2026-05-13T09:00:00Z")
 
             text = await service.consolidate("week", now_iso="2026-05-13T13:00:00Z")
@@ -242,7 +259,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_learn_creates_linked_learning_note_from_note_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ai = FakeAI()
-            service = SecondBrainService(vault_dir=Path(tmp), ai=ai)
+            service = make_test_service(tmp, ai)
             source = await service.capture_text(
                 "Representativeness heuristic",
                 telegram_message_id=1,
@@ -265,7 +282,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_list_notes_returns_recent_notes_without_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            service = SecondBrainService(vault_dir=Path(tmp), ai=FakeAI())
+            service = make_test_service(tmp, FakeAI())
             await service.capture_text("Buy knife", telegram_message_id=1)
 
             notes = service.list_notes(limit=10)

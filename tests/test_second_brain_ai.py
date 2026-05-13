@@ -1,6 +1,9 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 
+from helpers.analytics_events import AnalyticsSink
 from second_brain_bot.ai import (
     AIEnrichment,
     AIOrchestrator,
@@ -44,6 +47,17 @@ class PlainTextOnlyProvider(FakeProvider):
 
 
 class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.analytics_sink = AnalyticsSink(
+            Path(self._tmp.name) / "analytics",
+            now_func=lambda: "2026-05-13T00:00:00Z",
+        )
+
+    def _ai(self, *, providers, **kwargs) -> AIOrchestrator:
+        return AIOrchestrator(providers=providers, analytics_sink=self.analytics_sink, **kwargs)
+
     async def test_heavy_tasks_prefer_gemini_when_available(self) -> None:
         gemini = FakeProvider(
             "gemini",
@@ -53,7 +67,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             "modal_glm",
             result=ProviderResult(provider="modal_glm", model="glm", payload={"answer": "from glm"}),
         )
-        ai = AIOrchestrator(providers={"gemini": gemini, "modal_glm": modal})
+        ai = self._ai(providers={"gemini": gemini, "modal_glm": modal})
 
         result = await ai.ask("What should I buy?", context="Buy knife", heavy=True)
 
@@ -70,7 +84,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             "groq",
             result=ProviderResult(provider="groq", model="qwen", payload={"answer": "from groq"}),
         )
-        ai = AIOrchestrator(providers={"modal_glm": modal, "groq": groq})
+        ai = self._ai(providers={"modal_glm": modal, "groq": groq})
 
         result = await ai.ask("What should I buy?", context="Buy knife", heavy=True)
 
@@ -87,7 +101,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             "cerebras",
             result=ProviderResult(provider="cerebras", model="qwen", payload={"title": "Cerebras note"}),
         )
-        ai = AIOrchestrator(providers={"gemini": gemini, "cerebras": cerebras})
+        ai = self._ai(providers={"gemini": gemini, "cerebras": cerebras})
 
         enrichment = await ai.enrich_capture("I want COPX stocks")
 
@@ -117,7 +131,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             body="Copper miners ETF",
             status="Incubating",
         )
-        ai = AIOrchestrator(providers={"gemini": gemini, "modal_glm": modal})
+        ai = self._ai(providers={"gemini": gemini, "modal_glm": modal})
 
         relations = await ai.suggest_relations("I want COPX stocks", [candidate])
 
@@ -143,7 +157,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
         )
-        ai = AIOrchestrator(providers={"cerebras": cerebras, "modal_glm": modal})
+        ai = self._ai(providers={"cerebras": cerebras, "modal_glm": modal})
 
         enrichment = await ai.enrich_capture("A great knife brand", preferred_provider="cerebras")
 
@@ -157,7 +171,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             "modal_glm",
             result=ProviderResult(provider="modal_glm", model="glm", payload={"answer": "fallback answer"}),
         )
-        ai = AIOrchestrator(
+        ai = self._ai(
             providers={"gemini": failing, "modal_glm": fallback},
             provider_cooldown_after=1,
             provider_cooldown_sec=300,
@@ -172,7 +186,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fallback.calls), 2)
 
     async def test_non_ai_fallback_preserves_text_when_all_providers_fail(self) -> None:
-        ai = AIOrchestrator(providers={"modal_glm": FakeProvider("modal_glm", error=RuntimeError("down"))})
+        ai = self._ai(providers={"modal_glm": FakeProvider("modal_glm", error=RuntimeError("down"))})
 
         enrichment = await ai.enrich_capture("Remember to buy a knife")
 
@@ -186,7 +200,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             "modal_glm",
             result=ProviderResult(provider="modal_glm", model="glm", payload={"title": "Photo note"}),
         )
-        ai = AIOrchestrator(providers={"modal_glm": modal})
+        ai = self._ai(providers={"modal_glm": modal})
 
         await ai.enrich_capture("caption only", image_bytes=b"private-image-bytes")
 
@@ -198,7 +212,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             "modal_glm",
             result=ProviderResult(provider="modal_glm", model="glm", payload={"title": "COPX stock"}),
         )
-        ai = AIOrchestrator(providers={"modal_glm": modal})
+        ai = self._ai(providers={"modal_glm": modal})
 
         await ai.enrich_capture("I want COPX stocks", preferred_provider="modal_glm")
 
@@ -232,7 +246,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
         )
-        ai = AIOrchestrator(providers={"modal_glm": modal})
+        ai = self._ai(providers={"modal_glm": modal})
 
         enrichment = await ai.enrich_capture("I care too much about opinions", preferred_provider="modal_glm")
 
@@ -241,7 +255,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enrichment.scored_suggestions[0]["score"], 95)
 
     async def test_local_enrichment_formats_inline_steps_without_adding_knowledge(self) -> None:
-        ai = AIOrchestrator(providers={})
+        ai = self._ai(providers={})
 
         enrichment = await ai.enrich_capture("Steps: 1) Open account 2) Compare fees 3) Save notes")
 
@@ -260,7 +274,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
         )
-        ai = AIOrchestrator(providers={"modal_glm": modal})
+        ai = self._ai(providers={"modal_glm": modal})
 
         result = await ai.ask("what do I need to do?", context="Buy knife", heavy=True)
 
@@ -274,7 +288,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             "gemini",
             result=ProviderResult(provider="gemini", model="gemini", payload={}, text="Answer"),
         )
-        ai = AIOrchestrator(providers={"gemini": gemini})
+        ai = self._ai(providers={"gemini": gemini})
 
         await ai.ask("What should I do?", context="Title: Buy knife\nPath: note.md\nExcerpt: Buy knife")
 
@@ -290,7 +304,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             "gemini",
             result=ProviderResult(provider="gemini", model="gemini", payload={}, text="Answer"),
         )
-        ai = AIOrchestrator(providers={"gemini": gemini})
+        ai = self._ai(providers={"gemini": gemini})
 
         await ai.ask("What is in my vault?", context="Title: Test\nPath: test.md\nExcerpt: saved fact")
 
@@ -320,7 +334,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 text="🧠 У vault є нотатка про репрезентативну евристику.",
             ),
         )
-        ai = AIOrchestrator(providers={"gemini": gemini})
+        ai = self._ai(providers={"gemini": gemini})
 
         result = await ai.ask("Що в мене є про Репрезентативна евристика?", context="Title: Репрезентативна евристика")
 
@@ -328,7 +342,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("репрезентативну евристику", result.text.lower())
 
     async def test_ask_local_fallback_does_not_dump_raw_markdown(self) -> None:
-        ai = AIOrchestrator(providers={"modal_glm": FakeProvider("modal_glm", error=RuntimeError("down"))})
+        ai = self._ai(providers={"modal_glm": FakeProvider("modal_glm", error=RuntimeError("down"))})
         context = (
             "Title: Money strategy\n"
             "Path: 00_Inbox/money.md\n"
@@ -346,7 +360,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Extra context " * 20, result.text)
 
     async def test_ask_local_fallback_prefers_executive_summary(self) -> None:
-        ai = AIOrchestrator(providers={"gemini": FakeProvider("gemini", error=RuntimeError("down"))})
+        ai = self._ai(providers={"gemini": FakeProvider("gemini", error=RuntimeError("down"))})
         context = (
             "Title: Репрезентативна евристика\n"
             "Path: 3-Resources/Psychology/Репрезентативна евристика.md\n"
