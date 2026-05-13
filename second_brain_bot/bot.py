@@ -22,6 +22,7 @@ from second_brain_bot.config import SecondBrainConfig, load_config
 from second_brain_bot.service import SecondBrainService
 
 LOGGER = logging.getLogger(__name__)
+THINKING_MESSAGE = "🧠Thinking🧠"
 
 
 class SecondBrainTelegramBot:
@@ -99,6 +100,7 @@ class SecondBrainTelegramBot:
         if not await self._allowed(update) or not update.effective_message:
             return
         message = update.effective_message
+        thinking = await message.reply_text(THINKING_MESSAGE)
         try:
             if message.photo:
                 photo = message.photo[-1]
@@ -113,11 +115,11 @@ class SecondBrainTelegramBot:
             else:
                 note = await self.service.capture_text(message.text or "", telegram_message_id=message.message_id)
             self.service_health.record_success("capture", note=f"id={note.note_id}")
-            await message.reply_text(f"Captured: {note.title}\nID: {note.note_id}")
+            await _edit_or_reply(thinking, f"Captured: {note.title}\nID: {note.note_id}")
         except Exception as exc:
             self.service_health.record_failure("capture", exc)
             LOGGER.exception("Second Brain capture failed")
-            await message.reply_text("Capture failed. Check service logs.")
+            await _edit_or_reply(thinking, "Capture failed. Check service logs.")
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
@@ -180,21 +182,39 @@ class SecondBrainTelegramBot:
         if not question:
             await update.effective_message.reply_text("Usage: /brain_ask <question>")
             return
-        answer = await self.service.ask(question)
-        await update.effective_message.reply_text(answer[:3900])
+        thinking = await update.effective_message.reply_text(THINKING_MESSAGE)
+        try:
+            answer = await self.service.ask(question)
+            await _edit_or_reply(thinking, answer)
+        except Exception as exc:
+            self.service_health.record_failure("brain_ask", exc)
+            LOGGER.exception("Second Brain ask failed")
+            await _edit_or_reply(thinking, "I could not answer that. Check service logs.")
 
     async def distill_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
             return
         selector = _arg_text(context.args) or "today"
-        text = await self.service.distill(selector)
-        await update.effective_message.reply_text(text[:3900])
+        thinking = await update.effective_message.reply_text(THINKING_MESSAGE)
+        try:
+            text = await self.service.distill(selector)
+            await _edit_or_reply(thinking, text)
+        except Exception as exc:
+            self.service_health.record_failure("brain_distill", exc)
+            LOGGER.exception("Second Brain distill failed")
+            await _edit_or_reply(thinking, "Distill failed. Check service logs.")
 
     async def digest_now_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
             return
-        digest = await self.service.build_daily_digest()
-        await update.effective_message.reply_text(digest[:3900])
+        thinking = await update.effective_message.reply_text(THINKING_MESSAGE)
+        try:
+            digest = await self.service.build_daily_digest()
+            await _edit_or_reply(thinking, digest)
+        except Exception as exc:
+            self.service_health.record_failure("brain_digest_now", exc)
+            LOGGER.exception("Second Brain digest failed")
+            await _edit_or_reply(thinking, "Digest failed. Check service logs.")
 
     async def ai_retry_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
@@ -203,9 +223,17 @@ class SecondBrainTelegramBot:
         if not note_id:
             await update.effective_message.reply_text("Usage: /brain_ai_retry <id>")
             return
-        metadata, body, _ = self.service.vault.read_note(note_id)
-        note = await self.service.capture_text(body, capture_type=str(metadata.get("capture_type") or "text"))
-        await update.effective_message.reply_text(f"Created enriched retry note: {note.note_id}")
+        thinking = await update.effective_message.reply_text(THINKING_MESSAGE)
+        try:
+            metadata, body, _ = self.service.vault.read_note(note_id)
+            note = await self.service.capture_text(body, capture_type=str(metadata.get("capture_type") or "text"))
+            await _edit_or_reply(thinking, f"Created enriched retry note: {note.note_id}")
+        except KeyError:
+            await _edit_or_reply(thinking, "Note not found.")
+        except Exception as exc:
+            self.service_health.record_failure("brain_ai_retry", exc)
+            LOGGER.exception("Second Brain AI retry failed")
+            await _edit_or_reply(thinking, "AI retry failed. Check service logs.")
 
     async def web_enrich_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._allowed(update):
@@ -214,13 +242,21 @@ class SecondBrainTelegramBot:
         if not note_id:
             await update.effective_message.reply_text("Usage: /brain_web_enrich <id>")
             return
-        metadata, body, _ = self.service.vault.read_note(note_id)
-        note = await self.service.capture_text(
-            body,
-            capture_type=str(metadata.get("capture_type") or "text"),
-            allow_web=True,
-        )
-        await update.effective_message.reply_text(f"Created web-enriched note: {note.note_id}")
+        thinking = await update.effective_message.reply_text(THINKING_MESSAGE)
+        try:
+            metadata, body, _ = self.service.vault.read_note(note_id)
+            note = await self.service.capture_text(
+                body,
+                capture_type=str(metadata.get("capture_type") or "text"),
+                allow_web=True,
+            )
+            await _edit_or_reply(thinking, f"Created web-enriched note: {note.note_id}")
+        except KeyError:
+            await _edit_or_reply(thinking, "Note not found.")
+        except Exception as exc:
+            self.service_health.record_failure("brain_web_enrich", exc)
+            LOGGER.exception("Second Brain web enrich failed")
+            await _edit_or_reply(thinking, "Web enrichment failed. Check service logs.")
 
     async def _note_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, action: str) -> None:
         if not await self._allowed(update):
@@ -342,6 +378,22 @@ def _first_int(args: list[str], *, default: int, min_value: int, max_value: int)
     except ValueError:
         return default
     return min(max(value, min_value), max_value)
+
+
+async def _edit_or_reply(message, text: str) -> None:
+    safe_text = _shorten_for_telegram(text)
+    try:
+        await message.edit_text(safe_text)
+    except Exception:
+        await message.reply_text(safe_text)
+
+
+def _shorten_for_telegram(text: str, *, limit: int = 3900) -> str:
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    marker = "\n\n..."
+    return text[: max(0, limit - len(marker))].rstrip() + marker
 
 
 if __name__ == "__main__":
