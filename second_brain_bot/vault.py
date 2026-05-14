@@ -824,6 +824,7 @@ def _moc_description(parent_moc: str) -> str:
 
 def _looks_like_todo_capture(text: str) -> bool:
     lowered = (text or "").lower()
+    opening = lowered[:240]
     # Keep todo routing marker-based so general wishlist captures do not leave
     # Incubator unless the user phrases them as an actual open loop.
     markers = (
@@ -845,7 +846,7 @@ def _looks_like_todo_capture(text: str) -> bool:
         "надо",
         "нужно",
     )
-    return any(marker in lowered for marker in markers)
+    return any(marker in opening for marker in markers)
 
 
 def _looks_like_purchase_task(text: str) -> bool:

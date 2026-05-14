@@ -812,6 +812,7 @@ def _local_related_links(text: str) -> list[str]:
 
 def _looks_like_todo_capture(text: str) -> bool:
     lowered = (text or "").lower()
+    opening = lowered[:240]
     # Task routing is intentionally marker-based so ordinary wishes like
     # "I want a scarf" stay in Incubator, while "need to/search/check" opens a todo.
     markers = (
@@ -833,7 +834,7 @@ def _looks_like_todo_capture(text: str) -> bool:
         "надо",
         "нужно",
     )
-    return any(marker in lowered for marker in markers)
+    return any(marker in opening for marker in markers)
 
 
 def _looks_like_purchase_task(text: str) -> bool:

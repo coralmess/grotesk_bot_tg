@@ -444,6 +444,50 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertTrue(note_path.exists())
             self.assertFalse((root / "5-Todo List" / "Tasks" / "Amazon FBA and Wyoming LLC - Business Idea.md").exists())
 
+    def test_migration_does_not_move_long_reference_note_with_late_task_words(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note_dir = root / "4-Incubator" / "Business Ideas"
+            note_dir.mkdir(parents=True)
+            note_path = note_dir / "EU Border Land Purchase for Logistics Hub.md"
+            long_intro = "Another potential earning money strategy " + ("market context " * 30)
+            note_path.write_text(
+                "---\n"
+                "aliases: []\n"
+                "tags:\n"
+                "  - \"#business\"\n"
+                "type: Idea\n"
+                "status: Incubating\n"
+                "date_created: 2026-05-13\n"
+                "---\n"
+                "# EU Border Land Purchase for Logistics Hub\n\n"
+                "Parent: [[Business Ideas MOC]]\n\n"
+                "## Source Capture\n"
+                f"{long_intro} Later analysis says потрібно compare regions, but this is not a direct todo capture.\n",
+                encoding="utf-8",
+            )
+            (root / ".second_brain_state.json").write_text(
+                json.dumps(
+                    {
+                        "notes": {
+                            "land-note": {
+                                "path": "4-Incubator/Business Ideas/EU Border Land Purchase for Logistics Hub.md",
+                                "title": "EU Border Land Purchase for Logistics Hub",
+                                "status": "Incubating",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            vault = SecondBrainVault(root)
+
+            migrated = vault.migrate_legacy_vault()
+
+            self.assertEqual(migrated, 0)
+            self.assertTrue(note_path.exists())
+            self.assertFalse((root / "5-Todo List" / "Tasks" / "EU Border Land Purchase for Logistics Hub.md").exists())
+
     def test_migration_does_not_rename_already_correct_dotted_title(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
