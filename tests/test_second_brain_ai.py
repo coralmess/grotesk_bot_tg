@@ -134,6 +134,26 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(flash_lite.calls), 1)
         self.assertEqual(len(cerebras.calls), 0)
 
+    async def test_enrichment_uses_gemma_after_flash_lite_fails(self) -> None:
+        flash_lite = FakeProvider("gemini_flash_lite", error=RuntimeError("overloaded"))
+        gemma = FakeProvider(
+            "gemma_31b",
+            result=ProviderResult(provider="gemma_31b", model="gemma-4-31b-it", payload={"title": "Gemma note"}),
+        )
+        cerebras = FakeProvider(
+            "cerebras",
+            result=ProviderResult(provider="cerebras", model="qwen", payload={"title": "Cerebras note"}),
+        )
+        ai = self._ai(providers={"gemini_flash_lite": flash_lite, "gemma_31b": gemma, "cerebras": cerebras})
+
+        enrichment = await ai.enrich_capture("log this note")
+
+        self.assertEqual(enrichment.provider, "gemma_31b")
+        self.assertEqual(enrichment.title, "Gemma note")
+        self.assertEqual(len(flash_lite.calls), 3)
+        self.assertEqual(len(gemma.calls), 1)
+        self.assertEqual(len(cerebras.calls), 0)
+
     async def test_relation_judging_prefers_gemini_flash_lite_when_available(self) -> None:
         flash_lite = FakeProvider(
             "gemini_flash_lite",
@@ -167,6 +187,28 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(relations[0].note_id, "n1")
         self.assertEqual(len(flash_lite.calls), 1)
         self.assertEqual(len(gemini.calls), 0)
+        self.assertEqual(len(modal.calls), 0)
+
+    async def test_learning_tries_gemma_after_gemini_and_flash_lite(self) -> None:
+        gemini = FakeProvider("gemini", error=RuntimeError("flash down"))
+        flash_lite = FakeProvider("gemini_flash_lite", error=RuntimeError("lite down"))
+        gemma = FakeProvider(
+            "gemma_31b",
+            result=ProviderResult(provider="gemma_31b", model="gemma-4-31b-it", payload={}, text="Gemma lesson"),
+        )
+        modal = FakeProvider(
+            "modal_glm",
+            result=ProviderResult(provider="modal_glm", model="glm", payload={}, text="Modal lesson"),
+        )
+        ai = self._ai(providers={"gemini": gemini, "gemini_flash_lite": flash_lite, "gemma_31b": gemma, "modal_glm": modal})
+
+        result = await ai.ask("teach me", context="Saved note", task="learn")
+
+        self.assertEqual(result.provider, "gemma_31b")
+        self.assertEqual(result.text, "Gemma lesson")
+        self.assertEqual(len(gemini.calls), 3)
+        self.assertEqual(len(flash_lite.calls), 3)
+        self.assertEqual(len(gemma.calls), 1)
         self.assertEqual(len(modal.calls), 0)
 
     async def test_combined_enrichment_and_relations_uses_one_provider_request(self) -> None:

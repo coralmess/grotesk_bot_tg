@@ -384,6 +384,17 @@ def build_ai_orchestrator(config: SecondBrainConfig, *, analytics_sink: Analytic
             analytics_sink=sink,
             reasoning_effort="high",
         )
+    gemma_31b_api_key = config.gemma_31b_api_key or config.gemini_api_key
+    if gemma_31b_api_key:
+        # Gemma is a Google-hosted fallback for richer note logging when the
+        # high-quota Flash Lite route is overloaded or unavailable.
+        providers["gemma_31b"] = OpenAICompatibleProvider(
+            name="gemma_31b",
+            api_key=gemma_31b_api_key,
+            base_url=config.gemma_31b_base_url,
+            model=config.gemma_31b_model,
+            analytics_sink=sink,
+        )
     if config.modal_glm_api_key:
         providers["modal_glm"] = OpenAICompatibleProvider(
             name="modal_glm",
@@ -414,6 +425,7 @@ def build_ai_orchestrator(config: SecondBrainConfig, *, analytics_sink: Analytic
         provider_daily_limits={
             "gemini": config.gemini_daily_request_limit,
             "gemini_flash_lite": config.gemini_flash_lite_daily_request_limit,
+            "gemma_31b": config.gemma_31b_daily_request_limit,
         },
     )
 
@@ -698,6 +710,7 @@ def _display_provider_name(provider: str) -> str:
     mapping = {
         "gemini": "Gemini",
         "gemini_flash_lite": "Gemini Flash Lite",
+        "gemma_31b": "Gemma 4 31B",
         "modal_glm": "Modal GLM",
         "cerebras": "Cerebras",
         "groq": "Groq",

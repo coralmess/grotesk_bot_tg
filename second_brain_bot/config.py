@@ -22,6 +22,7 @@ class SecondBrainConfig:
     cerebras_api_key: str
     groq_api_key: str
     gemini_api_key: str = ""
+    gemma_31b_api_key: str = ""
     modal_glm_base_url: str = "https://api.us-west-2.modal.direct/v1"
     modal_glm_model: str = "zai-org/GLM-5.1-FP8"
     cerebras_base_url: str = "https://api.cerebras.ai/v1"
@@ -31,8 +32,11 @@ class SecondBrainConfig:
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     gemini_model: str = "gemini-3-flash-preview"
     gemini_flash_lite_model: str = "gemini-3.1-flash-lite"
+    gemma_31b_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    gemma_31b_model: str = "gemma-4-31b-it"
     gemini_daily_request_limit: int = 20
     gemini_flash_lite_daily_request_limit: int = 500
+    gemma_31b_daily_request_limit: int = 100
 
 
 def load_config() -> SecondBrainConfig:
@@ -57,6 +61,7 @@ def load_config() -> SecondBrainConfig:
         cerebras_api_key=os.getenv("CEREBRAS_API_KEY", "").strip(),
         groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
         gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
+        gemma_31b_api_key=os.getenv("GEMMA_31B_API_KEY", "").strip(),
         modal_glm_base_url=os.getenv("MODAL_GLM_BASE_URL", "https://api.us-west-2.modal.direct/v1").strip(),
         modal_glm_model=os.getenv("MODAL_GLM_MODEL", "zai-org/GLM-5.1-FP8").strip(),
         cerebras_base_url=os.getenv("CEREBRAS_BASE_URL", "https://api.cerebras.ai/v1").strip(),
@@ -68,10 +73,15 @@ def load_config() -> SecondBrainConfig:
         ).strip(),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview").strip(),
         gemini_flash_lite_model=os.getenv("GEMINI_FLASH_LITE_MODEL", "gemini-3.1-flash-lite").strip(),
+        gemma_31b_base_url=os.getenv(
+            "GEMMA_31B_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
+        ).strip(),
+        gemma_31b_model=os.getenv("GEMMA_31B_MODEL", "gemma-4-31b-it").strip(),
         gemini_daily_request_limit=_int_env("GEMINI_DAILY_REQUEST_LIMIT", 20, min_value=0, max_value=100000),
         gemini_flash_lite_daily_request_limit=_int_env(
             "GEMINI_FLASH_LITE_DAILY_REQUEST_LIMIT", 500, min_value=0, max_value=100000
         ),
+        gemma_31b_daily_request_limit=_int_env("GEMMA_31B_DAILY_REQUEST_LIMIT", 100, min_value=0, max_value=100000),
     )
 
 
