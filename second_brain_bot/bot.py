@@ -361,12 +361,19 @@ def build_ai_orchestrator(config: SecondBrainConfig, *, analytics_sink: Analytic
     providers = {}
     if config.gemini_api_key:
         # Gemini Flash is the preferred free-tier route for the personal brain:
-        # strong enough for synthesis while keeping Modal GLM as a slower fallback.
+        # strong enough for synthesis while Flash Lite absorbs overloads first.
         providers["gemini"] = OpenAICompatibleProvider(
             name="gemini",
             api_key=config.gemini_api_key,
             base_url=config.gemini_base_url,
             model=config.gemini_model,
+            analytics_sink=sink,
+        )
+        providers["gemini_flash_lite"] = OpenAICompatibleProvider(
+            name="gemini_flash_lite",
+            api_key=config.gemini_api_key,
+            base_url=config.gemini_base_url,
+            model=config.gemini_flash_lite_model,
             analytics_sink=sink,
         )
     if config.modal_glm_api_key:
@@ -654,6 +661,7 @@ def _display_para_folder(value: str) -> str:
 def _display_provider_name(provider: str) -> str:
     mapping = {
         "gemini": "Gemini",
+        "gemini_flash_lite": "Gemini Flash Lite",
         "modal_glm": "Modal GLM",
         "cerebras": "Cerebras",
         "groq": "Groq",

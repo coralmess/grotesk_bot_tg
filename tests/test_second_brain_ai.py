@@ -212,6 +212,30 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(gemini.calls), 3)
         self.assertEqual(len(modal.calls), 0)
 
+    async def test_gemini_flash_lite_is_first_fallback_when_gemini_fails(self) -> None:
+        gemini = FakeProvider("gemini", error=RuntimeError("model overloaded"))
+        flash_lite = FakeProvider(
+            "gemini_flash_lite",
+            result=ProviderResult(
+                provider="gemini_flash_lite",
+                model="gemini-3.1-flash-lite",
+                payload={"title": "Lite fallback note"},
+            ),
+        )
+        modal = FakeProvider(
+            "modal_glm",
+            result=ProviderResult(provider="modal_glm", model="glm", payload={"title": "Modal note"}),
+        )
+        ai = self._ai(providers={"gemini": gemini, "gemini_flash_lite": flash_lite, "modal_glm": modal})
+
+        enrichment = await ai.enrich_capture("fallback test")
+
+        self.assertEqual(enrichment.provider, "gemini_flash_lite")
+        self.assertEqual(enrichment.title, "Lite fallback note")
+        self.assertEqual(len(gemini.calls), 3)
+        self.assertEqual(len(flash_lite.calls), 1)
+        self.assertEqual(len(modal.calls), 0)
+
     async def test_falls_back_when_preferred_provider_fails(self) -> None:
         cerebras = FakeProvider("cerebras", error=RuntimeError("rate limited"))
         modal = FakeProvider(

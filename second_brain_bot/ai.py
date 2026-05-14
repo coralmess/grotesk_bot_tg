@@ -375,10 +375,10 @@ class AIOrchestrator:
         if preferred_provider:
             order.append(preferred_provider)
         elif task == "enrich":
-            order.extend(["gemini", "cerebras", "groq", "modal_glm"])
+            order.extend(["gemini", "gemini_flash_lite", "cerebras", "groq", "modal_glm"])
         elif task in {"ask", "relations"}:
-            order.extend(["gemini", "modal_glm", "cerebras", "groq"])
-        order.extend(["gemini", "modal_glm", "cerebras", "groq"])
+            order.extend(["gemini", "gemini_flash_lite", "modal_glm", "cerebras", "groq"])
+        order.extend(["gemini", "gemini_flash_lite", "modal_glm", "cerebras", "groq"])
         seen: set[str] = set()
         ordered = [name for name in order if not (name in seen or seen.add(name))]
         return [name for name in ordered if not self._provider_is_cooling_down(name)]
@@ -392,7 +392,7 @@ class AIOrchestrator:
         prompt: str,
         max_tokens: int,
     ) -> ProviderResult:
-        attempts = self.gemini_retry_attempts if name == "gemini" else 1
+        attempts = self.gemini_retry_attempts if name in {"gemini", "gemini_flash_lite"} else 1
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:
@@ -414,7 +414,7 @@ class AIOrchestrator:
         prompt: str,
         max_tokens: int,
     ) -> ProviderResult:
-        attempts = self.gemini_retry_attempts if name == "gemini" else 1
+        attempts = self.gemini_retry_attempts if name in {"gemini", "gemini_flash_lite"} else 1
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:

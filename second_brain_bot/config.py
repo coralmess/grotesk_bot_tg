@@ -30,6 +30,7 @@ class SecondBrainConfig:
     groq_model: str = "qwen/qwen3-32b"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     gemini_model: str = "gemini-3-flash-preview"
+    gemini_flash_lite_model: str = "gemini-3.1-flash-lite"
 
 
 def load_config() -> SecondBrainConfig:
@@ -64,6 +65,7 @@ def load_config() -> SecondBrainConfig:
             "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai"
         ).strip(),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview").strip(),
+        gemini_flash_lite_model=os.getenv("GEMINI_FLASH_LITE_MODEL", "gemini-3.1-flash-lite").strip(),
     )
 
 
