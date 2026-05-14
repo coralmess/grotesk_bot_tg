@@ -7,6 +7,7 @@ from helpers.analytics_events import AnalyticsSink
 from second_brain_bot.ai import (
     AIEnrichment,
     AIOrchestrator,
+    GroqCompoundProvider,
     InvalidAIJSONError,
     ModelProvider,
     OpenAICompatibleProvider,
@@ -244,6 +245,22 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(flash_lite.calls), 1)
         self.assertEqual(flash_lite.calls[0][0], "enrich")
         self.assertIn("Candidates", flash_lite.calls[0][1])
+
+    async def test_web_enrichment_marks_provider_task_as_web_enrich(self) -> None:
+        flash_lite = FakeProvider(
+            "gemini_flash_lite",
+            result=ProviderResult(
+                provider="gemini_flash_lite",
+                model="gemini-3.1-flash-lite",
+                payload={"title": "Verified public note"},
+            ),
+        )
+        ai = self._ai(providers={"gemini_flash_lite": flash_lite})
+
+        enrichment = await ai.enrich_capture("verify current Gemini rate limits", allow_web=True)
+
+        self.assertEqual(enrichment.title, "Verified public note")
+        self.assertEqual(flash_lite.calls[0][0], "web_enrich")
 
     async def test_gemini_json_tasks_retry_before_fallback(self) -> None:
         gemini = SequencedProvider(
@@ -560,6 +577,41 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("response_format", payload)
         self.assertEqual(payload["temperature"], 0)
+
+    async def test_groq_compound_payload_uses_compound_completion_shape(self) -> None:
+        provider = GroqCompoundProvider(
+            api_key="key",
+            base_url="https://api.groq.com/openai/v1",
+            model="groq/compound",
+        )
+
+        payload = provider._chat_payload(task="ask", prompt="question", max_tokens=1024, json_mode=False)
+
+        self.assertEqual(payload["model"], "groq/compound")
+        self.assertEqual(payload["temperature"], 1)
+        self.assertEqual(payload["top_p"], 1)
+        self.assertEqual(payload["max_completion_tokens"], 1024)
+        self.assertIsNone(payload["stop"])
+        self.assertNotIn("max_tokens", payload)
+        self.assertNotIn("stream", payload)
+        self.assertNotIn("compound_custom", payload)
+
+    async def test_groq_compound_tools_are_only_enabled_for_explicit_web_enrichment(self) -> None:
+        provider = GroqCompoundProvider(
+            api_key="key",
+            base_url="https://api.groq.com/openai/v1",
+            model="groq/compound",
+        )
+
+        normal_payload = provider._chat_payload(task="enrich", prompt="capture", max_tokens=800, json_mode=True)
+        web_payload = provider._chat_payload(task="web_enrich", prompt="capture", max_tokens=800, json_mode=True)
+
+        self.assertNotIn("compound_custom", normal_payload)
+        self.assertEqual(
+            web_payload["compound_custom"],
+            {"tools": {"enabled_tools": ["web_search", "code_interpreter", "visit_website"]}},
+        )
+        self.assertEqual(web_payload["temperature"], 0)
 
     async def test_json_parser_repairs_common_model_json_mistakes(self) -> None:
         payload = _parse_json_object("{title: \"Gemini note\", \"suggested_tags\": [\"#ai\",],}")

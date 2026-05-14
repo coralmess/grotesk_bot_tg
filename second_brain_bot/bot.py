@@ -19,7 +19,7 @@ if str(ROOT_DIR) not in sys.path:
 from helpers.analytics_events import AnalyticsSink
 from helpers.logging_utils import configure_third_party_loggers, install_secret_redaction
 from helpers.service_health import build_service_health
-from second_brain_bot.ai import AIOrchestrator, OpenAICompatibleProvider, clean_note_excerpt
+from second_brain_bot.ai import AIOrchestrator, GroqCompoundProvider, OpenAICompatibleProvider, clean_note_excerpt
 from second_brain_bot.config import SecondBrainConfig, load_config
 from second_brain_bot.service import SecondBrainService
 from second_brain_bot.youtube import first_youtube_url
@@ -412,8 +412,7 @@ def build_ai_orchestrator(config: SecondBrainConfig, *, analytics_sink: Analytic
             analytics_sink=sink,
         )
     if config.groq_api_key:
-        providers["groq"] = OpenAICompatibleProvider(
-            name="groq",
+        providers["groq"] = GroqCompoundProvider(
             api_key=config.groq_api_key,
             base_url=config.groq_base_url,
             model=config.groq_model,

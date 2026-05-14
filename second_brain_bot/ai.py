@@ -61,6 +61,11 @@ TASK_SYSTEM_INSTRUCTIONS = {
         + "\n\nTask: cataloging captured notes. Preserve the raw capture, add only useful high-confidence enrichment, "
         "avoid noisy guesses, and return structured metadata for the vault."
     ),
+    "web_enrich": (
+        SECOND_BRAIN_SYSTEM_INSTRUCTIONS
+        + "\n\nTask: cataloging captured notes with explicitly allowed public web enrichment. Use only public pages, "
+        "avoid private/account/API endpoints, preserve the raw capture, label current facts carefully, and return structured metadata for the vault."
+    ),
     "relations": (
         SECOND_BRAIN_SYSTEM_INSTRUCTIONS
         + "\n\nTask: judging relationships between notes. Link only genuinely related notes and prefer precise reasons over broad topic overlap."
@@ -261,6 +266,32 @@ class OpenAICompatibleProvider:
             return
 
 
+class GroqCompoundProvider(OpenAICompatibleProvider):
+    def __init__(self, *, api_key: str, base_url: str, model: str, analytics_sink: AnalyticsSink | None = None) -> None:
+        super().__init__(
+            name="groq",
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            analytics_sink=analytics_sink,
+        )
+
+    def _chat_payload(self, *, task: str, prompt: str, max_tokens: int, json_mode: bool = False) -> dict[str, Any]:
+        payload = super()._chat_payload(task=task, prompt=prompt, max_tokens=max_tokens, json_mode=json_mode)
+        payload["max_completion_tokens"] = payload.pop("max_tokens")
+        payload["top_p"] = 1
+        payload["stop"] = None
+        if not json_mode:
+            payload["temperature"] = 1
+        if task == "web_enrich":
+            # Compound's external tools are reserved for user-approved web
+            # enrichment so ordinary note logging stays model-knowledge only.
+            payload["compound_custom"] = {
+                "tools": {"enabled_tools": ["web_search", "code_interpreter", "visit_website"]}
+            }
+        return payload
+
+
 class AIOrchestrator:
     def __init__(
         self,
@@ -296,13 +327,14 @@ class AIOrchestrator:
     ) -> AIEnrichment:
         del image_bytes  # Hosted v1 enrichment intentionally receives text/caption only.
         prompt = _enrichment_prompt(text, allow_web=allow_web)
-        for name in self._route(preferred_provider=preferred_provider, task="enrich"):
+        task = "web_enrich" if allow_web else "enrich"
+        for name in self._route(preferred_provider=preferred_provider, task=task):
             provider = self.providers.get(name)
             if provider is None:
                 continue
             try:
                 async with self._provider_lock:
-                    result = await self._complete_json_with_retries(name, provider, task="enrich", prompt=prompt, max_tokens=900)
+                    result = await self._complete_json_with_retries(name, provider, task=task, prompt=prompt, max_tokens=900)
                 self._record_provider_success(name)
                 return _enrichment_from_payload(result.payload, provider=result.provider, fallback_text=text)
             except Exception:
@@ -322,7 +354,8 @@ class AIOrchestrator:
     ) -> tuple[AIEnrichment, list[RelatedNoteSuggestion]]:
         del image_bytes  # Hosted v1 enrichment intentionally receives text/caption only.
         prompt = _enrichment_with_relations_prompt(text, candidates, allow_web=allow_web)
-        for name in self._route(preferred_provider=preferred_provider, task="enrich"):
+        task = "web_enrich" if allow_web else "enrich"
+        for name in self._route(preferred_provider=preferred_provider, task=task):
             provider = self.providers.get(name)
             if provider is None:
                 continue
@@ -331,7 +364,7 @@ class AIOrchestrator:
                     result = await self._complete_json_with_retries(
                         name,
                         provider,
-                        task="enrich",
+                        task=task,
                         prompt=prompt,
                         max_tokens=1200,
                     )
@@ -436,7 +469,7 @@ class AIOrchestrator:
         order: list[str] = []
         if preferred_provider:
             order.append(preferred_provider)
-        elif task == "enrich":
+        elif task in {"enrich", "web_enrich"}:
             if "gemini_flash_lite" in self.providers:
                 order.extend(["gemini_flash_lite", "gemma_31b", "cerebras", "groq", "modal_glm"])
             else:
