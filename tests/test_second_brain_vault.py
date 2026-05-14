@@ -135,6 +135,7 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertIn("type: Plan", text)
             self.assertIn("status: Active", text)
             self.assertIn("Parent: [[Purchase Tasks MOC]]", text)
+            self.assertIn("### Action Items", text)
             self.assertIn("### Estimated Completion Time", text)
             self.assertIn("20-30 minutes", text)
             moc = Path(tmp) / "5-Todo List" / "Purchase Tasks" / "Purchase Tasks MOC.md"
@@ -396,6 +397,9 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertIn("type: Plan", text)
             self.assertIn("status: Active", text)
             self.assertIn("Parent: [[Purchase Tasks MOC]]", text)
+            self.assertIn("### Action Items", text)
+            self.assertIn("### Estimated Completion Time", text)
+            self.assertIn("20-40 minutes", text)
 
     def test_migration_does_not_rename_already_correct_dotted_title(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

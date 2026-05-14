@@ -877,6 +877,7 @@ def _legacy_enrichment_from_text(title: str, body: str) -> AIEnrichment:
     catalog_title = _descriptive_title_from_text(text, fallback=title)
     category = _moc_category_from_text(text)
     note_type = _infer_note_type(text)
+    is_todo = _looks_like_todo_capture(text)
     return AIEnrichment(
         title=catalog_title,
         summary=re.sub(r"\s+", " ", text).strip()[:320],
@@ -889,7 +890,25 @@ def _legacy_enrichment_from_text(title: str, body: str) -> AIEnrichment:
         parent_moc=f"{category} MOC",
         moc_category=category,
         moc_description=_moc_description(f"{category} MOC"),
+        action_items=[_todo_action_from_text(text)] if is_todo else [],
+        estimated_completion_time=_estimate_completion_time(text) if is_todo else "",
     )
+
+
+def _todo_action_from_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    return cleaned[:180] or "Review and complete this task"
+
+
+def _estimate_completion_time(text: str) -> str:
+    lowered = (text or "").lower()
+    if any(term in lowered for term in ("compare", "research", "дослід", "порівня")):
+        return "30-60 minutes"
+    if any(term in lowered for term in ("look for", "search", "find", "пошукати", "знайти")):
+        return "20-40 minutes"
+    if any(term in lowered for term in ("buy", "purchase", "купити")):
+        return "15-30 minutes after the choice is clear"
+    return "15-30 minutes"
 
 
 def _clean_legacy_body(body: str) -> str:
