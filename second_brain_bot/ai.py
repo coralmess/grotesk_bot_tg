@@ -5,7 +5,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 import aiohttp
@@ -94,6 +94,7 @@ class AIEnrichment:
     questions: list[str] = field(default_factory=list)
     enrichment_notes: list[str] = field(default_factory=list)
     scored_suggestions: list[dict[str, Any]] = field(default_factory=list)
+    estimated_completion_time: str = ""
     provider: str = "local_fallback"
     verification_pending: bool = False
 
@@ -454,6 +455,7 @@ class AIOrchestrator:
 def local_enrichment(text: str) -> AIEnrichment:
     title = _first_line(text)
     keywords = _keywords(text)
+    is_todo = _looks_like_todo_capture(text)
     return AIEnrichment(
         title=title,
         summary=text.strip()[:280],
@@ -468,8 +470,9 @@ def local_enrichment(text: str) -> AIEnrichment:
         moc_category=_local_moc_category(text),
         moc_description=_local_moc_description(text),
         related_links=_local_related_links(text),
-        action_items=[],
+        action_items=[_todo_action_from_text(text)] if is_todo else [],
         questions=[],
+        estimated_completion_time=_estimate_completion_time(text) if is_todo else "",
         provider="local_fallback",
     )
 
@@ -508,11 +511,13 @@ def _enrichment_prompt(text: str, *, allow_web: bool) -> str:
         "- Do not add noisy guesses. If the user says they want to buy a scarf, do not guess a brand or material unless provided.\n"
         "- If the user gives a recognizable ticker, acronym, company, product, method, book, person, or concept, add a compact definition.\n"
         "- If the capture is a goal/problem, suggest a few effective approaches and give each a score from 1 to 100.\n"
+        "- If the capture is a clear task/todo/open loop (for example: need to, should, remember to, треба, потрібно, пошукати), "
+        "use 5-Todo List as suggested_folder, use note_type Plan, status Active, add one concrete action_item, and add estimated_completion_time.\n"
         "- Scores mean practical usefulness/confidence for this capture, not scientific certainty.\n"
         "- For health or mental wellbeing topics, keep it educational, do not diagnose, and prefer evidence-informed methods.\n"
         "- Keep enrichment small: usually 2-6 bullets.\n\n"
         "Vault catalog rules:\n"
-        "- Choose one PARA root: 1-Projects, 2-Areas, 3-Resources, or 4-Incubator.\n"
+        "- Choose one vault root: 1-Projects, 2-Areas, 3-Resources, 4-Incubator, or 5-Todo List.\n"
         "- Create a descriptive searchable title, never a generic title like Another idea or Note.\n"
         "- Choose a parent MOC name like Investments MOC, Purchases MOC, Plans to Do MOC, Recipes MOC, or Software Knowledge MOC.\n"
         "- Choose a short moc_category folder name matching the MOC topic, such as Investments or Purchases.\n"
@@ -525,8 +530,8 @@ def _enrichment_prompt(text: str, *, allow_web: bool) -> str:
         "- related_links must be useful existing or likely MOC/concept note titles without brackets.\n\n"
         "Return JSON with keys: title, summary, polished_text, suggested_folder, suggested_tags, entities, aliases, "
         "note_type, note_status, parent_moc, moc_category, moc_description, related_links, action_items, questions, "
-        "enrichment_notes, scored_suggestions. scored_suggestions must be a list of objects with title, score, reason. "
-        "suggested_folder must be one of 1-Projects, 2-Areas, 3-Resources, 4-Incubator. "
+        "enrichment_notes, scored_suggestions, estimated_completion_time. scored_suggestions must be a list of objects with title, score, reason. "
+        "suggested_folder must be one of 1-Projects, 2-Areas, 3-Resources, 4-Incubator, 5-Todo List. "
         f"Public web lookup allowed by policy: {allow_web}.\n\nCapture:\n{text[:8000]}"
     )
 
@@ -591,7 +596,7 @@ def _parse_json_object(content: str) -> dict[str, Any]:
 
 
 def _enrichment_from_payload(payload: dict[str, Any], *, provider: str, fallback_text: str) -> AIEnrichment:
-    return AIEnrichment(
+    enrichment = AIEnrichment(
         title=str(payload.get("title") or _first_line(fallback_text)),
         summary=str(payload.get("summary") or fallback_text[:280]),
         polished_text=str(
@@ -614,9 +619,29 @@ def _enrichment_from_payload(payload: dict[str, Any], *, provider: str, fallback
         questions=_string_list(payload.get("questions")),
         enrichment_notes=_string_list(payload.get("enrichment_notes") or payload.get("useful_context")),
         scored_suggestions=_scored_suggestions(payload.get("scored_suggestions") or payload.get("suggestions")),
+        estimated_completion_time=str(payload.get("estimated_completion_time") or "").strip(),
         provider=provider,
         verification_pending=bool(payload.get("verification_pending", False)),
     )
+    if _looks_like_todo_capture(fallback_text):
+        # Provider output sometimes treats tasks as passive wishlist notes;
+        # normalize clear open loops before vault routing and action indexing.
+        enrichment = replace(
+            enrichment,
+            suggested_folder="5-Todo List",
+            note_type="Plan",
+            note_status="Active",
+            parent_moc="Purchase Tasks MOC" if _looks_like_purchase_task(fallback_text) else "Todo List MOC",
+            moc_category="Purchase Tasks" if _looks_like_purchase_task(fallback_text) else "Tasks",
+            moc_description=(
+                "Tracks concrete purchase-related tasks, research, comparisons, and buying follow-ups."
+                if _looks_like_purchase_task(fallback_text)
+                else "Tracks concrete open loops, reminders, and tasks that need action."
+            ),
+            action_items=enrichment.action_items or [_todo_action_from_text(fallback_text)],
+            estimated_completion_time=enrichment.estimated_completion_time or _estimate_completion_time(fallback_text),
+        )
+    return enrichment
 
 
 def _relations_from_payload(payload: dict[str, Any], candidates: list[SearchResult]) -> list[RelatedNoteSuggestion]:
@@ -697,6 +722,8 @@ def _keywords(text: str) -> list[str]:
 
 def _local_para_folder(text: str) -> str:
     lowered = (text or "").lower()
+    if _looks_like_todo_capture(text):
+        return "5-Todo List"
     if any(word in lowered for word in ("buy", "wishlist", "purchase", "idea", "someday", "maybe", "strategy")):
         return "4-Incubator"
     if any(word in lowered for word in ("project", "deadline", "plan to", "need to")):
@@ -708,6 +735,8 @@ def _local_para_folder(text: str) -> str:
 
 def _local_note_type(text: str) -> str:
     lowered = (text or "").lower()
+    if _looks_like_todo_capture(text):
+        return "Plan"
     if any(word in lowered for word in ("buy", "purchase", "wishlist")):
         return "Purchase"
     if any(word in lowered for word in ("plan", "need to", "todo", "to do")):
@@ -718,6 +747,8 @@ def _local_note_type(text: str) -> str:
 
 
 def _local_note_status(text: str) -> str:
+    if _looks_like_todo_capture(text):
+        return "Active"
     note_type = _local_note_type(text)
     if note_type in {"Idea", "Purchase"}:
         return "Incubating"
@@ -728,6 +759,8 @@ def _local_note_status(text: str) -> str:
 
 def _local_parent_moc(text: str) -> str:
     lowered = (text or "").lower()
+    if _looks_like_todo_capture(text):
+        return "Purchase Tasks MOC" if _looks_like_purchase_task(text) else "Todo List MOC"
     if any(word in lowered for word in ("buy", "purchase", "wishlist", "scarf", "knife", "chair", "microphone")):
         return "Purchases MOC"
     if any(word in lowered for word in ("stock", "investment", "invest", "etf", "toloka")):
@@ -748,6 +781,10 @@ def _local_moc_category(text: str) -> str:
 
 def _local_moc_description(text: str) -> str:
     moc = _local_parent_moc(text)
+    if moc == "Todo List MOC":
+        return "Tracks concrete open loops, reminders, and tasks that need action."
+    if moc == "Purchase Tasks MOC":
+        return "Tracks concrete purchase-related tasks, research, comparisons, and buying follow-ups."
     if moc == "Purchases MOC":
         return "Tracks potential purchases, buying criteria, comparisons, and follow-up decisions."
     if moc == "Investments MOC":
@@ -764,11 +801,79 @@ def _local_moc_description(text: str) -> str:
 def _local_related_links(text: str) -> list[str]:
     links: list[str] = []
     lowered = (text or "").lower()
+    if _looks_like_todo_capture(text):
+        links.append("Plans to Do MOC")
     if any(word in lowered for word in ("buy", "purchase", "wishlist")):
         links.append("Things to Buy MOC")
     if any(word in lowered for word in ("plan", "need to", "todo", "to do")):
         links.append("Plans to Do MOC")
     return links
+
+
+def _looks_like_todo_capture(text: str) -> bool:
+    lowered = (text or "").lower()
+    # Task routing is intentionally marker-based so ordinary wishes like
+    # "I want a scarf" stay in Incubator, while "need to/search/check" opens a todo.
+    markers = (
+        "need to",
+        "should ",
+        "have to",
+        "must ",
+        "todo",
+        "to do",
+        "remember to",
+        "remind me",
+        "look for",
+        "search for",
+        "find ",
+        "check ",
+        "треба",
+        "потрібно",
+        "пошукати",
+        "знайти",
+        "перевірити",
+        "розібратися",
+        "надо",
+        "нужно",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _looks_like_purchase_task(text: str) -> bool:
+    lowered = (text or "").lower()
+    purchase_terms = (
+        "buy",
+        "purchase",
+        "wishlist",
+        "bottle",
+        "water bottle",
+        "scarf",
+        "knife",
+        "chair",
+        "microphone",
+        "бутил",
+        "пляш",
+        "шарф",
+        "ніж",
+        "нож",
+    )
+    return any(term in lowered for term in purchase_terms)
+
+
+def _todo_action_from_text(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    return cleaned[:180] or "Review and complete this task"
+
+
+def _estimate_completion_time(text: str) -> str:
+    lowered = (text or "").lower()
+    if any(term in lowered for term in ("compare", "research", "дослід", "порівня")):
+        return "30-60 minutes"
+    if any(term in lowered for term in ("look for", "search", "find", "пошукати", "знайти")):
+        return "20-40 minutes"
+    if any(term in lowered for term in ("buy", "purchase", "купити")):
+        return "15-30 minutes after the choice is clear"
+    return "15-30 minutes"
 
 
 def _polish_capture_text(text: str) -> str:

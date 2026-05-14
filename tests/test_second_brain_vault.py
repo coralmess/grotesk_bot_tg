@@ -103,6 +103,43 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertIn("[[Shure SM7B - Microphone Purchase Plan]]", moc_text)
             self.assertIn("Potential audio gear purchase", moc_text)
 
+    def test_clear_todo_capture_overrides_purchase_incubator_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = SecondBrainVault(Path(tmp))
+            note = vault.create_capture_note(
+                CaptureInput(
+                    capture_type="text",
+                    text="Треба пошукати нормальну бутилку для води",
+                    created_at="2026-05-13T20:14:52Z",
+                ),
+                enrichment=AIEnrichment(
+                    title="Selection of a Quality Water Bottle",
+                    summary="Need to find a good water bottle.",
+                    suggested_folder="4-Incubator",
+                    suggested_tags=["#purchase", "#wishlist"],
+                    note_type="Purchase",
+                    note_status="Incubating",
+                    parent_moc="Purchases MOC",
+                    moc_category="Purchases",
+                    action_items=["Research durable water bottle options"],
+                    estimated_completion_time="20-30 minutes",
+                    provider="gemini",
+                ),
+            )
+
+            self.assertEqual(
+                note.path.relative_to(Path(tmp)).as_posix(),
+                "5-Todo List/Purchase Tasks/Selection of a Quality Water Bottle.md",
+            )
+            text = note.path.read_text(encoding="utf-8")
+            self.assertIn("type: Plan", text)
+            self.assertIn("status: Active", text)
+            self.assertIn("Parent: [[Purchase Tasks MOC]]", text)
+            self.assertIn("### Estimated Completion Time", text)
+            self.assertIn("20-30 minutes", text)
+            moc = Path(tmp) / "5-Todo List" / "Purchase Tasks" / "Purchase Tasks MOC.md"
+            self.assertTrue(moc.exists())
+
     def test_local_fallback_capture_is_marked_pending_ai_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             vault = SecondBrainVault(Path(tmp))

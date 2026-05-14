@@ -16,6 +16,7 @@ PARA_FOLDERS = (
     "2-Areas",
     "3-Resources",
     "4-Incubator",
+    "5-Todo List",
     "Attachments",
 )
 LEGACY_PARA_FOLDERS = {"00_Inbox", "01_Projects", "02_Areas", "03_Resources", "04_Daily", "99_Archive"}
@@ -463,6 +464,8 @@ class SecondBrainVault:
                 parts.extend(["### Questions", *[f"- {item}" for item in enrichment.questions], ""])
             if enrichment.enrichment_notes:
                 parts.extend(["### Useful Context", *[f"- {item}" for item in enrichment.enrichment_notes], ""])
+            if enrichment.estimated_completion_time:
+                parts.extend(["### Estimated Completion Time", enrichment.estimated_completion_time.strip(), ""])
             if enrichment.scored_suggestions:
                 parts.append("### Scored Suggestions")
                 for item in enrichment.scored_suggestions:
@@ -607,10 +610,23 @@ def _catalog_plan(capture: CaptureInput, enrichment: AIEnrichment | None) -> Cat
     folder = _safe_para_folder(enrichment.suggested_folder if enrichment else _infer_folder(raw_text))
     category = sanitize_filename((enrichment.moc_category if enrichment else "") or _moc_category_from_text(raw_text), max_length=64)
     parent_moc = sanitize_filename((enrichment.parent_moc if enrichment else "") or f"{category} MOC", max_length=80)
+    if _looks_like_todo_capture(raw_text):
+        # Task intent is a stronger signal than product/topic words; otherwise
+        # "need to find a bottle" becomes a passive purchase idea.
+        folder = "5-Todo List"
+        if _looks_like_purchase_task(raw_text):
+            category = "Purchase Tasks"
+            parent_moc = "Purchase Tasks MOC"
+        else:
+            category = "Tasks"
+            parent_moc = "Todo List MOC"
     if not parent_moc.endswith(" MOC"):
         parent_moc += " MOC"
     note_type = _safe_note_type(enrichment.note_type if enrichment else _infer_note_type(raw_text))
     status = _safe_note_status(enrichment.note_status if enrichment else _default_status(note_type))
+    if _looks_like_todo_capture(raw_text):
+        note_type = "Plan"
+        status = "Active"
     tags = _normalize_tags(enrichment.suggested_tags if enrichment and enrichment.suggested_tags else _tags_from_text(raw_text))
     aliases = _dedupe_strings([*(enrichment.aliases if enrichment else []), *([title] if title else [])])[:6]
     moc_description = (
@@ -641,6 +657,7 @@ def _safe_para_folder(value: str | None) -> str:
         "00_Inbox": "4-Incubator",
         "04_Daily": "2-Areas",
         "99_Archive": "3-Resources",
+        "05_Todo": "5-Todo List",
     }
     value = legacy_map.get(value, value)
     return value if value in PARA_FOLDERS and value != "Attachments" else "3-Resources"
@@ -730,6 +747,8 @@ def _descriptive_title_from_text(text: str, *, fallback: str) -> str:
 
 def _infer_folder(text: str) -> str:
     lowered = (text or "").lower()
+    if _looks_like_todo_capture(text):
+        return "5-Todo List"
     if any(word in lowered for word in ("buy", "purchase", "wishlist", "idea", "strategy", "someday", "chair", "scarf", "knife")):
         return "4-Incubator"
     if any(word in lowered for word in ("plan", "deadline", "project")):
@@ -741,6 +760,8 @@ def _infer_folder(text: str) -> str:
 
 def _infer_note_type(text: str) -> str:
     lowered = (text or "").lower()
+    if _looks_like_todo_capture(text):
+        return "Plan"
     if any(word in lowered for word in ("buy", "purchase", "wishlist", "scarf", "knife", "chair")):
         return "Purchase"
     if any(word in lowered for word in ("plan", "need to", "todo")):
@@ -751,11 +772,15 @@ def _infer_note_type(text: str) -> str:
 
 
 def _default_status(note_type: str) -> str:
+    if note_type == "Plan":
+        return "Active"
     return "Incubating" if note_type in {"Idea", "Purchase"} else "Reference"
 
 
 def _moc_category_from_text(text: str) -> str:
     lowered = (text or "").lower()
+    if _looks_like_todo_capture(text):
+        return "Purchase Tasks" if _looks_like_purchase_task(text) else "Tasks"
     if any(word in lowered for word in ("api key", "glm", "groq", "cerebras", "modal")):
         return "AI Tools"
     if "invincible" in lowered or "comics" in lowered:
@@ -787,11 +812,63 @@ def _moc_description(parent_moc: str) -> str:
         "Comics and Media MOC": "Tracks reading order, media references, and entertainment knowledge.",
         "Investments MOC": "Tracks investment ideas, risks, theses, and research notes.",
         "Purchases MOC": "Tracks potential purchases, buying criteria, comparisons, and follow-up decisions.",
+        "Purchase Tasks MOC": "Tracks concrete purchase-related tasks, research, comparisons, and buying follow-ups.",
+        "Todo List MOC": "Tracks concrete open loops, reminders, and tasks that need action.",
         "Business Ideas MOC": "Tracks business and earning ideas that may become plans later.",
         "Life Planning MOC": "Tracks life-management decisions, location planning, and personal direction.",
         "Health MOC": "Tracks health, wellbeing, routines, and personal performance notes.",
     }
     return descriptions.get(parent_moc, "Indexes reference notes and reusable knowledge.")
+
+
+def _looks_like_todo_capture(text: str) -> bool:
+    lowered = (text or "").lower()
+    # Keep todo routing marker-based so general wishlist captures do not leave
+    # Incubator unless the user phrases them as an actual open loop.
+    markers = (
+        "need to",
+        "should ",
+        "have to",
+        "must ",
+        "todo",
+        "to do",
+        "remember to",
+        "remind me",
+        "look for",
+        "search for",
+        "find ",
+        "check ",
+        "треба",
+        "потрібно",
+        "пошукати",
+        "знайти",
+        "перевірити",
+        "розібратися",
+        "надо",
+        "нужно",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _looks_like_purchase_task(text: str) -> bool:
+    lowered = (text or "").lower()
+    terms = (
+        "buy",
+        "purchase",
+        "wishlist",
+        "bottle",
+        "water bottle",
+        "scarf",
+        "knife",
+        "chair",
+        "microphone",
+        "бутил",
+        "пляш",
+        "шарф",
+        "ніж",
+        "нож",
+    )
+    return any(term in lowered for term in terms)
 
 
 def _legacy_enrichment_from_text(title: str, body: str) -> AIEnrichment:

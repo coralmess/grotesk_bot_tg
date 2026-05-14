@@ -126,6 +126,22 @@ class SecondBrainBotTests(unittest.TestCase):
         self.assertNotIn(".md", text)
         self.assertNotIn("Captured:", text)
 
+    def test_capture_confirmation_displays_todo_list_folder_readably(self) -> None:
+        note = type(
+            "CapturedNote",
+            (),
+            {
+                "note_id": "20260513201452-65f0c0ce",
+                "path": "5-Todo List/Purchase Tasks/Selection of a Quality Water Bottle.md",
+                "provider": "gemini",
+            },
+        )()
+
+        text = _format_capture_confirmation(note)
+
+        self.assertIn("Todo List -> Purchase Tasks -> Selection of a Quality Water Bottle", text)
+        self.assertIn("(Gemini)", text)
+
     def test_learning_result_formats_flashcard_answers_as_telegram_spoilers(self) -> None:
         note = type(
             "Note",

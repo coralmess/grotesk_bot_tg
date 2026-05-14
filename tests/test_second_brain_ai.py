@@ -266,7 +266,9 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enrichment.title, "Remember to buy a knife")
         self.assertEqual(enrichment.provider, "local_fallback")
         self.assertIn("#buy", enrichment.suggested_tags)
-        self.assertEqual(enrichment.parent_moc, "Purchases MOC")
+        self.assertEqual(enrichment.suggested_folder, "5-Todo List")
+        self.assertEqual(enrichment.parent_moc, "Purchase Tasks MOC")
+        self.assertEqual(enrichment.note_status, "Active")
 
     async def test_image_bytes_are_not_sent_to_ai_prompt(self) -> None:
         modal = FakeProvider(
@@ -297,6 +299,8 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("score from 1 to 100", prompt)
         self.assertIn("Catalog metadata must be English-only", prompt)
         self.assertIn("Keep the user's visible note content in the user's language", prompt)
+        self.assertIn("5-Todo List", prompt)
+        self.assertIn("estimated_completion_time", prompt)
 
     async def test_enrichment_parses_useful_context_and_scored_suggestions(self) -> None:
         modal = FakeProvider(
@@ -326,6 +330,17 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(enrichment.enrichment_notes, ["Cognitive defusion means noticing thoughts as thoughts."])
         self.assertEqual(enrichment.polished_text, "I want to improve my mental resilience.")
         self.assertEqual(enrichment.scored_suggestions[0]["score"], 95)
+
+    async def test_local_enrichment_routes_clear_todo_capture_to_todo_list(self) -> None:
+        ai = self._ai(providers={})
+
+        enrichment = await ai.enrich_capture("Треба пошукати нормальну бутилку для води")
+
+        self.assertEqual(enrichment.suggested_folder, "5-Todo List")
+        self.assertEqual(enrichment.note_type, "Plan")
+        self.assertEqual(enrichment.note_status, "Active")
+        self.assertEqual(enrichment.parent_moc, "Purchase Tasks MOC")
+        self.assertTrue(enrichment.estimated_completion_time)
 
     async def test_local_enrichment_formats_inline_steps_without_adding_knowledge(self) -> None:
         ai = self._ai(providers={})

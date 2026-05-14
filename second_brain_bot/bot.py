@@ -554,6 +554,7 @@ def _note_preview_sections(body: str) -> list[str]:
     capture = _markdown_section(body, "Polished Capture") or _markdown_section(body, "Source Capture") or _markdown_section(body, "Raw Capture")
     useful_context = _markdown_section(body, "Useful Context")
     actions = _markdown_section(body, "Action Items")
+    estimated_time = _markdown_section(body, "Estimated Completion Time")
     questions = _markdown_section(body, "Questions")
     suggestions = _markdown_section(body, "Scored Suggestions")
     fallback = clean_note_excerpt(body)
@@ -565,6 +566,8 @@ def _note_preview_sections(body: str) -> list[str]:
         sections.append(_html_section("Useful Context", useful_context, bullets=True))
     if actions:
         sections.append(_html_section("Actions", actions, bullets=True))
+    if estimated_time:
+        sections.append(_html_section("Estimated Time", estimated_time))
     if questions:
         sections.append(_html_section("Questions", questions, bullets=True))
     if suggestions:
@@ -643,6 +646,7 @@ def _display_para_folder(value: str) -> str:
         "2-Areas": "Areas",
         "3-Resources": "Resources",
         "4-Incubator": "Incubator",
+        "5-Todo List": "Todo List",
     }
     return mapping.get(value, value)
 
