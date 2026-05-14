@@ -828,7 +828,6 @@ def _looks_like_todo_capture(text: str) -> bool:
     # Incubator unless the user phrases them as an actual open loop.
     markers = (
         "need to",
-        "should ",
         "have to",
         "must ",
         "todo",
@@ -837,8 +836,6 @@ def _looks_like_todo_capture(text: str) -> bool:
         "remind me",
         "look for",
         "search for",
-        "find ",
-        "check ",
         "треба",
         "потрібно",
         "пошукати",

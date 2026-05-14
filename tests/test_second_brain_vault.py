@@ -401,6 +401,49 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertIn("### Estimated Completion Time", text)
             self.assertIn("20-40 minutes", text)
 
+    def test_migration_does_not_move_reference_notes_with_generic_should_wording(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            note_dir = root / "4-Incubator" / "Business Ideas"
+            note_dir.mkdir(parents=True)
+            note_path = note_dir / "Amazon FBA and Wyoming LLC - Business Idea.md"
+            note_path.write_text(
+                "---\n"
+                "aliases: []\n"
+                "tags:\n"
+                "  - \"#business\"\n"
+                "type: Idea\n"
+                "status: Incubating\n"
+                "date_created: 2026-05-13\n"
+                "---\n"
+                "# Amazon FBA and Wyoming LLC - Business Idea\n\n"
+                "Parent: [[Business Ideas MOC]]\n\n"
+                "## Source Capture\n"
+                "Amazon FBA strategy. The operator should compare niches and find reliable suppliers.\n",
+                encoding="utf-8",
+            )
+            (root / ".second_brain_state.json").write_text(
+                json.dumps(
+                    {
+                        "notes": {
+                            "fba-note": {
+                                "path": "4-Incubator/Business Ideas/Amazon FBA and Wyoming LLC - Business Idea.md",
+                                "title": "Amazon FBA and Wyoming LLC - Business Idea",
+                                "status": "Incubating",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            vault = SecondBrainVault(root)
+
+            migrated = vault.migrate_legacy_vault()
+
+            self.assertEqual(migrated, 0)
+            self.assertTrue(note_path.exists())
+            self.assertFalse((root / "5-Todo List" / "Tasks" / "Amazon FBA and Wyoming LLC - Business Idea.md").exists())
+
     def test_migration_does_not_rename_already_correct_dotted_title(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
