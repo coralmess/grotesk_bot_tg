@@ -348,6 +348,55 @@ class SecondBrainVaultTests(unittest.TestCase):
             self.assertNotIn("[[2026-05-13 Herman Miller Gaming Embody Office Chair Evaluation]]", moc_text)
             self.assertFalse(stale_moc.exists())
 
+    def test_migration_moves_existing_task_notes_to_todo_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_dir = root / "4-Incubator" / "Purchases"
+            old_dir.mkdir(parents=True)
+            old_path = old_dir / "Selection of a Quality Water Bottle.md"
+            old_path.write_text(
+                "---\n"
+                "aliases:\n"
+                "  - Selection of a Quality Water Bottle\n"
+                "tags:\n"
+                "  - \"#purchase\"\n"
+                "type: Purchase\n"
+                "status: Incubating\n"
+                "date_created: 2026-05-13\n"
+                "---\n"
+                "# Selection of a Quality Water Bottle\n\n"
+                "Parent: [[Purchases MOC]]\n\n"
+                "## Source Capture\n"
+                "Треба пошукати нормальну бутилку для води\n",
+                encoding="utf-8",
+            )
+            (root / ".second_brain_state.json").write_text(
+                json.dumps(
+                    {
+                        "notes": {
+                            "water-bottle": {
+                                "path": "4-Incubator/Purchases/Selection of a Quality Water Bottle.md",
+                                "title": "Selection of a Quality Water Bottle",
+                                "status": "Incubating",
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            vault = SecondBrainVault(root)
+
+            migrated = vault.migrate_legacy_vault()
+
+            new_path = root / "5-Todo List" / "Purchase Tasks" / "Selection of a Quality Water Bottle.md"
+            self.assertEqual(migrated, 1)
+            self.assertTrue(new_path.exists())
+            self.assertFalse(old_path.exists())
+            text = new_path.read_text(encoding="utf-8")
+            self.assertIn("type: Plan", text)
+            self.assertIn("status: Active", text)
+            self.assertIn("Parent: [[Purchase Tasks MOC]]", text)
+
     def test_migration_does_not_rename_already_correct_dotted_title(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

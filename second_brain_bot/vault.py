@@ -390,10 +390,11 @@ class SecondBrainVault:
             metadata, body = _extract_frontmatter(old_path.read_text(encoding="utf-8"))
             is_legacy_path = relpath.split("/", 1)[0] in LEGACY_PARA_FOLDERS
             old_title = old_path.stem
-            if not is_legacy_path and not _needs_catalog_normalization(old_title):
+            text_for_catalog = _clean_legacy_body(body) or old_path.stem
+            needs_todo_normalization = _looks_like_todo_capture(text_for_catalog) and relpath.split("/", 1)[0] != "5-Todo List"
+            if not is_legacy_path and not _needs_catalog_normalization(old_title) and not needs_todo_normalization:
                 continue
             created_at = str(metadata.get("created_at") or metadata.get("date_created") or utc_now_iso())
-            text_for_catalog = _clean_legacy_body(body) or old_path.stem
             legacy_enrichment = _legacy_enrichment_from_text(old_path.stem, text_for_catalog)
             capture = CaptureInput(capture_type="text", text=text_for_catalog.strip(), created_at=created_at)
             catalog = _catalog_plan(capture, legacy_enrichment)
