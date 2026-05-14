@@ -7,11 +7,13 @@ from helpers.analytics_events import AnalyticsSink
 from second_brain_bot.ai import (
     AIEnrichment,
     AIOrchestrator,
+    InvalidAIJSONError,
     ModelProvider,
     OpenAICompatibleProvider,
     ProviderResult,
     clean_human_response,
     format_note_context,
+    _parse_json_object,
 )
 from second_brain_bot.models import SearchResult
 
@@ -529,6 +531,9 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         payload = provider._chat_payload(task="enrich", prompt="capture", max_tokens=900, json_mode=True)
 
         self.assertEqual(payload["reasoning_effort"], "high")
+        self.assertEqual(payload["temperature"], 0)
+        self.assertEqual(payload["response_format"]["type"], "json_schema")
+        self.assertEqual(payload["response_format"]["json_schema"]["name"], "second_brain_enrich_response")
 
     async def test_provider_omits_reasoning_effort_by_default(self) -> None:
         provider = OpenAICompatibleProvider(
@@ -541,6 +546,33 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         payload = provider._chat_payload(task="summary", prompt="notes", max_tokens=1200, json_mode=False)
 
         self.assertNotIn("reasoning_effort", payload)
+        self.assertNotIn("response_format", payload)
+        self.assertEqual(payload["temperature"], 0.2)
+
+    async def test_provider_does_not_force_json_schema_for_unknown_compatible_provider(self) -> None:
+        provider = OpenAICompatibleProvider(
+            name="modal_glm",
+            api_key="key",
+            base_url="https://example.test/v1",
+            model="glm",
+        )
+
+        payload = provider._chat_payload(task="enrich", prompt="capture", max_tokens=900, json_mode=True)
+
+        self.assertNotIn("response_format", payload)
+        self.assertEqual(payload["temperature"], 0)
+
+    async def test_json_parser_repairs_common_model_json_mistakes(self) -> None:
+        payload = _parse_json_object("{title: \"Gemini note\", \"suggested_tags\": [\"#ai\",],}")
+
+        self.assertEqual(payload["title"], "Gemini note")
+        self.assertEqual(payload["suggested_tags"], ["#ai"])
+
+    async def test_json_parser_marks_unrecoverable_json_as_invalid_json(self) -> None:
+        with self.assertRaises(InvalidAIJSONError) as ctx:
+            _parse_json_object("I cannot do that")
+
+        self.assertEqual(ctx.exception.error_type, "invalid_json")
 
     async def test_ask_accepts_plain_text_provider_response(self) -> None:
         gemini = PlainTextOnlyProvider(

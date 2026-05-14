@@ -16,6 +16,12 @@ from second_brain_bot.models import SearchResult
 LOGGER = logging.getLogger(__name__)
 GOOGLE_HOSTED_PROVIDER_NAMES = {"gemini", "gemini_flash_lite", "gemma_31b"}
 
+
+class InvalidAIJSONError(ValueError):
+    def __init__(self, message: str, *, error_type: str = "invalid_json") -> None:
+        super().__init__(message)
+        self.error_type = error_type
+
 SECOND_BRAIN_SYSTEM_INSTRUCTIONS = """
 You are Grotesk Brain: a private personal helper and second brain for one person.
 Your job is to help the user capture, organize, distill, express, and retrieve their own knowledge.
@@ -175,7 +181,7 @@ class OpenAICompatibleProvider:
             self._record("success", task, started)
             return ProviderResult(provider=self.name, model=self.model, payload=payload, text=content)
         except Exception as exc:
-            self._record("failed", task, started, error=str(exc)[:160])
+            self._record("failed", task, started, error=str(exc)[:160], error_type=_provider_error_type(exc))
             raise
 
     async def complete_text(self, *, task: str, prompt: str, max_tokens: int = 1200) -> ProviderResult:
@@ -199,7 +205,7 @@ class OpenAICompatibleProvider:
             self._record("success", task, started)
             return ProviderResult(provider=self.name, model=self.model, payload={}, text=content)
         except Exception as exc:
-            self._record("failed", task, started, error=str(exc)[:160])
+            self._record("failed", task, started, error=str(exc)[:160], error_type=_provider_error_type(exc))
             raise
 
     def _chat_payload(self, *, task: str, prompt: str, max_tokens: int, json_mode: bool = False) -> dict[str, Any]:
@@ -212,9 +218,13 @@ class OpenAICompatibleProvider:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.2,
+            "temperature": 0 if json_mode else 0.2,
             "max_tokens": max_tokens,
         }
+        if json_mode and self.name in GOOGLE_HOSTED_PROVIDER_NAMES:
+            # Gemini's OpenAI-compatible endpoint supports response_format; use
+            # it for Google-hosted JSON tasks instead of relying on prompt text.
+            payload["response_format"] = _json_response_format_for_task(task)
         if self.reasoning_effort:
             # Gemini's OpenAI-compatible API maps reasoning_effort to thinking_level;
             # keep it provider-specific so other OpenAI-compatible fallbacks are unchanged.
@@ -227,7 +237,7 @@ class OpenAICompatibleProvider:
             return base + "\n\nReturn only valid JSON matching the requested schema. Do not wrap it in markdown."
         return base
 
-    def _record(self, event: str, task: str, started: float, *, error: str = "") -> None:
+    def _record(self, event: str, task: str, started: float, *, error: str = "", error_type: str = "") -> None:
         try:
             self.analytics_sink.append_event(
                 "second_brain_ai",
@@ -238,6 +248,7 @@ class OpenAICompatibleProvider:
                     "model": self.model,
                     "latency_ms": int((time.monotonic() - started) * 1000),
                     "error": error,
+                    "error_type": error_type,
                 },
             )
             self.analytics_sink.add_daily_counters(
@@ -665,6 +676,120 @@ def _youtube_distillation_prompt(*, video_title: str, url: str, transcript: str)
     )
 
 
+def _json_response_format_for_task(task: str) -> dict[str, Any]:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": f"second_brain_{_schema_task_name(task)}_response",
+            "schema": _json_schema_for_task(task),
+        },
+    }
+
+
+def _schema_task_name(task: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]+", "_", task or "json").strip("_") or "json"
+
+
+def _json_schema_for_task(task: str) -> dict[str, Any]:
+    if task == "relations":
+        return {
+            "type": "object",
+            "properties": {"related_notes": _relations_schema()},
+            "additionalProperties": True,
+        }
+    if task == "summary":
+        return {
+            "type": "object",
+            "properties": {
+                "themes": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "maxLength": 120},
+                            "theme": {"type": "string", "maxLength": 80},
+                            "summary": {"type": "string", "maxLength": 900},
+                            "key_ideas": _string_array_schema(max_items=8, max_length=220),
+                            "practical_takeaways": _string_array_schema(max_items=8, max_length=220),
+                            "real_life_examples": _string_array_schema(max_items=4, max_length=320),
+                            "questions": _string_array_schema(max_items=6, max_length=180),
+                            "scored_suggestions": _scored_suggestions_schema(max_items=6),
+                        },
+                        "additionalProperties": True,
+                    },
+                }
+            },
+            "additionalProperties": True,
+        }
+    return {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "maxLength": 120},
+            "summary": {"type": "string", "maxLength": 700},
+            "polished_text": {"type": "string", "maxLength": 1800},
+            "suggested_folder": {"type": "string", "maxLength": 40},
+            "suggested_tags": _string_array_schema(max_items=6, max_length=40),
+            "entities": _string_array_schema(max_items=12, max_length=80),
+            "aliases": _string_array_schema(max_items=6, max_length=80),
+            "note_type": {"type": "string", "maxLength": 40},
+            "note_status": {"type": "string", "maxLength": 40},
+            "parent_moc": {"type": "string", "maxLength": 100},
+            "moc_category": {"type": "string", "maxLength": 80},
+            "moc_description": {"type": "string", "maxLength": 220},
+            "related_links": _string_array_schema(max_items=8, max_length=100),
+            "action_items": _string_array_schema(max_items=8, max_length=180),
+            "questions": _string_array_schema(max_items=6, max_length=180),
+            "enrichment_notes": _string_array_schema(max_items=8, max_length=220),
+            "scored_suggestions": _scored_suggestions_schema(max_items=8),
+            "estimated_completion_time": {"type": "string", "maxLength": 80},
+            "verification_pending": {"type": "boolean"},
+            "related_notes": _relations_schema(),
+        },
+        "additionalProperties": True,
+    }
+
+
+def _string_array_schema(*, max_items: int, max_length: int) -> dict[str, Any]:
+    return {
+        "type": "array",
+        "maxItems": max_items,
+        "items": {"type": "string", "maxLength": max_length},
+    }
+
+
+def _scored_suggestions_schema(*, max_items: int) -> dict[str, Any]:
+    return {
+        "type": "array",
+        "maxItems": max_items,
+        "items": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "maxLength": 120},
+                "score": {"type": "integer", "minimum": 1, "maximum": 100},
+                "reason": {"type": "string", "maxLength": 220},
+            },
+            "additionalProperties": True,
+        },
+    }
+
+
+def _relations_schema() -> dict[str, Any]:
+    return {
+        "type": "array",
+        "maxItems": 8,
+        "items": {
+            "type": "object",
+            "properties": {
+                "note_id": {"type": "string", "maxLength": 80},
+                "reason": {"type": "string", "maxLength": 220},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "additionalProperties": True,
+        },
+    }
+
+
 def _youtube_themes_from_payload(
     payload: dict[str, Any],
     *,
@@ -719,10 +844,47 @@ def _parse_json_object(content: str) -> dict[str, Any]:
     end = content.rfind("}")
     if start >= 0 and end >= start:
         content = content[start : end + 1]
-    payload = json.loads(content)
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        repaired = _repair_json_object_text(content)
+        try:
+            payload = json.loads(repaired)
+        except json.JSONDecodeError as exc:
+            raise InvalidAIJSONError(str(exc), error_type="invalid_json") from exc
     if not isinstance(payload, dict):
         raise ValueError("AI response was not a JSON object")
     return payload
+
+
+def _repair_json_object_text(content: str) -> str:
+    text = str(content or "").strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end >= start:
+        text = text[start : end + 1]
+    text = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_-]*)(\s*:)", r'\1"\2"\3', text)
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    if text.count('"') % 2 == 1:
+        text += '"'
+    text += "]" * max(0, text.count("[") - text.count("]"))
+    text += "}" * max(0, text.count("{") - text.count("}"))
+    return text
+
+
+def _provider_error_type(exc: Exception) -> str:
+    if isinstance(exc, InvalidAIJSONError):
+        return exc.error_type
+    message = str(exc).lower()
+    if "429" in message or "too many requests" in message:
+        return "http_429"
+    if "503" in message or "service unavailable" in message:
+        return "http_503"
+    if "timeout" in message or "timed out" in message:
+        return "timeout"
+    if "empty" in message:
+        return "empty_response"
+    return exc.__class__.__name__
 
 
 def _enrichment_from_payload(payload: dict[str, Any], *, provider: str, fallback_text: str) -> AIEnrichment:
