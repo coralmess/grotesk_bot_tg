@@ -36,6 +36,7 @@ class SecondBrainConfigTests(unittest.TestCase):
             self.assertEqual(orchestrator.providers["gemma_31b"].model, "gemma-4-31b-it")
             self.assertEqual(orchestrator.providers["gemini"].reasoning_effort, "")
             self.assertEqual(orchestrator.providers["gemini_flash_lite"].reasoning_effort, "high")
+            self.assertEqual(orchestrator.providers["gemma_31b"].reasoning_effort, "high")
             self.assertEqual(orchestrator.providers["gemini"].base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
             self.assertEqual(orchestrator.providers["gemini_flash_lite"].base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
             self.assertEqual(orchestrator.providers["gemma_31b"].base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
