@@ -127,6 +127,7 @@ class OpenAICompatibleProvider:
         model: str,
         timeout_sec: float = 45.0,
         analytics_sink: AnalyticsSink | None = None,
+        reasoning_effort: str = "",
     ) -> None:
         self.name = name
         self.api_key = api_key
@@ -134,6 +135,7 @@ class OpenAICompatibleProvider:
         self.model = model
         self.timeout_sec = timeout_sec
         self.analytics_sink = analytics_sink or AnalyticsSink()
+        self.reasoning_effort = reasoning_effort.strip()
 
     async def complete_json(self, *, task: str, prompt: str, max_tokens: int = 800) -> ProviderResult:
         started = time.monotonic()
@@ -146,18 +148,7 @@ class OpenAICompatibleProvider:
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": self._system_instructions_for_task(task, json_mode=True),
-                            },
-                            {"role": "user", "content": prompt},
-                        ],
-                        "temperature": 0.2,
-                        "max_tokens": max_tokens,
-                    },
+                    json=self._chat_payload(task=task, prompt=prompt, max_tokens=max_tokens, json_mode=True),
                 ) as response:
                     response.raise_for_status()
                     data = await response.json()
@@ -180,18 +171,7 @@ class OpenAICompatibleProvider:
                         "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                     },
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": self._system_instructions_for_task(task),
-                            },
-                            {"role": "user", "content": prompt},
-                        ],
-                        "temperature": 0.2,
-                        "max_tokens": max_tokens,
-                    },
+                    json=self._chat_payload(task=task, prompt=prompt, max_tokens=max_tokens, json_mode=False),
                 ) as response:
                     response.raise_for_status()
                     data = await response.json()
@@ -203,6 +183,25 @@ class OpenAICompatibleProvider:
         except Exception as exc:
             self._record("failed", task, started, error=str(exc)[:160])
             raise
+
+    def _chat_payload(self, *, task: str, prompt: str, max_tokens: int, json_mode: bool = False) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": self._system_instructions_for_task(task, json_mode=json_mode),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": max_tokens,
+        }
+        if self.reasoning_effort:
+            # Gemini's OpenAI-compatible API maps reasoning_effort to thinking_level;
+            # keep it provider-specific so other OpenAI-compatible fallbacks are unchanged.
+            payload["reasoning_effort"] = self.reasoning_effort
+        return payload
 
     def _system_instructions_for_task(self, task: str, *, json_mode: bool = False) -> str:
         base = TASK_SYSTEM_INSTRUCTIONS.get(task, SECOND_BRAIN_SYSTEM_INSTRUCTIONS)

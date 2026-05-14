@@ -375,6 +375,7 @@ def build_ai_orchestrator(config: SecondBrainConfig, *, analytics_sink: Analytic
             base_url=config.gemini_base_url,
             model=config.gemini_flash_lite_model,
             analytics_sink=sink,
+            reasoning_effort="high",
         )
     if config.modal_glm_api_key:
         providers["modal_glm"] = OpenAICompatibleProvider(

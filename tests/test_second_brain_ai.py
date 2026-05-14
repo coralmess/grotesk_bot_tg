@@ -475,6 +475,31 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("creating learning sessions", provider._system_instructions_for_task("learn"))
         self.assertIn("cataloging captured notes", provider._system_instructions_for_task("enrich"))
 
+    async def test_provider_adds_reasoning_effort_when_configured(self) -> None:
+        provider = OpenAICompatibleProvider(
+            name="gemini_flash_lite",
+            api_key="key",
+            base_url="https://example.test/v1",
+            model="gemini-3.1-flash-lite",
+            reasoning_effort="high",
+        )
+
+        payload = provider._chat_payload(task="enrich", prompt="capture", max_tokens=900, json_mode=True)
+
+        self.assertEqual(payload["reasoning_effort"], "high")
+
+    async def test_provider_omits_reasoning_effort_by_default(self) -> None:
+        provider = OpenAICompatibleProvider(
+            name="gemini",
+            api_key="key",
+            base_url="https://example.test/v1",
+            model="gemini-3-flash-preview",
+        )
+
+        payload = provider._chat_payload(task="summary", prompt="notes", max_tokens=1200, json_mode=False)
+
+        self.assertNotIn("reasoning_effort", payload)
+
     async def test_ask_accepts_plain_text_provider_response(self) -> None:
         gemini = PlainTextOnlyProvider(
             "gemini",
