@@ -107,31 +107,45 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(modal.calls), 1)
         self.assertEqual(len(groq.calls), 0)
 
-    async def test_default_enrichment_prefers_gemini_when_available(self) -> None:
+    async def test_default_enrichment_prefers_gemini_flash_lite_when_available(self) -> None:
         gemini = FakeProvider(
             "gemini",
             result=ProviderResult(provider="gemini", model="gemini-3-flash-preview", payload={"title": "Gemini note"}),
+        )
+        flash_lite = FakeProvider(
+            "gemini_flash_lite",
+            result=ProviderResult(
+                provider="gemini_flash_lite",
+                model="gemini-3.1-flash-lite",
+                payload={"title": "Lite note"},
+            ),
         )
         cerebras = FakeProvider(
             "cerebras",
             result=ProviderResult(provider="cerebras", model="qwen", payload={"title": "Cerebras note"}),
         )
-        ai = self._ai(providers={"gemini": gemini, "cerebras": cerebras})
+        ai = self._ai(providers={"gemini": gemini, "gemini_flash_lite": flash_lite, "cerebras": cerebras})
 
         enrichment = await ai.enrich_capture("I want COPX stocks")
 
-        self.assertEqual(enrichment.provider, "gemini")
-        self.assertEqual(enrichment.title, "Gemini note")
+        self.assertEqual(enrichment.provider, "gemini_flash_lite")
+        self.assertEqual(enrichment.title, "Lite note")
+        self.assertEqual(len(gemini.calls), 0)
+        self.assertEqual(len(flash_lite.calls), 1)
         self.assertEqual(len(cerebras.calls), 0)
 
-    async def test_relation_judging_prefers_gemini_when_available(self) -> None:
-        gemini = FakeProvider(
-            "gemini",
+    async def test_relation_judging_prefers_gemini_flash_lite_when_available(self) -> None:
+        flash_lite = FakeProvider(
+            "gemini_flash_lite",
             result=ProviderResult(
-                provider="gemini",
-                model="gemini-3-flash-preview",
+                provider="gemini_flash_lite",
+                model="gemini-3.1-flash-lite",
                 payload={"related_notes": [{"note_id": "n1", "reason": "same topic", "confidence": 0.8}]},
             ),
+        )
+        gemini = FakeProvider(
+            "gemini",
+            result=ProviderResult(provider="gemini", model="gemini-3-flash-preview", payload={"related_notes": []}),
         )
         modal = FakeProvider(
             "modal_glm",
@@ -146,20 +160,21 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             body="Copper miners ETF",
             status="Incubating",
         )
-        ai = self._ai(providers={"gemini": gemini, "modal_glm": modal})
+        ai = self._ai(providers={"gemini": gemini, "gemini_flash_lite": flash_lite, "modal_glm": modal})
 
         relations = await ai.suggest_relations("I want COPX stocks", [candidate])
 
         self.assertEqual(relations[0].note_id, "n1")
-        self.assertEqual(len(gemini.calls), 1)
+        self.assertEqual(len(flash_lite.calls), 1)
+        self.assertEqual(len(gemini.calls), 0)
         self.assertEqual(len(modal.calls), 0)
 
     async def test_combined_enrichment_and_relations_uses_one_provider_request(self) -> None:
-        gemini = FakeProvider(
-            "gemini",
+        flash_lite = FakeProvider(
+            "gemini_flash_lite",
             result=ProviderResult(
-                provider="gemini",
-                model="gemini-3-flash-preview",
+                provider="gemini_flash_lite",
+                model="gemini-3.1-flash-lite",
                 payload={
                     "title": "Knife Brand - Purchase Research Note",
                     "summary": "A captured note about a good knife brand.",
@@ -176,15 +191,15 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             body="Buy knife",
             status="Incubating",
         )
-        ai = self._ai(providers={"gemini": gemini})
+        ai = self._ai(providers={"gemini_flash_lite": flash_lite})
 
         enrichment, relations = await ai.enrich_capture_with_relations("This knife brand is great", [candidate])
 
-        self.assertEqual(enrichment.provider, "gemini")
+        self.assertEqual(enrichment.provider, "gemini_flash_lite")
         self.assertEqual(relations[0].note_id, "n1")
-        self.assertEqual(len(gemini.calls), 1)
-        self.assertEqual(gemini.calls[0][0], "enrich")
-        self.assertIn("Candidates", gemini.calls[0][1])
+        self.assertEqual(len(flash_lite.calls), 1)
+        self.assertEqual(flash_lite.calls[0][0], "enrich")
+        self.assertIn("Candidates", flash_lite.calls[0][1])
 
     async def test_gemini_json_tasks_retry_before_fallback(self) -> None:
         gemini = SequencedProvider(
@@ -212,29 +227,53 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(gemini.calls), 3)
         self.assertEqual(len(modal.calls), 0)
 
-    async def test_gemini_flash_lite_is_first_fallback_when_gemini_fails(self) -> None:
+    async def test_learning_uses_gemini_then_flash_lite_when_gemini_fails(self) -> None:
         gemini = FakeProvider("gemini", error=RuntimeError("model overloaded"))
         flash_lite = FakeProvider(
             "gemini_flash_lite",
             result=ProviderResult(
                 provider="gemini_flash_lite",
                 model="gemini-3.1-flash-lite",
-                payload={"title": "Lite fallback note"},
+                payload={},
+                text="Lite lesson",
             ),
         )
         modal = FakeProvider(
             "modal_glm",
-            result=ProviderResult(provider="modal_glm", model="glm", payload={"title": "Modal note"}),
+            result=ProviderResult(provider="modal_glm", model="glm", payload={}, text="Modal lesson"),
         )
         ai = self._ai(providers={"gemini": gemini, "gemini_flash_lite": flash_lite, "modal_glm": modal})
 
-        enrichment = await ai.enrich_capture("fallback test")
+        result = await ai.ask("teach me", context="Saved note", task="learn")
 
-        self.assertEqual(enrichment.provider, "gemini_flash_lite")
-        self.assertEqual(enrichment.title, "Lite fallback note")
+        self.assertEqual(result.provider, "gemini_flash_lite")
+        self.assertEqual(result.text, "Lite lesson")
         self.assertEqual(len(gemini.calls), 3)
         self.assertEqual(len(flash_lite.calls), 1)
         self.assertEqual(len(modal.calls), 0)
+
+    async def test_summary_uses_gemini_flash_first(self) -> None:
+        gemini = FakeProvider(
+            "gemini",
+            result=ProviderResult(provider="gemini", model="gemini-3-flash-preview", payload={}, text="Flash summary"),
+        )
+        flash_lite = FakeProvider(
+            "gemini_flash_lite",
+            result=ProviderResult(
+                provider="gemini_flash_lite",
+                model="gemini-3.1-flash-lite",
+                payload={},
+                text="Lite summary",
+            ),
+        )
+        ai = self._ai(providers={"gemini": gemini, "gemini_flash_lite": flash_lite})
+
+        result = await ai.ask("summarize", context="Saved notes", task="summary")
+
+        self.assertEqual(result.provider, "gemini")
+        self.assertEqual(result.text, "Flash summary")
+        self.assertEqual(len(gemini.calls), 1)
+        self.assertEqual(len(flash_lite.calls), 0)
 
     async def test_falls_back_when_preferred_provider_fails(self) -> None:
         cerebras = FakeProvider("cerebras", error=RuntimeError("rate limited"))

@@ -31,6 +31,8 @@ class SecondBrainConfig:
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     gemini_model: str = "gemini-3-flash-preview"
     gemini_flash_lite_model: str = "gemini-3.1-flash-lite"
+    gemini_daily_request_limit: int = 20
+    gemini_flash_lite_daily_request_limit: int = 500
 
 
 def load_config() -> SecondBrainConfig:
@@ -66,6 +68,10 @@ def load_config() -> SecondBrainConfig:
         ).strip(),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview").strip(),
         gemini_flash_lite_model=os.getenv("GEMINI_FLASH_LITE_MODEL", "gemini-3.1-flash-lite").strip(),
+        gemini_daily_request_limit=_int_env("GEMINI_DAILY_REQUEST_LIMIT", 20, min_value=0, max_value=100000),
+        gemini_flash_lite_daily_request_limit=_int_env(
+            "GEMINI_FLASH_LITE_DAILY_REQUEST_LIMIT", 500, min_value=0, max_value=100000
+        ),
     )
 
 

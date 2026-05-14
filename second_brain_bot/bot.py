@@ -400,7 +400,14 @@ def build_ai_orchestrator(config: SecondBrainConfig, *, analytics_sink: Analytic
             model=config.groq_model,
             analytics_sink=sink,
         )
-    return AIOrchestrator(providers=providers, analytics_sink=sink)
+    return AIOrchestrator(
+        providers=providers,
+        analytics_sink=sink,
+        provider_daily_limits={
+            "gemini": config.gemini_daily_request_limit,
+            "gemini_flash_lite": config.gemini_flash_lite_daily_request_limit,
+        },
+    )
 
 
 def build_application() -> Application:

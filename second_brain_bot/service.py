@@ -118,7 +118,12 @@ class SecondBrainService:
             note = self.index.get_note(selector)
             notes = [note] if note else []
         context = "\n\n".join(f"{item.title}: {item.body[:1000]}" for item in notes if item)
-        result = await self.ai.ask("Distill these notes into concise insights and next actions.", context=context, heavy=True)
+        result = await self.ai.ask(
+            "Distill these notes into concise insights and next actions.",
+            context=context,
+            heavy=True,
+            task="summary",
+        )
         date_key = datetime.now(timezone.utc).date().isoformat()
         self.vault.write_daily_digest(date_key, "# Distilled Notes\n\n" + result.text.strip() + "\n")
         self._record_command("distill", provider=result.provider)
@@ -132,6 +137,7 @@ class SecondBrainService:
             "Do not rewrite old notes. Produce a clean review that can be saved as a new Obsidian note.",
             context=context,
             heavy=True,
+            task="summary",
         )
         date_key = (now_iso or utc_now_iso())[:10]
         self.vault.write_consolidation_note(date_key, result.text)
@@ -176,6 +182,7 @@ class SecondBrainService:
             "Create a compact daily Second Brain digest with captures, open loops, related links, and 3-7 insights.",
             context=context,
             heavy=True,
+            task="summary",
         )
         fallback_lines = [
             "# Daily Second Brain Digest",

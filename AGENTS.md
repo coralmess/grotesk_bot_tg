@@ -22,9 +22,11 @@
 - Runtime entrypoint is `second_brain_bot/bot.py`; systemd unit is `second-brain-bot.service`.
 - The bot token must come from `SECOND_BRAIN_BOT_TOKEN` in the instance `.env`. Never commit Telegram tokens or AI provider keys.
 - The default vault path is `runtime_data/second_brain_vault`, configurable via `SECOND_BRAIN_VAULT_DIR`. The vault is runtime user data, not git-tracked source.
-- Vault layout is Obsidian-compatible PARA folders: `00_Inbox`, `01_Projects`, `02_Areas`, `03_Resources`, `04_Daily`, `99_Archive`, and `Attachments`.
+- Vault layout is Obsidian-compatible folders: `1-Projects`, `2-Areas`, `3-Resources`, `4-Incubator`, `5-Todo List`, and `Attachments`.
 - The SQLite search/relation index lives inside the vault as `.second_brain_index.db`. Markdown notes remain the source of truth; the DB can be rebuilt from notes if needed.
-- AI providers are configured by env only: `MODAL_GLM_API_KEY`, `CEREBRAS_API_KEY`, and `GROQ_API_KEY`. The routing currently prefers Modal GLM for heavy reasoning, Cerebras/Groq for fallback, and local fallback when all hosted providers fail.
+- AI providers are configured by env only: `GEMINI_API_KEY`, `MODAL_GLM_API_KEY`, `CEREBRAS_API_KEY`, and `GROQ_API_KEY`. Never commit API keys.
+- Gemini routing budget: treat `gemini-3-flash-preview` as capped at `20` peak requests/day and reserve it for learning and summary tasks; treat `gemini-3.1-flash-lite` as capped at `500` peak requests/day and use it first for organizing, enrichment, relation judging, and routine ask flows. Env overrides are `GEMINI_DAILY_REQUEST_LIMIT` and `GEMINI_FLASH_LITE_DAILY_REQUEST_LIMIT`.
+- AI routing should prefer Gemini 3 Flash for `/learn`, daily digest, distill, and consolidation summaries; prefer Gemini 3.1 Flash Lite for capture organization/enrichment. Modal GLM, Cerebras, Groq, and local fallback remain fallback paths when hosted providers fail.
 - AI enrichment should preserve raw captures, avoid noisy guesses, add useful compact context only when high confidence, and score suggested options from `1` to `100`.
 - Public web lookup is intentionally rare. It should happen only for explicit `/brain_web_enrich`, clearly time-sensitive captures, or user requests for fresh/current facts; use public pages only and label web-derived facts.
 - User-facing answers must be Telegram-readable: no raw JSON, no `<think>` blocks, concise bullets, and rare useful emoji section markers.

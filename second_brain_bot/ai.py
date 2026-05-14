@@ -238,6 +238,7 @@ class AIOrchestrator:
         *,
         providers: dict[str, ModelProvider] | None = None,
         analytics_sink: AnalyticsSink | None = None,
+        provider_daily_limits: dict[str, int] | None = None,
         provider_cooldown_after: int = 2,
         provider_cooldown_sec: int = 180,
         gemini_retry_attempts: int = 3,
@@ -245,6 +246,7 @@ class AIOrchestrator:
     ) -> None:
         self.providers = providers or {}
         self.analytics_sink = analytics_sink or AnalyticsSink()
+        self.provider_daily_limits = dict(provider_daily_limits or {})
         self._provider_lock = asyncio.Lock()
         self.provider_cooldown_after = max(1, int(provider_cooldown_after))
         self.provider_cooldown_sec = max(1, int(provider_cooldown_sec))
@@ -318,7 +320,7 @@ class AIOrchestrator:
         if not candidates:
             return []
         prompt = _relations_prompt(note_text, candidates)
-        preferred = "gemini" if "gemini" in self.providers else "modal_glm"
+        preferred = "gemini_flash_lite" if "gemini_flash_lite" in self.providers else "modal_glm"
         for name in self._route(preferred_provider=preferred, task="relations"):
             provider = self.providers.get(name)
             if provider is None:
@@ -353,7 +355,7 @@ class AIOrchestrator:
             "Next actions - only concrete steps that follow from the notes.\n\n"
             f"Question:\n{question}\n\nContext:\n{context[:12000]}"
         )
-        preferred = "gemini" if "gemini" in self.providers else ("modal_glm" if heavy else "cerebras")
+        preferred = self._preferred_text_provider(task=task, heavy=heavy)
         for name in self._route(preferred_provider=preferred, task="ask"):
             provider = self.providers.get(name)
             if provider is None:
@@ -375,13 +377,29 @@ class AIOrchestrator:
         if preferred_provider:
             order.append(preferred_provider)
         elif task == "enrich":
-            order.extend(["gemini", "gemini_flash_lite", "cerebras", "groq", "modal_glm"])
-        elif task in {"ask", "relations"}:
+            if "gemini_flash_lite" in self.providers:
+                order.extend(["gemini_flash_lite", "cerebras", "groq", "modal_glm"])
+            else:
+                order.extend(["gemini", "cerebras", "groq", "modal_glm"])
+        elif task in {"learn", "summary"}:
             order.extend(["gemini", "gemini_flash_lite", "modal_glm", "cerebras", "groq"])
+        elif task in {"ask", "relations"}:
+            order.extend(["gemini_flash_lite", "gemini", "modal_glm", "cerebras", "groq"])
         order.extend(["gemini", "gemini_flash_lite", "modal_glm", "cerebras", "groq"])
         seen: set[str] = set()
         ordered = [name for name in order if not (name in seen or seen.add(name))]
         return [name for name in ordered if not self._provider_is_cooling_down(name)]
+
+    def _preferred_text_provider(self, *, task: str, heavy: bool) -> str:
+        # The owner's daily budget reserves Gemini 3 Flash for high-value
+        # learning/summarization; routine asks use Flash Lite first.
+        if task in {"learn", "summary"} and "gemini" in self.providers:
+            return "gemini"
+        if "gemini_flash_lite" in self.providers:
+            return "gemini_flash_lite"
+        if "gemini" in self.providers:
+            return "gemini"
+        return "modal_glm" if heavy else "cerebras"
 
     async def _complete_json_with_retries(
         self,

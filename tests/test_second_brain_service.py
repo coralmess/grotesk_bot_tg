@@ -22,7 +22,7 @@ class FakeAI:
         self.enrich_calls: list[str] = []
         self.enrich_with_relations_calls: list[tuple[str, int]] = []
         self.relation_calls = 0
-        self.ask_calls: list[tuple[str, str, bool]] = []
+        self.ask_calls: list[tuple[str, str, bool, str]] = []
 
     async def enrich_capture(self, text: str, *, image_bytes=None, preferred_provider=None, allow_web=False):
         self.enrich_calls.append(text)
@@ -73,7 +73,7 @@ class FakeAI:
         return enrichment, related
 
     async def ask(self, question: str, *, context: str, heavy: bool = True, **kwargs):
-        self.ask_calls.append((question, context, heavy))
+        self.ask_calls.append((question, context, heavy, str(kwargs.get("task") or "ask")))
         if "learning session" in question.lower():
             return type("Result", (), {"text": "Lesson body with examples, answers, and scored next steps.", "provider": "fake"})()
         return type("Result", (), {"text": "Use the collected knife notes.", "provider": "fake"})()
@@ -266,6 +266,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("Daily Second Brain Digest", digest)
             self.assertTrue((Path(tmp) / "2-Areas" / "Daily Reviews" / "2026-05-13 - Daily Second Brain Digest.md").exists())
+            self.assertEqual(service.ai.ask_calls[-1][3], "summary")
 
     async def test_vault_health_reports_weak_and_orphan_notes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -306,6 +307,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             review_path = Path(tmp) / "2-Areas" / "Vault Reviews" / "2026-05-13 - Vault Consolidation.md"
             self.assertTrue(review_path.exists())
             self.assertIn("Vault Consolidation", review_path.read_text(encoding="utf-8"))
+            self.assertEqual(ai.ask_calls[-1][3], "summary")
 
     async def test_learn_creates_linked_learning_note_from_note_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -324,6 +326,7 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("flashcards", ai.ask_calls[-1][0].lower())
             self.assertIn("practice exercise", ai.ask_calls[-1][0].lower())
             self.assertIn("two real-life application examples", ai.ask_calls[-1][0].lower())
+            self.assertEqual(ai.ask_calls[-1][3], "learn")
             self.assertIn("Learning", lesson.note.title)
             self.assertTrue(lesson.note.path.exists())
             body = lesson.note.path.read_text(encoding="utf-8")

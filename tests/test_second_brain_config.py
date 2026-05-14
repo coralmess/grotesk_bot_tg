@@ -33,6 +33,8 @@ class SecondBrainConfigTests(unittest.TestCase):
             self.assertEqual(orchestrator.providers["gemini_flash_lite"].model, "gemini-3.1-flash-lite")
             self.assertEqual(orchestrator.providers["gemini"].base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
             self.assertEqual(orchestrator.providers["gemini_flash_lite"].base_url, "https://generativelanguage.googleapis.com/v1beta/openai")
+            self.assertEqual(orchestrator.provider_daily_limits["gemini"], 20)
+            self.assertEqual(orchestrator.provider_daily_limits["gemini_flash_lite"], 500)
 
 
 if __name__ == "__main__":
