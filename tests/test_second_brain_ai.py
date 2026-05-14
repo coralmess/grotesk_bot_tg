@@ -532,8 +532,7 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["reasoning_effort"], "high")
         self.assertEqual(payload["temperature"], 0)
-        self.assertEqual(payload["response_format"]["type"], "json_schema")
-        self.assertEqual(payload["response_format"]["json_schema"]["name"], "second_brain_enrich_response")
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
 
     async def test_provider_omits_reasoning_effort_by_default(self) -> None:
         provider = OpenAICompatibleProvider(
@@ -567,6 +566,11 @@ class AIOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(payload["title"], "Gemini note")
         self.assertEqual(payload["suggested_tags"], ["#ai"])
+
+    async def test_json_parser_strips_gemma_thought_blocks_before_json(self) -> None:
+        payload = _parse_json_object('<thought>I should classify this.</thought>\n{"title": "Gemma note"}')
+
+        self.assertEqual(payload["title"], "Gemma note")
 
     async def test_json_parser_marks_unrecoverable_json_as_invalid_json(self) -> None:
         with self.assertRaises(InvalidAIJSONError) as ctx:

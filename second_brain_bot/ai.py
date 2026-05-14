@@ -222,9 +222,10 @@ class OpenAICompatibleProvider:
             "max_tokens": max_tokens,
         }
         if json_mode and self.name in GOOGLE_HOSTED_PROVIDER_NAMES:
-            # Gemini's OpenAI-compatible endpoint supports response_format; use
-            # it for Google-hosted JSON tasks instead of relying on prompt text.
-            payload["response_format"] = _json_response_format_for_task(task)
+            # The OpenAI-compatible Gemini endpoint reliably honors json_object
+            # for Flash Lite; full json_schema can spend too much hidden
+            # thinking budget and still fall back to free-form text.
+            payload["response_format"] = {"type": "json_object"}
         if self.reasoning_effort:
             # Gemini's OpenAI-compatible API maps reasoning_effort to thinking_level;
             # keep it provider-specific so other OpenAI-compatible fallbacks are unchanged.
@@ -674,120 +675,6 @@ def _youtube_distillation_prompt(*, video_title: str, url: str, transcript: str)
         f"URL: {url}{truncated_note}\n\n"
         f"Clean transcript:\n{clipped}"
     )
-
-
-def _json_response_format_for_task(task: str) -> dict[str, Any]:
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": f"second_brain_{_schema_task_name(task)}_response",
-            "schema": _json_schema_for_task(task),
-        },
-    }
-
-
-def _schema_task_name(task: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_]+", "_", task or "json").strip("_") or "json"
-
-
-def _json_schema_for_task(task: str) -> dict[str, Any]:
-    if task == "relations":
-        return {
-            "type": "object",
-            "properties": {"related_notes": _relations_schema()},
-            "additionalProperties": True,
-        }
-    if task == "summary":
-        return {
-            "type": "object",
-            "properties": {
-                "themes": {
-                    "type": "array",
-                    "maxItems": 4,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string", "maxLength": 120},
-                            "theme": {"type": "string", "maxLength": 80},
-                            "summary": {"type": "string", "maxLength": 900},
-                            "key_ideas": _string_array_schema(max_items=8, max_length=220),
-                            "practical_takeaways": _string_array_schema(max_items=8, max_length=220),
-                            "real_life_examples": _string_array_schema(max_items=4, max_length=320),
-                            "questions": _string_array_schema(max_items=6, max_length=180),
-                            "scored_suggestions": _scored_suggestions_schema(max_items=6),
-                        },
-                        "additionalProperties": True,
-                    },
-                }
-            },
-            "additionalProperties": True,
-        }
-    return {
-        "type": "object",
-        "properties": {
-            "title": {"type": "string", "maxLength": 120},
-            "summary": {"type": "string", "maxLength": 700},
-            "polished_text": {"type": "string", "maxLength": 1800},
-            "suggested_folder": {"type": "string", "maxLength": 40},
-            "suggested_tags": _string_array_schema(max_items=6, max_length=40),
-            "entities": _string_array_schema(max_items=12, max_length=80),
-            "aliases": _string_array_schema(max_items=6, max_length=80),
-            "note_type": {"type": "string", "maxLength": 40},
-            "note_status": {"type": "string", "maxLength": 40},
-            "parent_moc": {"type": "string", "maxLength": 100},
-            "moc_category": {"type": "string", "maxLength": 80},
-            "moc_description": {"type": "string", "maxLength": 220},
-            "related_links": _string_array_schema(max_items=8, max_length=100),
-            "action_items": _string_array_schema(max_items=8, max_length=180),
-            "questions": _string_array_schema(max_items=6, max_length=180),
-            "enrichment_notes": _string_array_schema(max_items=8, max_length=220),
-            "scored_suggestions": _scored_suggestions_schema(max_items=8),
-            "estimated_completion_time": {"type": "string", "maxLength": 80},
-            "verification_pending": {"type": "boolean"},
-            "related_notes": _relations_schema(),
-        },
-        "additionalProperties": True,
-    }
-
-
-def _string_array_schema(*, max_items: int, max_length: int) -> dict[str, Any]:
-    return {
-        "type": "array",
-        "maxItems": max_items,
-        "items": {"type": "string", "maxLength": max_length},
-    }
-
-
-def _scored_suggestions_schema(*, max_items: int) -> dict[str, Any]:
-    return {
-        "type": "array",
-        "maxItems": max_items,
-        "items": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "maxLength": 120},
-                "score": {"type": "integer", "minimum": 1, "maximum": 100},
-                "reason": {"type": "string", "maxLength": 220},
-            },
-            "additionalProperties": True,
-        },
-    }
-
-
-def _relations_schema() -> dict[str, Any]:
-    return {
-        "type": "array",
-        "maxItems": 8,
-        "items": {
-            "type": "object",
-            "properties": {
-                "note_id": {"type": "string", "maxLength": 80},
-                "reason": {"type": "string", "maxLength": 220},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            },
-            "additionalProperties": True,
-        },
-    }
 
 
 def _youtube_themes_from_payload(
@@ -1292,6 +1179,7 @@ def _telegram_plaintext_markdown(text: str) -> str:
 def _strip_thinking(text: str) -> str:
     text = str(text or "")
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.S)
+    text = re.sub(r"<thought>.*?</thought>", "", text, flags=re.IGNORECASE | re.S)
     text = re.sub(r"<analysis>.*?</analysis>", "", text, flags=re.IGNORECASE | re.S)
     return text
 
