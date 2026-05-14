@@ -58,6 +58,11 @@ TASK_SYSTEM_INSTRUCTIONS = {
         SECOND_BRAIN_SYSTEM_INSTRUCTIONS
         + "\n\nTask: judging relationships between notes. Link only genuinely related notes and prefer precise reasons over broad topic overlap."
     ),
+    "summary": (
+        SECOND_BRAIN_SYSTEM_INSTRUCTIONS
+        + "\n\nTask: distilling long material into accurate, compact, useful notes. Preserve uncertainty, avoid unsupported claims, "
+        "and produce practical structure that is easy to save and review."
+    ),
 }
 
 JSON_SYSTEM_INSTRUCTIONS = (
@@ -97,6 +102,18 @@ class AIEnrichment:
     estimated_completion_time: str = ""
     provider: str = "local_fallback"
     verification_pending: bool = False
+
+
+@dataclass(frozen=True)
+class YouTubeThemeDistillation:
+    title: str
+    theme: str = ""
+    summary: str = ""
+    key_ideas: list[str] = field(default_factory=list)
+    practical_takeaways: list[str] = field(default_factory=list)
+    real_life_examples: list[str] = field(default_factory=list)
+    questions: list[str] = field(default_factory=list)
+    scored_suggestions: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -340,6 +357,37 @@ class AIOrchestrator:
                 LOGGER.warning("Second Brain AI provider failed for relation judging: %s", name)
                 continue
         return local_relation_suggestions(note_text, candidates)
+
+    async def distill_youtube_transcript(
+        self,
+        *,
+        video_title: str,
+        url: str,
+        transcript: str,
+    ) -> tuple[list[YouTubeThemeDistillation], str]:
+        prompt = _youtube_distillation_prompt(video_title=video_title, url=url, transcript=transcript)
+        preferred = self._preferred_text_provider(task="summary", heavy=True)
+        for name in self._route(preferred_provider=preferred, task="summary"):
+            provider = self.providers.get(name)
+            if provider is None:
+                continue
+            try:
+                async with self._provider_lock:
+                    result = await self._complete_json_with_retries(
+                        name,
+                        provider,
+                        task="summary",
+                        prompt=prompt,
+                        max_tokens=2600,
+                    )
+                self._record_provider_success(name)
+                themes = _youtube_themes_from_payload(result.payload, fallback_title=video_title, fallback_text=transcript)
+                return themes, result.provider
+            except Exception:
+                self._record_provider_failure(name)
+                LOGGER.warning("Second Brain AI provider failed for YouTube distillation: %s", name)
+                continue
+        return [_local_youtube_theme(video_title, transcript)], "local_fallback"
 
     async def ask(self, question: str, *, context: str, heavy: bool = True, task: str = "ask") -> ProviderResult:
         prompt = (
@@ -593,6 +641,70 @@ def _relations_prompt(note_text: str, candidates: list[SearchResult]) -> str:
         "Return JSON {\"related_notes\": [{\"note_id\": str, \"reason\": str, \"confidence\": 0..1}]}. "
         "Only include notes with confidence >= 0.55.\n\n"
         f"New note:\n{note_text[:4000]}\n\nCandidates:\n{json.dumps(packed, ensure_ascii=False)}"
+    )
+
+
+def _youtube_distillation_prompt(*, video_title: str, url: str, transcript: str) -> str:
+    # The full transcript is saved separately; the model gets a bounded excerpt
+    # so one long video cannot spend the whole free-tier context budget.
+    clipped = transcript[:32000]
+    truncated_note = "\n\nTranscript was clipped for the model; the clean full transcript is still saved separately." if len(transcript) > len(clipped) else ""
+    return (
+        "Distill this YouTube transcript into 1 to 4 separate Obsidian notes by theme. "
+        "Return only valid JSON with this schema: "
+        '{"themes":[{"title":"Specific searchable note title","theme":"Theme name","summary":"Compact summary",'
+        '"key_ideas":["idea"],"practical_takeaways":["takeaway"],"real_life_examples":["example"],'
+        '"questions":["question"],"scored_suggestions":[{"title":"suggestion","score":90,"reason":"why"}]}]}. '
+        "Use accurate, specific titles. Do not invent facts outside the transcript. "
+        "If the transcript has one coherent topic, return one theme. "
+        "If it has multiple independent themes, return multiple theme notes.\n\n"
+        f"Video title: {video_title}\n"
+        f"URL: {url}{truncated_note}\n\n"
+        f"Clean transcript:\n{clipped}"
+    )
+
+
+def _youtube_themes_from_payload(
+    payload: dict[str, Any],
+    *,
+    fallback_title: str,
+    fallback_text: str,
+) -> list[YouTubeThemeDistillation]:
+    raw_themes = payload.get("themes")
+    if not isinstance(raw_themes, list):
+        return [_local_youtube_theme(fallback_title, fallback_text)]
+    themes: list[YouTubeThemeDistillation] = []
+    for raw in raw_themes[:4]:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or raw.get("name") or "").strip()
+        if not title:
+            continue
+        themes.append(
+            YouTubeThemeDistillation(
+                title=title[:120],
+                theme=str(raw.get("theme") or "").strip(),
+                summary=str(raw.get("summary") or "").strip(),
+                key_ideas=_string_list(raw.get("key_ideas")),
+                practical_takeaways=_string_list(raw.get("practical_takeaways") or raw.get("takeaways")),
+                real_life_examples=_string_list(raw.get("real_life_examples") or raw.get("examples")),
+                questions=_string_list(raw.get("questions")),
+                scored_suggestions=_scored_suggestions(raw.get("scored_suggestions") or raw.get("suggestions")),
+            )
+        )
+    return themes or [_local_youtube_theme(fallback_title, fallback_text)]
+
+
+def _local_youtube_theme(video_title: str, transcript: str) -> YouTubeThemeDistillation:
+    return YouTubeThemeDistillation(
+        title=f"{video_title} - Key Ideas",
+        theme="Key Ideas",
+        summary=_truncate_clean(transcript, 700),
+        key_ideas=[_truncate_clean(transcript, 240)] if transcript.strip() else [],
+        practical_takeaways=[],
+        real_life_examples=[],
+        questions=[],
+        scored_suggestions=[],
     )
 
 

@@ -5,6 +5,7 @@ from second_brain_bot.bot import (
     AI_RETRY_INTERVAL_SEC,
     SecondBrainTelegramBot,
     _format_capture_confirmation,
+    _format_youtube_capture_confirmation,
     _format_learning_result,
     _format_note_preview_html,
     _format_vault_results,
@@ -141,6 +142,45 @@ class SecondBrainBotTests(unittest.TestCase):
 
         self.assertIn("Todo List -> Purchase Tasks -> Selection of a Quality Water Bottle", text)
         self.assertIn("(Gemini)", text)
+
+    def test_youtube_capture_confirmation_lists_transcript_and_theme_notes(self) -> None:
+        transcript = type(
+            "Note",
+            (),
+            {
+                "note_id": "yt-source",
+                "path": "3-Resources/YouTube/Decision Making Video - Clean Transcript.md",
+                "provider": "youtube_transcript",
+            },
+        )()
+        theme = type(
+            "Note",
+            (),
+            {
+                "note_id": "yt-theme",
+                "path": "3-Resources/YouTube/Decision Making Lessons from YouTube Video.md",
+                "provider": "gemini_flash_lite",
+            },
+        )()
+        result = type(
+            "YouTubeResult",
+            (),
+            {
+                "transcript_note": transcript,
+                "theme_notes": [theme],
+                "transcript_status": "complete",
+                "provider": "gemini_flash_lite",
+            },
+        )()
+
+        text = _format_youtube_capture_confirmation(result)
+
+        self.assertIn("Memorized YouTube transcript", text)
+        self.assertIn("Resources -> YouTube -> Decision Making Video - Clean Transcript", text)
+        self.assertIn("Distilled notes", text)
+        self.assertIn("Decision Making Lessons from YouTube Video", text)
+        self.assertIn("yt-source", text)
+        self.assertIn("(Gemini Flash Lite)", text)
 
     def test_learning_result_formats_flashcard_answers_as_telegram_spoilers(self) -> None:
         note = type(

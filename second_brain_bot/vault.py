@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from second_brain_bot.ai import AIEnrichment, RelatedNoteSuggestion
+from second_brain_bot.ai import AIEnrichment, RelatedNoteSuggestion, YouTubeThemeDistillation
 
 PARA_FOLDERS = (
     "1-Projects",
@@ -355,6 +355,135 @@ class SecondBrainVault:
         self._record_state(note_id, path, title=catalog.title, status=catalog.status)
         return NoteFile(note_id=note_id, title=catalog.title, path=path, status=catalog.status, provider=provider)
 
+    def write_youtube_transcript_note(
+        self,
+        *,
+        video_title: str,
+        video_id: str,
+        url: str,
+        language: str,
+        transcript_text: str,
+        status: str = "complete",
+        error: str = "",
+        telegram_message_id: int | None = None,
+    ) -> NoteFile:
+        note_id = safe_note_id()
+        title = sanitize_filename(f"{video_title or 'YouTube Video'} - Clean Transcript", max_length=96)
+        catalog = CatalogPlan(
+            title=title,
+            folder="3-Resources",
+            category="YouTube",
+            parent_moc="YouTube Learning MOC",
+            aliases=[title, video_title, video_id],
+            tags=["#youtube", "#transcript", "#learning"],
+            note_type="Concept",
+            status="Reference",
+            moc_description="Indexes YouTube transcripts and distilled learning notes saved into the vault.",
+            related_links=[],
+        )
+        path = self._unique_note_path(catalog.folder, catalog.category, f"{catalog.title}.md")
+        metadata = {
+            "aliases": catalog.aliases,
+            "tags": catalog.tags,
+            "type": catalog.note_type,
+            "status": catalog.status,
+            "capture_type": "youtube",
+            "transcript_status": status,
+            "youtube_video_id": video_id,
+            "youtube_url": url,
+            "language": language,
+            "telegram_message_id": telegram_message_id or "",
+            "date_created": utc_now_iso()[:10],
+        }
+        body = "\n".join(
+            [
+                f"# {catalog.title}",
+                "",
+                "Parent: [[YouTube Learning MOC]]",
+                "",
+                "## Source",
+                f"- URL: {url}",
+                f"- Video ID: {video_id}",
+                f"- Language: {language or 'unknown'}",
+                f"- Status: {status}",
+                *([f"- Error: {error}"] if error else []),
+                "",
+                "## Clean Transcript",
+                transcript_text.strip() or "_Transcript unavailable._",
+                "",
+            ]
+        )
+        self._write_note(path, metadata, body)
+        self._ensure_moc(catalog, note_title=catalog.title)
+        self._record_state(note_id, path, title=catalog.title, status=catalog.status)
+        return NoteFile(note_id=note_id, title=catalog.title, path=path, status=catalog.status, provider="youtube_transcript")
+
+    def write_youtube_theme_note(
+        self,
+        *,
+        source_title: str,
+        source_path: str,
+        theme: YouTubeThemeDistillation,
+        provider: str,
+    ) -> NoteFile:
+        note_id = safe_note_id()
+        title = sanitize_filename(theme.title, max_length=96)
+        catalog = CatalogPlan(
+            title=title,
+            folder="3-Resources",
+            category="YouTube",
+            parent_moc="YouTube Learning MOC",
+            aliases=[title, theme.theme, source_title],
+            tags=["#youtube", "#distillation", "#learning"],
+            note_type="Concept",
+            status="Reference",
+            moc_description="Indexes YouTube transcripts and distilled learning notes saved into the vault.",
+            related_links=[source_title],
+        )
+        path = self._unique_note_path(catalog.folder, catalog.category, f"{catalog.title}.md")
+        metadata = {
+            "aliases": catalog.aliases,
+            "tags": catalog.tags,
+            "type": catalog.note_type,
+            "status": catalog.status,
+            "ai_provider": provider,
+            "source_note": source_path,
+            "date_created": utc_now_iso()[:10],
+        }
+        body_parts = [
+            f"# {catalog.title}",
+            "",
+            "Parent: [[YouTube Learning MOC]]",
+            f"Related: [[{source_title}]]",
+            "",
+            "## Source Transcript",
+            f"- [[{source_title}]]",
+            f"- Path: {source_path}",
+            "",
+            "## Theme",
+            theme.theme or title,
+            "",
+            "## Executive Summary",
+            theme.summary or "No summary was generated.",
+            "",
+        ]
+        _extend_bullets(body_parts, "## Key Ideas", theme.key_ideas)
+        _extend_bullets(body_parts, "## Practical Takeaways", theme.practical_takeaways)
+        _extend_bullets(body_parts, "## Real-Life Examples", theme.real_life_examples)
+        _extend_bullets(body_parts, "## Questions", theme.questions)
+        if theme.scored_suggestions:
+            body_parts.extend(["## Scored Suggestions"])
+            for item in theme.scored_suggestions:
+                line = f"- {item.get('title', '')} (Score: {item.get('score', '')}/100)"
+                if item.get("reason"):
+                    line += f" - {item['reason']}"
+                body_parts.append(line)
+            body_parts.append("")
+        self._write_note(path, metadata, "\n".join(body_parts).rstrip() + "\n")
+        self._ensure_moc(catalog, note_title=catalog.title)
+        self._record_state(note_id, path, title=catalog.title, status=catalog.status)
+        return NoteFile(note_id=note_id, title=catalog.title, path=path, status=catalog.status, provider=provider)
+
     def note_counts(self) -> dict[str, int]:
         state = self._load_state()
         counts = {"total": 0, "Active": 0, "Incubating": 0, "Completed": 0, "Reference": 0, "needs_manual_review": 0}
@@ -601,6 +730,14 @@ def _render_related_notes(related_notes: list[RelatedNoteSuggestion]) -> str:
     for item in related_notes:
         lines.append(f"- [[{item.title}]] - {item.reason} ({item.confidence:.2f})")
     return "\n".join(lines) + "\n"
+
+
+def _extend_bullets(parts: list[str], heading: str, values: list[str]) -> None:
+    if not values:
+        return
+    parts.append(heading)
+    parts.extend(f"- {item}" for item in values if str(item).strip())
+    parts.append("")
 
 
 def _catalog_plan(capture: CaptureInput, enrichment: AIEnrichment | None) -> CatalogPlan:

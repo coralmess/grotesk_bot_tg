@@ -3,10 +3,11 @@ import unittest
 from pathlib import Path
 
 from helpers.analytics_events import AnalyticsSink
-from second_brain_bot.ai import AIEnrichment, RelatedNoteSuggestion
+from second_brain_bot.ai import AIEnrichment, RelatedNoteSuggestion, YouTubeThemeDistillation
 from second_brain_bot.models import NoteRecord, RelationRecord
 from second_brain_bot.service import SecondBrainService
 from second_brain_bot.vault import CaptureInput
+from second_brain_bot.youtube import YouTubeTranscript
 
 
 def make_test_service(tmp: str, ai) -> SecondBrainService:
@@ -77,6 +78,50 @@ class FakeAI:
         if "learning session" in question.lower():
             return type("Result", (), {"text": "Lesson body with examples, answers, and scored next steps.", "provider": "fake"})()
         return type("Result", (), {"text": "Use the collected knife notes.", "provider": "fake"})()
+
+    async def distill_youtube_transcript(self, *, video_title: str, url: str, transcript: str):
+        self.ask_calls.append((f"youtube:{video_title}", transcript, True, "summary"))
+        return [
+            YouTubeThemeDistillation(
+                title="Decision Making Lessons from YouTube Video",
+                theme="Decision Making",
+                summary="The transcript explains how to make better decisions.",
+                key_ideas=["Use a decision journal", "Separate signal from noise"],
+                practical_takeaways=["Write down the reason before acting"],
+                real_life_examples=["Before buying an ETF, write the thesis and risk."],
+                questions=["Which decision can be reviewed this week?"],
+                scored_suggestions=[{"title": "Create a decision journal", "score": 92, "reason": "Makes reasoning auditable."}],
+            ),
+            YouTubeThemeDistillation(
+                title="Learning System from YouTube Video",
+                theme="Learning",
+                summary="The transcript describes active recall.",
+                key_ideas=["Recall beats rereading"],
+                practical_takeaways=["Turn notes into questions"],
+                real_life_examples=["After watching a lecture, write five questions from memory."],
+                questions=["What should be reviewed tomorrow?"],
+                scored_suggestions=[{"title": "Use spaced repetition", "score": 88, "reason": "Improves retention."}],
+            ),
+        ], "fake"
+
+
+class FakeYouTubeFetcher:
+    def __init__(self, transcript: YouTubeTranscript | None = None, error: Exception | None = None) -> None:
+        self.transcript = transcript or YouTubeTranscript(
+            video_id="dQw4w9WgXcQ",
+            url="https://youtu.be/dQw4w9WgXcQ",
+            title="Decision Making Video",
+            language="en",
+            text="Intro\n\nBetter decisions need a decision journal.",
+        )
+        self.error = error
+        self.calls: list[str] = []
+
+    async def fetch(self, url: str) -> YouTubeTranscript:
+        self.calls.append(url)
+        if self.error:
+            raise self.error
+        return self.transcript
 
 
 class RetryAI:
@@ -333,6 +378,44 @@ class SecondBrainServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Related: [[Knife Brand - Purchase Research Note]]", body)
             self.assertIn("Lesson body with examples, answers, and scored next steps.", body)
             self.assertIsNotNone(service.index.get_note(lesson.note.note_id))
+
+    async def test_capture_youtube_url_writes_transcript_and_theme_notes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ai = FakeAI()
+            fetcher = FakeYouTubeFetcher()
+            service = make_test_service(tmp, ai)
+            service.youtube_fetcher = fetcher
+
+            result = await service.capture_youtube_url("https://youtu.be/dQw4w9WgXcQ", telegram_message_id=10)
+
+            self.assertEqual(result.transcript_note.provider, "youtube_transcript")
+            self.assertEqual(len(result.theme_notes), 2)
+            transcript_body = result.transcript_note.path.read_text(encoding="utf-8")
+            self.assertIn("## Clean Transcript", transcript_body)
+            self.assertIn("Better decisions need a decision journal.", transcript_body)
+            self.assertNotIn("00:00", transcript_body)
+            theme_body = result.theme_notes[0].path.read_text(encoding="utf-8")
+            self.assertIn("Parent: [[YouTube Learning MOC]]", theme_body)
+            self.assertIn("[[Decision Making Video - Clean Transcript]]", theme_body)
+            self.assertIn("Create a decision journal", theme_body)
+            self.assertIsNotNone(service.index.get_note(result.transcript_note.note_id))
+            self.assertIsNotNone(service.index.get_note(result.theme_notes[0].note_id))
+            self.assertEqual(fetcher.calls, ["https://youtu.be/dQw4w9WgXcQ"])
+            self.assertEqual(ai.ask_calls[-1][3], "summary")
+
+    async def test_capture_youtube_url_saves_unavailable_note_when_transcript_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = make_test_service(tmp, FakeAI())
+            service.youtube_fetcher = FakeYouTubeFetcher(error=RuntimeError("captions unavailable"))
+
+            result = await service.capture_youtube_url("https://youtu.be/dQw4w9WgXcQ", telegram_message_id=10)
+
+            self.assertEqual(result.theme_notes, [])
+            self.assertEqual(result.transcript_status, "transcript_unavailable")
+            body = result.transcript_note.path.read_text(encoding="utf-8")
+            self.assertIn("transcript_unavailable", body)
+            self.assertIn("captions unavailable", body)
+            self.assertIsNotNone(service.index.get_note(result.transcript_note.note_id))
 
     async def test_list_notes_returns_recent_notes_without_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

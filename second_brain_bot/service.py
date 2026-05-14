@@ -11,6 +11,7 @@ from second_brain_bot.index import SecondBrainIndex
 from second_brain_bot.models import ActionRecord, NoteRecord, RelationRecord
 from second_brain_bot.vault import CaptureInput, NoteFile, SecondBrainVault, utc_now_iso
 from second_brain_bot.web_lookup import fetch_public_page_summary, should_allow_public_lookup
+from second_brain_bot.youtube import PublicYouTubeTranscriptFetcher, extract_youtube_video_id
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,14 @@ class LearningResult:
     note: NoteFile
     text: str
     provider: str
+
+
+@dataclass(frozen=True)
+class YouTubeCaptureResult:
+    transcript_note: NoteFile
+    theme_notes: list[NoteFile]
+    transcript_status: str
+    provider: str = ""
 
 
 class SecondBrainService:
@@ -31,6 +40,7 @@ class SecondBrainService:
         self.vault = SecondBrainVault(vault_dir)
         self.index = SecondBrainIndex(Path(vault_dir) / ".second_brain_index.db")
         self.ai = ai
+        self.youtube_fetcher = PublicYouTubeTranscriptFetcher()
         self.analytics_sink = analytics_sink or AnalyticsSink()
         self.vault.migrate_legacy_vault()
         self._reindex_all_notes()
@@ -94,6 +104,70 @@ class SecondBrainService:
             created_at=created_at,
             attachment_relpath=relpath,
             capture_type="photo",
+        )
+
+    async def capture_youtube_url(
+        self,
+        url: str,
+        *,
+        telegram_message_id: int | None = None,
+    ) -> YouTubeCaptureResult:
+        try:
+            transcript = await self.youtube_fetcher.fetch(url)
+        except Exception as exc:
+            # Even failed transcript attempts become searchable vault records so
+            # the user can retry later without losing the original link.
+            note = self.vault.write_youtube_transcript_note(
+                video_title="YouTube Video",
+                video_id=extract_youtube_video_id(url),
+                url=url,
+                language="",
+                transcript_text="",
+                status="transcript_unavailable",
+                error=str(exc),
+                telegram_message_id=telegram_message_id,
+            )
+            self._index_note(note.note_id)
+            self._record_capture(capture_type="youtube", related_count=0, provider="transcript_unavailable")
+            return YouTubeCaptureResult(transcript_note=note, theme_notes=[], transcript_status="transcript_unavailable")
+
+        # Save the complete cleaned transcript before AI work so provider
+        # failures cannot destroy the main capture.
+        transcript_note = self.vault.write_youtube_transcript_note(
+            video_title=transcript.title,
+            video_id=transcript.video_id,
+            url=transcript.url,
+            language=transcript.language,
+            transcript_text=transcript.text,
+            telegram_message_id=telegram_message_id,
+        )
+        self._index_note(transcript_note.note_id)
+        provider = "local_fallback"
+        theme_notes: list[NoteFile] = []
+        try:
+            themes, provider = await self.ai.distill_youtube_transcript(
+                video_title=transcript.title,
+                url=transcript.url,
+                transcript=transcript.text,
+            )
+            source_path = transcript_note.path.relative_to(self.vault.root_dir).as_posix()
+            for theme in themes[:4]:
+                theme_note = self.vault.write_youtube_theme_note(
+                    source_title=transcript_note.title,
+                    source_path=source_path,
+                    theme=theme,
+                    provider=provider,
+                )
+                self._index_note(theme_note.note_id)
+                theme_notes.append(theme_note)
+        except Exception:
+            provider = "distillation_failed"
+        self._record_capture(capture_type="youtube", related_count=len(theme_notes), provider=provider)
+        return YouTubeCaptureResult(
+            transcript_note=transcript_note,
+            theme_notes=theme_notes,
+            transcript_status="complete",
+            provider=provider,
         )
 
     async def ask(self, question: str) -> str:

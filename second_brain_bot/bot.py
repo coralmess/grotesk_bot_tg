@@ -22,6 +22,7 @@ from helpers.service_health import build_service_health
 from second_brain_bot.ai import AIOrchestrator, OpenAICompatibleProvider, clean_note_excerpt
 from second_brain_bot.config import SecondBrainConfig, load_config
 from second_brain_bot.service import SecondBrainService
+from second_brain_bot.youtube import first_youtube_url
 
 LOGGER = logging.getLogger(__name__)
 AI_RETRY_INTERVAL_SEC = 7200
@@ -107,6 +108,12 @@ class SecondBrainTelegramBot:
                     telegram_message_id=message.message_id,
                 )
             else:
+                youtube_url = first_youtube_url(message.text or "")
+                if youtube_url:
+                    youtube_result = await self.service.capture_youtube_url(youtube_url, telegram_message_id=message.message_id)
+                    self.service_health.record_success("capture_youtube", note=f"id={youtube_result.transcript_note.note_id}")
+                    await _edit_or_reply(thinking, _format_youtube_capture_confirmation(youtube_result))
+                    return
                 note = await self.service.capture_text(message.text or "", telegram_message_id=message.message_id)
             self.service_health.record_success("capture", note=f"id={note.note_id}")
             await _edit_or_reply(thinking, _format_capture_confirmation(note))
@@ -638,6 +645,27 @@ def _format_capture_confirmation(note) -> str:
     provider = _display_provider_name(str(getattr(note, "provider", "") or ""))
     provider_suffix = f" ({provider})" if provider else ""
     return f"🧠 Memorized: {saved_path}\n📄 ID: {note_id}{provider_suffix}"
+
+
+def _format_youtube_capture_confirmation(result) -> str:
+    transcript_note = result.transcript_note
+    saved_path = _display_note_breadcrumb(getattr(transcript_note, "path", "") or getattr(transcript_note, "title", "saved note"))
+    provider = _display_provider_name(str(getattr(result, "provider", "") or getattr(transcript_note, "provider", "")))
+    provider_suffix = f" ({provider})" if provider else ""
+    lines = [
+        f"🧠 Memorized YouTube transcript: {saved_path}",
+        f"📄 ID: {getattr(transcript_note, 'note_id', '')}{provider_suffix}",
+    ]
+    if getattr(result, "transcript_status", "") != "complete":
+        lines.append("")
+        lines.append("Transcript unavailable. I saved the link and failure reason for review.")
+        return "\n".join(lines)
+    theme_notes = list(getattr(result, "theme_notes", []) or [])
+    if theme_notes:
+        lines.extend(["", "Distilled notes:"])
+        for note in theme_notes[:6]:
+            lines.append(f"- {_display_note_breadcrumb(getattr(note, 'path', '') or getattr(note, 'title', ''))}")
+    return "\n".join(lines)
 
 
 def _display_note_breadcrumb(path_value) -> str:
